@@ -440,7 +440,13 @@ export function LlmPanel({ llm, sparkId, llmPort, onRemovePort, className }: Llm
             </div>
           </div>
 
-          {llm?.backend === "vllm" && (
+          {llm?.backend === "vllm" &&
+            (llm.kvCacheUsage != null ||
+              llm.requestsRunning != null ||
+              llm.requestsWaiting != null ||
+              llm.ttftP95Seconds != null ||
+              llm.interTokenP95Seconds != null ||
+              llm.preemptionsTotal != null) && (
             <div className="grid grid-cols-2 gap-2 border-t border-border pt-3 sm:grid-cols-4">
               <div className="space-y-0.5">
                 <MetricInfoTip

@@ -211,6 +211,7 @@ app.patch("/api/sparks/:id", (req, res) => {
       success: true,
       spark: registry.toPublic(spark),
       hasPassword: registry.hasPassword(req.params.id),
+      hasLlmApiKey: registry.hasLlmApiKey(req.params.id),
     });
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -332,6 +333,24 @@ app.put("/api/sparks/:id/password", (req, res) => {
     const mon = monitors.get(req.params.id);
     if (mon) mon.updateConfig(registry.getSpark(req.params.id));
     res.json({ success: true, spark, hasPassword: true });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Save / update / clear LLM API key only (works while host is offline)
+// Empty string clears the key. The key is never returned; hasLlmApiKey reflects state.
+app.put("/api/sparks/:id/llm-api-key", (req, res) => {
+  try {
+    const key = req.body?.llmApiKey ?? req.body?.apiKey;
+    if (key == null) {
+      return res.status(400).json({ error: "llmApiKey is required (empty string to clear)" });
+    }
+    const spark = registry.setLlmApiKey(req.params.id, key);
+    // Refresh monitor so the probe picks up the new key
+    const mon = monitors.get(req.params.id);
+    if (mon) mon.updateConfig(registry.getSpark(req.params.id));
+    res.json({ success: true, spark, hasLlmApiKey: registry.hasLlmApiKey(req.params.id) });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }

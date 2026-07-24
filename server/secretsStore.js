@@ -13,7 +13,7 @@
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
-import { SPARKS_SECRETS_PATH, SECRETS_KEY_PATH } from "./config.js";
+import { SPARKS_SECRETS_PATH, SECRETS_KEY_PATH, SPARKS_LLM_KEYS_PATH } from "./config.js";
 import { atomicWrite } from "./util/atomicWrite.js";
 
 const ALGO = "aes-256-gcm";
@@ -109,80 +109,96 @@ function decrypt(blobB64, key) {
 }
 
 /**
- * Load sparkId -> password map from disk.
+ * Load an encrypted sparkId -> secret map from a given path.
+ * Shared by SSH password and LLM API key stores.
+ * @param {string} filePath
+ * @param {string} label — for log messages
  * @returns {Map<string, string>}
  */
-export function loadSecrets() {
+function loadEncryptedMap(filePath, label) {
   const map = new Map();
-  if (!fs.existsSync(SPARKS_SECRETS_PATH)) return map;
-
+  if (!fs.existsSync(filePath)) return map;
   try {
     const key = resolveKey();
-    const raw = fs.readFileSync(SPARKS_SECRETS_PATH, "utf8");
+    const raw = fs.readFileSync(filePath, "utf8");
     const data = JSON.parse(raw);
     const entries = data?.secrets || {};
     if (typeof entries !== "object" || entries === null) return map;
-
     let failed = 0;
     for (const [id, blob] of Object.entries(entries)) {
       if (!id || typeof blob !== "string") continue;
       try {
-        const pw = decrypt(blob, key);
-        if (pw) map.set(id, pw);
+        const val = decrypt(blob, key);
+        if (val) map.set(id, val);
       } catch {
         failed += 1;
-        console.error(
-          `[secretsStore] Failed to decrypt password for ${id} (wrong/missing key?)`
-        );
+        console.error(`[secretsStore] Failed to decrypt ${label} for ${id} (wrong/missing key?)`);
       }
     }
-    if (map.size > 0) {
-      console.log(`[secretsStore] Loaded ${map.size} SSH password(s) from encrypted store`);
-    }
-    if (failed > 0) {
-      console.warn(
-        `[secretsStore] ${failed} password(s) could not be decrypted — re-enter via Edit Spark`
-      );
-    }
+    if (map.size > 0) console.log(`[secretsStore] Loaded ${map.size} ${label}(s) from encrypted store`);
+    if (failed > 0) console.warn(`[secretsStore] ${failed} ${label}(s) could not be decrypted — re-enter via Edit Spark`);
   } catch (err) {
-    console.error(`[secretsStore] Failed to load secrets: ${err.message}`);
+    console.error(`[secretsStore] Failed to load ${label}: ${err.message}`);
   }
   return map;
 }
 
 /**
- * Persist sparkId -> password map (encrypted). Empty map removes the file.
- * Throws on failure so callers can surface errors to the UI.
- *
- * Encrypted file mode is 0o644 so bind-mounted volumes stay usable across
- * root/non-root container users (contents are ciphertext, not plaintext).
- *
- * @param {Map<string, string>} passwords
+ * Persist an encrypted sparkId -> secret map. Empty map removes the file.
+ * @param {string} filePath
+ * @param {Map<string, string>} secrets
+ * @param {string} label — for log messages
  */
-export function saveSecrets(passwords) {
-  if (!passwords || passwords.size === 0) {
-    // Only delete if we can read the path; never "clear" on a failed load
-    if (fs.existsSync(SPARKS_SECRETS_PATH)) {
+function saveEncryptedMap(filePath, secrets, label) {
+  if (!secrets || secrets.size === 0) {
+    if (fs.existsSync(filePath)) {
       try {
-        fs.accessSync(SPARKS_SECRETS_PATH, fs.constants.W_OK);
-        fs.unlinkSync(SPARKS_SECRETS_PATH);
+        fs.accessSync(filePath, fs.constants.W_OK);
+        fs.unlinkSync(filePath);
       } catch (err) {
-        throw new Error(
-          `Failed to clear secrets file (permission?): ${err.message}. ` +
-            `Run: sudo chown -R $(id -u):$(id -g) config/sparks-secrets.json`
-        );
+        throw new Error(`Failed to clear ${label} file (permission?): ${err.message}`);
       }
     }
     return;
   }
-
   const key = resolveKey();
-  const secrets = {};
-  for (const [id, pw] of passwords.entries()) {
-    if (pw) secrets[id] = encrypt(pw, key);
+  const entries = {};
+  for (const [id, val] of secrets.entries()) {
+    if (val) entries[id] = encrypt(val, key);
   }
+  const payload = JSON.stringify({ version: 1, secrets: entries }, null, 2) + "\n";
+  atomicWrite(filePath, payload, 0o644);
+  console.log(`[secretsStore] Saved ${Object.keys(entries).length} ${label}(s)`);
+}
 
-  const payload = JSON.stringify({ version: 1, secrets }, null, 2) + "\n";
-  atomicWrite(SPARKS_SECRETS_PATH, payload, 0o644);
-  console.log(`[secretsStore] Saved ${Object.keys(secrets).length} SSH password(s)`);
+/**
+ * Load sparkId -> password map from disk.
+ * @returns {Map<string, string>}
+ */
+export function loadSecrets() {
+  return loadEncryptedMap(SPARKS_SECRETS_PATH, "SSH password");
+}
+
+/**
+ * Persist sparkId -> password map (encrypted). Empty map removes the file.
+ * @param {Map<string, string>} passwords
+ */
+export function saveSecrets(passwords) {
+  saveEncryptedMap(SPARKS_SECRETS_PATH, passwords, "SSH password");
+}
+
+/**
+ * Load sparkId -> LLM API key map from disk.
+ * @returns {Map<string, string>}
+ */
+export function loadLlmKeys() {
+  return loadEncryptedMap(SPARKS_LLM_KEYS_PATH, "LLM API key");
+}
+
+/**
+ * Persist sparkId -> LLM API key map (encrypted). Empty map removes the file.
+ * @param {Map<string, string>} keys
+ */
+export function saveLlmKeys(keys) {
+  saveEncryptedMap(SPARKS_LLM_KEYS_PATH, keys, "LLM API key");
 }

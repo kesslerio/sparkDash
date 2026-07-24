@@ -15,6 +15,9 @@ export class LlmProbe {
     this.spark = spark;
     this.port = port;
     this.baseUrl = `http://${spark.lanIp}:${port}`;
+    // Optional bearer token for auth-gated OpenAI-compatible servers (e.g. LiteLLM proxy).
+    // Sent on /v1/models and /metrics when present.
+    this.apiKey = spark?.llmApiKey || null;
 
     // State
     this.backendType = null; // 'vllm' | 'llama.cpp' | 'sglang' | null
@@ -580,6 +583,7 @@ export class LlmProbe {
 
   // ─── HTTP helpers ────────────────────────────────────────
   async _fetch(url) {
-    return fetch(url, { signal: AbortSignal.timeout(LLM_PROBE_TIMEOUT_MS) });
+    const headers = this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : undefined;
+    return fetch(url, { headers, signal: AbortSignal.timeout(LLM_PROBE_TIMEOUT_MS) });
   }
 }

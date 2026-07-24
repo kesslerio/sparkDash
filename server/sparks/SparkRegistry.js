@@ -1,6 +1,6 @@
 import fs from "fs";
 import { SPARKS_JSON_PATH, LLM_PORT } from "../config.js";
-import { loadSecrets, saveSecrets } from "../secretsStore.js";
+import { loadSecrets, saveSecrets, loadLlmKeys, saveLlmKeys } from "../secretsStore.js";
 import { atomicWrite } from "../util/atomicWrite.js";
 import { isValidSparkId } from "../validate.js";
 
@@ -19,6 +19,8 @@ export class SparkRegistry {
     this._sparks = [];
     /** @type {Map<string, string>} sparkId -> password */
     this._passwords = new Map();
+    /** @type {Map<string, string>} sparkId -> LLM API key (LiteLLM proxy auth) */
+    this._llmKeys = new Map();
     this._listeners = new Set();
     this._load();
   }
@@ -52,7 +54,8 @@ export class SparkRegistry {
     if (ssh.auth === "pass" || this._passwords.has(spark.id)) {
       ssh.hasPassword = this._passwords.has(spark.id);
     }
-    return { ...spark, ssh };
+    const { llmApiKey, ...rest } = spark;
+    return { ...rest, ssh, hasLlmApiKey: this._llmKeys.has(spark.id) };
   }
 
   // ─── CRUD ───────────────────────────────────────────────
@@ -67,6 +70,7 @@ export class SparkRegistry {
     if (this.getSpark(config.id)) throw new Error(`Spark ${config.id} already exists`);
     const spark = this._normalizeConfig(config);
     this._storePassword(spark.id, config?.ssh?.password);
+    this._storeLlmKey(spark.id, config?.llmApiKey);
     this._sparks.push(spark);
     this._save();
     this._emit("add", this._withPassword(spark));
@@ -101,8 +105,7 @@ export class SparkRegistry {
     if (idx === -1) throw new Error(`Spark ${id} not found`);
 
     // Client cannot set detectedMacAddress (auto from enP7s7 only)
-    const { id: _ignoreId, detectedMacAddress: _ignoreDetected, ...rawUpdates } =
-      updates || {};
+    const { id: _ignoreId, detectedMacAddress: _ignoreDetected, llmApiKey: llmApiKeyUpdate, ...rawUpdates } = updates || {};
     const prev = this._sparks[idx];
 
     /** @type {Record<string, unknown>} */
@@ -135,6 +138,10 @@ export class SparkRegistry {
       delete mergedSsh.password;
     }
 
+    // Store LLM API key if provided (never persisted to sparks.json)
+    if (llmApiKeyUpdate !== undefined) {
+      this._storeLlmKey(id, llmApiKeyUpdate);
+    }
     const updated = {
       ...prev,
       ...safeUpdates,
@@ -155,6 +162,10 @@ export class SparkRegistry {
     if (this._passwords.has(id)) {
       this._passwords.delete(id);
       this._persistSecrets();
+    }
+    if (this._llmKeys.has(id)) {
+      this._llmKeys.delete(id);
+      this._persistLlmKeys();
     }
     this._save();
     this._emit("remove", removed);
@@ -202,6 +213,12 @@ export class SparkRegistry {
       console.error("[SparkRegistry] secrets load failed:", err.message);
       this._passwords = new Map();
     }
+    try {
+      this._llmKeys = loadLlmKeys();
+    } catch (err) {
+      console.error("[SparkRegistry] LLM keys load failed:", err.message);
+      this._llmKeys = new Map();
+    }
 
     try {
       const raw = fs.readFileSync(SPARKS_JSON_PATH, "utf-8");
@@ -238,12 +255,13 @@ export class SparkRegistry {
 
   _save() {
     try {
-      // Never write passwords to sparks.json
+      // Never write passwords or LLM API keys to sparks.json
       const sparks = this._sparks.map((s) => {
         const ssh = { ...(s.ssh || {}) };
         delete ssh.password;
         delete ssh.hasPassword;
-        return { ...s, ssh };
+        const { llmApiKey, hasLlmApiKey, ...rest } = s;
+        return { ...rest, ssh };
       });
       const data = { sparks };
       // Atomic write (tmp + rename) — a SIGKILL/power loss mid-write must not
@@ -305,12 +323,52 @@ export class SparkRegistry {
     }
   }
 
+  /**
+   * Store / clear LLM API key. Always persists to the encrypted LLM keys file.
+   * @param {string} id
+   * @param {string|null|undefined} key  null/undefined = no-op; "" = clear
+   */
+  _storeLlmKey(id, key) {
+    if (key == null) return;
+    if (key === "") {
+      if (this._llmKeys.has(id)) {
+        this._llmKeys.delete(id);
+        this._persistLlmKeys();
+      }
+      return;
+    }
+    this._llmKeys.set(id, String(key));
+    this._persistLlmKeys();
+  }
+
+  /** Public helper: set LLM API key without other config changes. */
+  setLlmApiKey(id, key) {
+    if (!this._sparks.find((s) => s.id === id)) throw new Error(`Spark ${id} not found`);
+    this._storeLlmKey(id, key);
+    return this.toPublic(this.getSpark(id));
+  }
+
+  hasLlmApiKey(id) {
+    return this._llmKeys.has(id);
+  }
+
+  _persistLlmKeys() {
+    try {
+      saveLlmKeys(this._llmKeys);
+    } catch (err) {
+      console.error("[SparkRegistry] Failed to persist LLM keys:", err.message);
+      throw err;
+    }
+  }
+
   _withPassword(spark) {
     if (!spark) return spark;
     const password = this._passwords.get(spark.id);
-    if (!password) return { ...spark, ssh: { ...spark.ssh } };
+    const llmApiKey = this._llmKeys.get(spark.id);
+    const withKey = llmApiKey ? { ...spark, llmApiKey } : { ...spark };
+    if (!password) return { ...withKey, ssh: { ...spark.ssh } };
     return {
-      ...spark,
+      ...withKey,
       ssh: { ...spark.ssh, password },
     };
   }

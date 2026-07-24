@@ -15,6 +15,9 @@ const SPARKS_SECRETS_PATH =
 /** AES key file (auto-generated if SPARKDASH_SECRETS_KEY unset). */
 const SECRETS_KEY_PATH =
   process.env.SECRETS_KEY_PATH || path.join(ROOT, "config", ".secrets-key");
+/** Encrypted LLM API key store (LiteLLM proxy auth; lives on config volume). */
+const SPARKS_LLM_KEYS_PATH =
+  process.env.SPARKS_LLM_KEYS_PATH || path.join(ROOT, "config", "sparks-llm-keys.json");
 
 // ─── LLM probe timeout ──────────────────────────────────
 const LLM_PROBE_TIMEOUT_MS = 3000;
@@ -73,9 +76,10 @@ const HOST_PATHS = {
 
 export {
   SPARKS_JSON_PATH,
+  SECRETS_KEY_PATH,
+  SPARKS_LLM_KEYS_PATH,
   GPU_MEMORY_JSON_PATH,
   SPARKS_SECRETS_PATH,
-  SECRETS_KEY_PATH,
   LLM_PROBE_TIMEOUT_MS,
   SSH_CONNECT_TIMEOUT,
   POLL_INTERVAL_GPU,

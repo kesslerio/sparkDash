@@ -29,14 +29,23 @@ export interface SparkConfig {
   /** HTTP ports for LLM servers on this Spark (default [8888]) */
   llmPorts?: number[];
   /**
+  /**
    * Cluster role for overview + worker behavior.
    * - head / standalone: local LLM API probed
    * - worker: no local API (LLM card hidden, ports not probed)
    */
   role?: SparkRole;
   /**
-   * Legacy/derived: true when role is worker. Prefer `role`.
-   * Kept so existing probe/card checks keep working.
+   * Optional bearer token for the LLM server's OpenAI-compatible API (e.g. a LiteLLM
+   * proxy fronting vLLM with `--api-key`). Request-only: never returned by GET/list.
+   * When set, the LLM probe sends `Authorization: Bearer <key>` on /v1/models and /metrics.
+   */
+  llmApiKey?: string;
+  /** Response-only: true when an LLM API key is held in the encrypted secrets store. */
+  hasLlmApiKey?: boolean;
+  /**
+   * When true, this Spark is a distributed-LLM worker: no local OpenAI API.
+   * The LLM card is hidden and LLM ports are not probed.
    */
   workerNode?: boolean;
   /**
