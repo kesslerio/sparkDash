@@ -208,6 +208,19 @@ export function LlmPanel({ llm, sparkId, llmPort, onRemovePort, className }: Llm
 
   return (
     <Panel
+      title={
+        <div className="flex items-center justify-between w-full">
+          <div className="flex items-center gap-2">
+            <BotIcon className="h-4 w-4 text-primary" />
+            <span>LLM Server</span>
+            {llm?.isWedged && (
+              <span className="rounded bg-rose-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-rose-400 border border-rose-500/30 animate-pulse">
+                {llm.gpuSpinLock ? "CUDA SPIN-LOCK" : "ENGINE WEDGED"}
+              </span>
+            )}
+          </div>
+        </div>
+      }
       title="LLM"
       accent={available}
       icon={<BotIcon />}

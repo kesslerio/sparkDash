@@ -205,6 +205,9 @@ export interface LlmMetrics {
    * Does not claim process bind address.
    */
   posture?: LlmPosture | null;
+  isWedged?: boolean;
+  syntheticTtftMs?: number | null;
+  gpuSpinLock?: boolean;
   error: string | null;
 }
 

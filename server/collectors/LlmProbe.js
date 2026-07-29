@@ -58,6 +58,9 @@ export class LlmProbe {
     this.itlP95Seconds = null;
     /** Speculative/MTP acceptance rate 0–1 (accepted/drafted). */
     this.mtpAcceptanceRate = null;
+    this.isWedged = false;
+    this.syntheticTtftMs = null;
+    this._lastSyntheticProbeAt = 0;
 
     this._consecutiveFailures = 0;
     this._lastDetectAt = 0;
@@ -322,6 +325,7 @@ export class LlmProbe {
       } catch {}
     }
 
+    if (!isSglang) await this._probeSyntheticChat();
     this.backendType = isSglang ? "sglang" : "vllm";
 
     return this._getSnapshot();
@@ -484,6 +488,7 @@ export class LlmProbe {
     return slot.n_prompt_tokens_processed || slot.n_prompt_tokens || 0;
   }
 
+<<<<<<< HEAD
   /**
    * Observational exposure hint from probe target + unauthenticated reachability.
    * Does not claim process bind address (0.0.0.0 vs interface).
@@ -524,6 +529,64 @@ export class LlmProbe {
         : `Unauthenticated · ${scopeWords[scope]} target (${host || "—"}). Based on the configured probe host, not the process bind address.`;
 
     return { level, auth, scope, label, detail };
+=======
+
+  async _probeSyntheticChat() {
+    if (!this.serverIsOpenAI || this.backendType !== "vllm") {
+      this.isWedged = false;
+      this.syntheticTtftMs = null;
+      return;
+    }
+    if (Date.now() - this._lastSyntheticProbeAt < 60000) return;
+    this._lastSyntheticProbeAt = Date.now();
+
+    const startMs = Date.now();
+    try {
+      const res = await fetch(this.baseUrl + "/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: this.modelId || "default",
+          messages: [{ role: "user", content: "ping" }],
+          max_tokens: 1,
+          stream: true,
+        }),
+        signal: AbortSignal.timeout(10000),
+      });
+
+      if (!res.ok) {
+        this.isWedged = true;
+        this.syntheticTtftMs = null;
+        return;
+      }
+
+      const reader = res.body?.getReader();
+      if (!reader) {
+        this.isWedged = true;
+        this.syntheticTtftMs = null;
+        return;
+      }
+
+      const { value } = await reader.read();
+      reader.cancel();
+
+      if (value && value.length > 0) {
+        this.isWedged = false;
+        this.syntheticTtftMs = Date.now() - startMs;
+      } else {
+        this.isWedged = true;
+        this.syntheticTtftMs = null;
+      }
+    } catch {
+      this.isWedged = true;
+      this.syntheticTtftMs = null;
+    }
+  }
+
+  _checkGpuSpinLock() {
+    const running = this.requestsRunning ?? 0;
+    return running > 0 && this.generationTps < 0.5 && this.isWedged;
+>>>>>>> eada666 (feat: synthetic chat probe and CUDA spin-lock wedged engine detection)
   }
 
   _getSnapshot() {
@@ -550,6 +613,9 @@ export class LlmProbe {
       itlP95Seconds: this.itlP95Seconds,
       mtpAcceptanceRate: this.mtpAcceptanceRate,
       posture: this._buildPosture(),
+      isWedged: this.isWedged ?? false,
+      syntheticTtftMs: this.syntheticTtftMs ?? null,
+      gpuSpinLock: this._checkGpuSpinLock(),
       error: this.error,
     };
   }
@@ -577,6 +643,9 @@ export class LlmProbe {
       itlP95Seconds: null,
       mtpAcceptanceRate: null,
       posture: this._buildPosture(),
+      isWedged: false,
+      syntheticTtftMs: null,
+      gpuSpinLock: false,
       error: this.error,
     };
   }
