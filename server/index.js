@@ -582,6 +582,7 @@ app.post("/api/sparks/:id/llm/bench", (req, res) => {
       concurrencies: req.body?.concurrencies,
       maxTokens: req.body?.maxTokens,
       debug: benchDebug,
+      apiKey: spark.llmApiKey || null,
       sampleHardware:
         benchDebug && monitor
           ? async () => {
@@ -739,6 +740,7 @@ app.post("/api/sparks/:id/llm/showcase", (req, res) => {
       thinking: req.body?.thinking,
       promptType: req.body?.promptType,
       prompts: req.body?.prompts,
+      apiKey: spark.llmApiKey || null,
     });
     res.status(202).json(result);
   } catch (err) {

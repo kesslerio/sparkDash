@@ -280,6 +280,7 @@ export async function pollServerGenerationRates(
  * - collectContent: accumulate full visible text (showcase)
  * - onDelta: live callback `{ text?, answer?, reasoning?, tokenCount, tFirst, tLast, … }`
  * - retryOnThinking400: if HTTP 400 and body had thinking flags, retry once stripped
+ * - apiKey: optional LiteLLM / OpenAI-compatible key (Bearer). Same source as LlmProbe.
  */
 export async function runStreamingRequest(
   url,
@@ -290,12 +291,14 @@ export async function runStreamingRequest(
     collectContent = false,
     onDelta = null,
     retryOnThinking400 = false,
+    apiKey = null,
   } = {}
 ) {
   const result = await runStreamingRequestOnce(url, body, signal, {
     debug,
     collectContent,
     onDelta,
+    apiKey,
   });
 
   if (
@@ -311,6 +314,7 @@ export async function runStreamingRequest(
       debug,
       collectContent,
       onDelta,
+      apiKey,
     });
   }
 
@@ -327,7 +331,7 @@ async function runStreamingRequestOnce(
   url,
   body,
   signal,
-  { debug = false, collectContent = false, onDelta = null } = {}
+  { debug = false, collectContent = false, onDelta = null, apiKey = null } = {}
 ) {
   const t0 = performance.now();
   /** @type {number | null} */
@@ -357,12 +361,15 @@ async function runStreamingRequestOnce(
   const deltaCb = typeof onDelta === "function" ? onDelta : null;
 
   try {
+    const headers = {
+      "Content-Type": "application/json",
+      Accept: "text/event-stream",
+    };
+    if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+
     const response = await fetch(url, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "text/event-stream",
-      },
+      headers,
       body: JSON.stringify(body),
       signal,
     });
