@@ -45,10 +45,19 @@ export function sleep(ms, signal) {
   });
 }
 
-function llmAuthHeaders(apiKey, extra = {}) {
+/** Bearer header policy for every OpenAI-compatible fetch from sparkDash. */
+export function llmAuthHeaders(apiKey, extra = {}) {
   const headers = { ...extra };
   if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
   return headers;
+}
+
+/** Opaque LLM HTTP target. Managers pass this through; they do not spell Bearer. */
+export function llmTarget(lanIp, port, apiKey) {
+  return {
+    baseUrl: `http://${lanIp}:${port}`,
+    apiKey: apiKey || null,
+  };
 }
 
 /**

@@ -17,6 +17,7 @@ import {
   DECODE_BENCH_DEFAULTS,
 } from "./collectors/DecodeBench.js";
 import { showcaseManager } from "./collectors/ShowcaseManager.js";
+import { llmTarget } from "./collectors/LlmStreaming.js";
 
 dotenv.config();
 
@@ -579,13 +580,12 @@ app.post("/api/sparks/:id/llm/bench", (req, res) => {
     const benchDebug = Boolean(getSettings().benchDebugTraces);
     const job = decodeBenchManager.start({
       sparkId: spark.id,
-      lanIp: spark.lanIp,
+      target: llmTarget(spark.lanIp, port, spark.llmApiKey),
       port,
       modelId,
       concurrencies: req.body?.concurrencies,
       maxTokens: req.body?.maxTokens,
       debug: benchDebug,
-      apiKey: spark.llmApiKey || null,
       sampleHardware:
         benchDebug && monitor
           ? async () => {
@@ -735,7 +735,7 @@ app.post("/api/sparks/:id/llm/showcase", (req, res) => {
   try {
     const result = showcaseManager.start({
       sparkId: spark.id,
-      lanIp: spark.lanIp,
+      target: llmTarget(spark.lanIp, port, spark.llmApiKey),
       port,
       modelId,
       maxTokens: req.body?.maxTokens,
@@ -743,7 +743,6 @@ app.post("/api/sparks/:id/llm/showcase", (req, res) => {
       thinking: req.body?.thinking,
       promptType: req.body?.promptType,
       prompts: req.body?.prompts,
-      apiKey: spark.llmApiKey || null,
     });
     res.status(202).json(result);
   } catch (err) {

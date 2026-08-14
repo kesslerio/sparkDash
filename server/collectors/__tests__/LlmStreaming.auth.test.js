@@ -6,9 +6,21 @@
 import { test } from "node:test";
 import { strict as assert } from "node:assert";
 import {
+  llmAuthHeaders,
+  llmTarget,
   readServerGenerationTokens,
   runStreamingRequest,
 } from "../LlmStreaming.js";
+
+test("llmTarget carries baseUrl and omits empty keys", () => {
+  assert.deepEqual(llmTarget("192.168.4.10", 4000, "k"), {
+    baseUrl: "http://192.168.4.10:4000",
+    apiKey: "k",
+  });
+  assert.equal(llmTarget("127.0.0.1", 8888, null).apiKey, null);
+  assert.equal(llmAuthHeaders("k").Authorization, "Bearer k");
+  assert.equal(llmAuthHeaders(null).Authorization, undefined);
+});
 
 function sseOkResponse() {
   return new Response("data: [DONE]\n\n", {

@@ -215,16 +215,15 @@ function streamPublicResult(r, index, prompt, reqMeta, debug = false) {
 }
 
 async function runConcurrencyWave({
-  baseUrl,
+  target,
   modelId,
   concurrency,
   maxTokens,
   abortSignal,
   sampleHardware = null,
   debug = false,
-  apiKey = null,
 }) {
-  const url = `${baseUrl}/v1/chat/completions`;
+  const url = `${target.baseUrl}/v1/chat/completions`;
   const prompts = pickDistinctPrompts(concurrency);
   const reqMeta = { url, modelId, maxTokens };
 
@@ -272,7 +271,7 @@ async function runConcurrencyWave({
     return runStreamingRequest(url, body, ctrl.signal, {
       debug,
       retryOnThinking400: true,
-      apiKey,
+      apiKey: target.apiKey,
     }).finally(() => {
       clearTimeout(timeout);
       if (abortSignal) abortSignal.removeEventListener("abort", onParentAbort);
@@ -499,27 +498,25 @@ export class DecodeBenchManager {
   /**
    * @param {{
    *   sparkId: string,
-   *   lanIp: string,
+   *   target: { baseUrl: string, apiKey?: string | null },
    *   port: number,
    *   modelId: string | null,
    *   concurrencies: number[],
    *   maxTokens?: number,
    *   debug?: boolean,
    *   sampleHardware?: (() => Promise<object | null> | object | null) | null,
-   *   apiKey?: string | null,
    * }} opts
    */
   start(opts) {
     const {
       sparkId,
-      lanIp,
+      target,
       port,
       modelId,
       concurrencies: rawConc,
       maxTokens: rawMax,
       debug = false,
       sampleHardware = null,
-      apiKey = null,
     } = opts;
 
     if (this.activeBySpark.has(sparkId)) {
@@ -550,6 +547,11 @@ export class DecodeBenchManager {
       err.status = 400;
       throw err;
     }
+    if (!target?.baseUrl) {
+      const err = new Error("LLM target is required");
+      err.status = 400;
+      throw err;
+    }
 
     const debugOn = Boolean(debug);
     const benchId = randomUUID();
@@ -577,7 +579,7 @@ export class DecodeBenchManager {
       error: null,
       _abort: abort,
       _debug: debugOn,
-      _apiKey: apiKey || null,
+      _target: target,
       _sampleHardware:
         debugOn && typeof sampleHardware === "function" ? sampleHardware : null,
     };
@@ -586,7 +588,7 @@ export class DecodeBenchManager {
     this.activeBySpark.set(sparkId, benchId);
 
     // Fire and forget — client polls GET
-    this._runJob(job, lanIp).catch(() => {
+    this._runJob(job).catch(() => {
       /* errors recorded on job */
     });
 
@@ -603,8 +605,7 @@ export class DecodeBenchManager {
     return publicJob(job);
   }
 
-  async _runJob(job, lanIp) {
-    const baseUrl = `http://${lanIp}:${job.config.port}`;
+  async _runJob(job) {
     const debug = Boolean(job._debug);
     try {
       for (const c of job.config.concurrencies) {
@@ -619,14 +620,13 @@ export class DecodeBenchManager {
         job.progress.message = `Running concurrency ${c}…`;
 
         const wave = await runConcurrencyWave({
-          baseUrl,
+          target: job._target,
           modelId: job.config.modelId,
           concurrency: c,
           maxTokens: job.config.maxTokens,
           abortSignal: job._abort.signal,
           sampleHardware: job._sampleHardware,
           debug,
-          apiKey: job._apiKey,
         });
 
         if (job._abort.signal.aborted) {
