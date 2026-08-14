@@ -45,15 +45,23 @@ export function sleep(ms, signal) {
   });
 }
 
+function llmAuthHeaders(apiKey, extra = {}) {
+  const headers = { ...extra };
+  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+  return headers;
+}
+
 /**
  * Read cumulative generation (output) token counters from the server —
  * same sources as LlmProbe live tok/s.
  * @returns {Promise<number | null>}
  */
-export async function readServerGenerationTokens(baseUrl) {
+export async function readServerGenerationTokens(baseUrl, apiKey = null) {
+  const headers = llmAuthHeaders(apiKey);
   // vLLM Prometheus
   try {
     const res = await fetch(`${baseUrl}/metrics`, {
+      headers,
       signal: AbortSignal.timeout(5_000),
     });
     if (res.ok) {
@@ -79,6 +87,7 @@ export async function readServerGenerationTokens(baseUrl) {
   // SGLang
   try {
     const res = await fetch(`${baseUrl}/get_server_info`, {
+      headers,
       signal: AbortSignal.timeout(5_000),
     });
     if (res.ok) {
@@ -208,7 +217,7 @@ export function stripThinkingFlags(body) {
  * @param {string} baseUrl
  * @param {AbortSignal} signal
  * @param {number} [intervalMs=400]
- * @param {{ onSample?: (info: { rate: number, median: number | null, max: number | null, samples: number }) => void }} [opts]
+ * @param {{ apiKey?: string | null, onSample?: (info: { rate: number, median: number | null, max: number | null, samples: number }) => void }} [opts]
  * @returns {Promise<{ median: number | null, mean: number | null, max: number | null, samples: number }>}
  */
 export async function pollServerGenerationRates(
@@ -219,7 +228,8 @@ export async function pollServerGenerationRates(
 ) {
   /** @type {number[]} */
   const rates = [];
-  let lastTokens = await readServerGenerationTokens(baseUrl);
+  const apiKey = opts.apiKey || null;
+  let lastTokens = await readServerGenerationTokens(baseUrl, apiKey);
   let lastT = performance.now();
   const onSample = typeof opts.onSample === "function" ? opts.onSample : null;
 
@@ -230,7 +240,7 @@ export async function pollServerGenerationRates(
       break;
     }
     const now = performance.now();
-    const tokens = await readServerGenerationTokens(baseUrl);
+    const tokens = await readServerGenerationTokens(baseUrl, apiKey);
     if (tokens == null || lastTokens == null) {
       if (tokens != null) {
         lastTokens = tokens;
@@ -361,11 +371,10 @@ async function runStreamingRequestOnce(
   const deltaCb = typeof onDelta === "function" ? onDelta : null;
 
   try {
-    const headers = {
+    const headers = llmAuthHeaders(apiKey, {
       "Content-Type": "application/json",
       Accept: "text/event-stream",
-    };
-    if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+    });
 
     const response = await fetch(url, {
       method: "POST",

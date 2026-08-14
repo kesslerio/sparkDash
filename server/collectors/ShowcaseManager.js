@@ -684,6 +684,7 @@ export class ShowcaseManager {
       ratePollAbort.signal,
       400,
       {
+        apiKey: session._apiKey,
         onSample: (info) => {
           if (session.status !== "running") return;
           session.serverGenerationTps = info.median;

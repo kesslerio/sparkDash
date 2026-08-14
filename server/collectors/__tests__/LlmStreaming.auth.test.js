@@ -5,7 +5,10 @@
  */
 import { test } from "node:test";
 import { strict as assert } from "node:assert";
-import { runStreamingRequest } from "../LlmStreaming.js";
+import {
+  readServerGenerationTokens,
+  runStreamingRequest,
+} from "../LlmStreaming.js";
 
 function sseOkResponse() {
   return new Response("data: [DONE]\n\n", {
@@ -50,6 +53,48 @@ test("runStreamingRequest omits Authorization when apiKey is absent (john-style 
       AbortSignal.timeout(2000),
       {}
     );
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].Authorization, undefined);
+  } finally {
+    globalThis.fetch = orig;
+  }
+});
+
+test("readServerGenerationTokens sends Authorization Bearer when apiKey is set", async () => {
+  const seen = [];
+  const orig = globalThis.fetch;
+  globalThis.fetch = async (_url, opts) => {
+    seen.push(opts?.headers || {});
+    return new Response("vllm:generation_tokens_total 12\n", {
+      status: 200,
+      headers: { "Content-Type": "text/plain" },
+    });
+  };
+  try {
+    const tokens = await readServerGenerationTokens(
+      "http://example.invalid",
+      "test-kalliope-key"
+    );
+    assert.equal(tokens, 12);
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].Authorization, "Bearer test-kalliope-key");
+  } finally {
+    globalThis.fetch = orig;
+  }
+});
+
+test("readServerGenerationTokens omits Authorization when apiKey is absent", async () => {
+  const seen = [];
+  const orig = globalThis.fetch;
+  globalThis.fetch = async (_url, opts) => {
+    seen.push(opts?.headers || {});
+    return new Response("vllm:generation_tokens_total 3\n", {
+      status: 200,
+      headers: { "Content-Type": "text/plain" },
+    });
+  };
+  try {
+    await readServerGenerationTokens("http://example.invalid");
     assert.equal(seen.length, 1);
     assert.equal(seen[0].Authorization, undefined);
   } finally {
