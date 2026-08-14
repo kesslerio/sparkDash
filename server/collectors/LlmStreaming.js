@@ -45,15 +45,32 @@ export function sleep(ms, signal) {
   });
 }
 
+/** Bearer header policy for every OpenAI-compatible fetch from sparkDash. */
+export function llmAuthHeaders(apiKey, extra = {}) {
+  const headers = { ...extra };
+  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+  return headers;
+}
+
+/** Opaque LLM HTTP target. Managers pass this through; they do not spell Bearer. */
+export function llmTarget(lanIp, port, apiKey) {
+  return {
+    baseUrl: `http://${lanIp}:${port}`,
+    apiKey: apiKey || null,
+  };
+}
+
 /**
  * Read cumulative generation (output) token counters from the server —
  * same sources as LlmProbe live tok/s.
  * @returns {Promise<number | null>}
  */
-export async function readServerGenerationTokens(baseUrl) {
+export async function readServerGenerationTokens(baseUrl, apiKey = null) {
+  const headers = llmAuthHeaders(apiKey);
   // vLLM Prometheus
   try {
     const res = await fetch(`${baseUrl}/metrics`, {
+      headers,
       signal: AbortSignal.timeout(5_000),
     });
     if (res.ok) {
@@ -79,6 +96,7 @@ export async function readServerGenerationTokens(baseUrl) {
   // SGLang
   try {
     const res = await fetch(`${baseUrl}/get_server_info`, {
+      headers,
       signal: AbortSignal.timeout(5_000),
     });
     if (res.ok) {
@@ -208,7 +226,7 @@ export function stripThinkingFlags(body) {
  * @param {string} baseUrl
  * @param {AbortSignal} signal
  * @param {number} [intervalMs=400]
- * @param {{ onSample?: (info: { rate: number, median: number | null, max: number | null, samples: number }) => void }} [opts]
+ * @param {{ apiKey?: string | null, onSample?: (info: { rate: number, median: number | null, max: number | null, samples: number }) => void }} [opts]
  * @returns {Promise<{ median: number | null, mean: number | null, max: number | null, samples: number }>}
  */
 export async function pollServerGenerationRates(
@@ -219,7 +237,8 @@ export async function pollServerGenerationRates(
 ) {
   /** @type {number[]} */
   const rates = [];
-  let lastTokens = await readServerGenerationTokens(baseUrl);
+  const apiKey = opts.apiKey || null;
+  let lastTokens = await readServerGenerationTokens(baseUrl, apiKey);
   let lastT = performance.now();
   const onSample = typeof opts.onSample === "function" ? opts.onSample : null;
 
@@ -230,7 +249,7 @@ export async function pollServerGenerationRates(
       break;
     }
     const now = performance.now();
-    const tokens = await readServerGenerationTokens(baseUrl);
+    const tokens = await readServerGenerationTokens(baseUrl, apiKey);
     if (tokens == null || lastTokens == null) {
       if (tokens != null) {
         lastTokens = tokens;
@@ -280,6 +299,7 @@ export async function pollServerGenerationRates(
  * - collectContent: accumulate full visible text (showcase)
  * - onDelta: live callback `{ text?, answer?, reasoning?, tokenCount, tFirst, tLast, … }`
  * - retryOnThinking400: if HTTP 400 and body had thinking flags, retry once stripped
+ * - apiKey: optional LiteLLM / OpenAI-compatible key (Bearer). Same source as LlmProbe.
  */
 export async function runStreamingRequest(
   url,
@@ -290,12 +310,14 @@ export async function runStreamingRequest(
     collectContent = false,
     onDelta = null,
     retryOnThinking400 = false,
+    apiKey = null,
   } = {}
 ) {
   const result = await runStreamingRequestOnce(url, body, signal, {
     debug,
     collectContent,
     onDelta,
+    apiKey,
   });
 
   if (
@@ -311,6 +333,7 @@ export async function runStreamingRequest(
       debug,
       collectContent,
       onDelta,
+      apiKey,
     });
   }
 
@@ -327,7 +350,7 @@ async function runStreamingRequestOnce(
   url,
   body,
   signal,
-  { debug = false, collectContent = false, onDelta = null } = {}
+  { debug = false, collectContent = false, onDelta = null, apiKey = null } = {}
 ) {
   const t0 = performance.now();
   /** @type {number | null} */
@@ -357,12 +380,14 @@ async function runStreamingRequestOnce(
   const deltaCb = typeof onDelta === "function" ? onDelta : null;
 
   try {
+    const headers = llmAuthHeaders(apiKey, {
+      "Content-Type": "application/json",
+      Accept: "text/event-stream",
+    });
+
     const response = await fetch(url, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "text/event-stream",
-      },
+      headers,
       body: JSON.stringify(body),
       signal,
     });

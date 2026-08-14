@@ -1,0 +1,115 @@
+/**
+ * Decode/showcase streaming must send the same Bearer key as LlmProbe.
+ * Without it, authenticated LiteLLM (mama :4000) returns HTTP 401 in ~20ms
+ * and sparkDash reports 0 tok/s / 0 streams.
+ */
+import { test } from "node:test";
+import { strict as assert } from "node:assert";
+import {
+  llmAuthHeaders,
+  llmTarget,
+  readServerGenerationTokens,
+  runStreamingRequest,
+} from "../LlmStreaming.js";
+
+test("llmTarget carries baseUrl and omits empty keys", () => {
+  assert.deepEqual(llmTarget("192.168.4.10", 4000, "k"), {
+    baseUrl: "http://192.168.4.10:4000",
+    apiKey: "k",
+  });
+  assert.equal(llmTarget("127.0.0.1", 8888, null).apiKey, null);
+  assert.equal(llmAuthHeaders("k").Authorization, "Bearer k");
+  assert.equal(llmAuthHeaders(null).Authorization, undefined);
+});
+
+function sseOkResponse() {
+  return new Response("data: [DONE]\n\n", {
+    status: 200,
+    headers: { "Content-Type": "text/event-stream" },
+  });
+}
+
+test("runStreamingRequest sends Authorization Bearer when apiKey is set", async () => {
+  const seen = [];
+  const orig = globalThis.fetch;
+  globalThis.fetch = async (_url, opts) => {
+    seen.push(opts?.headers || {});
+    return sseOkResponse();
+  };
+  try {
+    await runStreamingRequest(
+      "http://example.invalid/v1/chat/completions",
+      { model: "qwen3.6:35b-a3b", messages: [{ role: "user", content: "hi" }] },
+      AbortSignal.timeout(2000),
+      { apiKey: "test-kalliope-key" }
+    );
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].Authorization, "Bearer test-kalliope-key");
+    assert.equal(seen[0]["Content-Type"], "application/json");
+  } finally {
+    globalThis.fetch = orig;
+  }
+});
+
+test("runStreamingRequest omits Authorization when apiKey is absent (john-style open vLLM)", async () => {
+  const seen = [];
+  const orig = globalThis.fetch;
+  globalThis.fetch = async (_url, opts) => {
+    seen.push(opts?.headers || {});
+    return sseOkResponse();
+  };
+  try {
+    await runStreamingRequest(
+      "http://example.invalid/v1/chat/completions",
+      { model: "dspark", messages: [{ role: "user", content: "hi" }] },
+      AbortSignal.timeout(2000),
+      {}
+    );
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].Authorization, undefined);
+  } finally {
+    globalThis.fetch = orig;
+  }
+});
+
+test("readServerGenerationTokens sends Authorization Bearer when apiKey is set", async () => {
+  const seen = [];
+  const orig = globalThis.fetch;
+  globalThis.fetch = async (_url, opts) => {
+    seen.push(opts?.headers || {});
+    return new Response("vllm:generation_tokens_total 12\n", {
+      status: 200,
+      headers: { "Content-Type": "text/plain" },
+    });
+  };
+  try {
+    const tokens = await readServerGenerationTokens(
+      "http://example.invalid",
+      "test-kalliope-key"
+    );
+    assert.equal(tokens, 12);
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].Authorization, "Bearer test-kalliope-key");
+  } finally {
+    globalThis.fetch = orig;
+  }
+});
+
+test("readServerGenerationTokens omits Authorization when apiKey is absent", async () => {
+  const seen = [];
+  const orig = globalThis.fetch;
+  globalThis.fetch = async (_url, opts) => {
+    seen.push(opts?.headers || {});
+    return new Response("vllm:generation_tokens_total 3\n", {
+      status: 200,
+      headers: { "Content-Type": "text/plain" },
+    });
+  };
+  try {
+    await readServerGenerationTokens("http://example.invalid");
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].Authorization, undefined);
+  } finally {
+    globalThis.fetch = orig;
+  }
+});

@@ -316,7 +316,7 @@ export class ShowcaseManager {
   /**
    * @param {{
    *   sparkId: string,
-   *   lanIp: string,
+   *   target: { baseUrl: string, apiKey?: string | null },
    *   port: number,
    *   modelId?: string | null,
    *   maxTokens?: number,
@@ -329,7 +329,7 @@ export class ShowcaseManager {
   start(opts) {
     const {
       sparkId,
-      lanIp,
+      target,
       port,
       modelId = null,
       maxTokens: rawMax,
@@ -385,6 +385,11 @@ export class ShowcaseManager {
     const p = Number(port);
     if (!Number.isInteger(p) || p < 1 || p > 65535) {
       const err = new Error("Invalid LLM port");
+      err.status = 400;
+      throw err;
+    }
+    if (!target?.baseUrl) {
+      const err = new Error("LLM target is required");
       err.status = 400;
       throw err;
     }
@@ -448,7 +453,7 @@ export class ShowcaseManager {
       _abort: abort,
       _lastTouchAt: now,
       _contentCap: cap,
-      _lanIp: lanIp,
+      _target: target,
       _sentContentLengths: /** @type {number[]} */ (prompts.map(() => 0)),
       _sentReasoningLengths: /** @type {number[]} */ (prompts.map(() => 0)),
     };
@@ -668,7 +673,7 @@ export class ShowcaseManager {
   }
 
   async _runSession(session) {
-    const baseUrl = `http://${session._lanIp}:${session.port}`;
+    const baseUrl = session._target.baseUrl;
     const url = `${baseUrl}/v1/chat/completions`;
 
     const ratePollAbort = new AbortController();
@@ -681,6 +686,7 @@ export class ShowcaseManager {
       ratePollAbort.signal,
       400,
       {
+        apiKey: session._target.apiKey,
         onSample: (info) => {
           if (session.status !== "running") return;
           session.serverGenerationTps = info.median;
@@ -727,6 +733,7 @@ export class ShowcaseManager {
       return runStreamingRequest(url, body, ctrl.signal, {
         collectContent: true,
         retryOnThinking400: true,
+        apiKey: session._target.apiKey,
         onDelta: (info) => {
           if (session.status !== "running") return;
           this._appendParts(session, stream, {
@@ -752,6 +759,7 @@ export class ShowcaseManager {
               {
                 collectContent: true,
                 retryOnThinking400: true,
+                apiKey: session._target.apiKey,
                 onDelta: (info) => {
                   if (session.status !== "running") return;
                   this._appendParts(session, stream, {

@@ -17,6 +17,7 @@ import {
   DECODE_BENCH_DEFAULTS,
 } from "./collectors/DecodeBench.js";
 import { showcaseManager } from "./collectors/ShowcaseManager.js";
+import { llmTarget } from "./collectors/LlmStreaming.js";
 
 dotenv.config();
 
@@ -558,6 +559,9 @@ app.post("/api/sparks/:id/llm/bench", (req, res) => {
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     return res.status(400).json({ error: "Invalid port" });
   }
+  if (!ports.includes(port)) {
+    return res.status(400).json({ error: "port is not configured for this Spark" });
+  }
 
   // Resolve model id for this port from live snapshot when possible
   let modelId = req.body?.modelId || null;
@@ -576,7 +580,7 @@ app.post("/api/sparks/:id/llm/bench", (req, res) => {
     const benchDebug = Boolean(getSettings().benchDebugTraces);
     const job = decodeBenchManager.start({
       sparkId: spark.id,
-      lanIp: spark.lanIp,
+      target: llmTarget(spark.lanIp, port, spark.llmApiKey),
       port,
       modelId,
       concurrencies: req.body?.concurrencies,
@@ -731,7 +735,7 @@ app.post("/api/sparks/:id/llm/showcase", (req, res) => {
   try {
     const result = showcaseManager.start({
       sparkId: spark.id,
-      lanIp: spark.lanIp,
+      target: llmTarget(spark.lanIp, port, spark.llmApiKey),
       port,
       modelId,
       maxTokens: req.body?.maxTokens,
