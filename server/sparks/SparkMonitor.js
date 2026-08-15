@@ -24,6 +24,7 @@ function sameConversationRows(a, b) {
     const left = a[i];
     const right = b[i];
     if (
+      left.id !== right.id ||
       left.source !== right.source ||
       left.handle !== right.handle ||
       left.badge !== right.badge ||

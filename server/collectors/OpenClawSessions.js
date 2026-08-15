@@ -55,11 +55,20 @@ function mapOneSession(session, providers) {
   if (!handle) return null;
   return {
     source: "openclaw",
+    id: sessionIdentity(session) || handle,
     handle,
     originHost: origin.host,
     originPort: origin.port,
     midTurn: midTurnOf(session),
   };
+}
+
+function sessionIdentity(session) {
+  for (const field of ["key", "sessionId", "id"]) {
+    const value = session[field];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return "";
 }
 
 function sessionHandle(session) {
@@ -123,16 +132,11 @@ async function readOptional(readFile, filePath) {
 }
 
 function mergeSessionStores(stores) {
-  const arrays = [];
-  const maps = [];
+  const rows = [];
   for (const store of stores) {
-    if (Array.isArray(store)) arrays.push(store);
-    else if (store && typeof store === "object") maps.push(store);
+    rows.push(...normalizeSessions(store));
   }
-  if (arrays.length > 0) return arrays.flat();
-  if (maps.length === 1) return maps[0];
-  if (maps.length > 1) return Object.assign({}, ...maps);
-  return {};
+  return rows;
 }
 
 async function loadAgentSessionStores(dir, readFile, readDir) {
@@ -163,6 +167,7 @@ async function loadFromStateDir(attach, deps) {
     deps,
     deps.conventionalStateDir ?? conventionalStateDir("openclaw")
   );
+  if (!dir) return { sessions: [], providers: {} };
   const readFile = deps.readFile ?? defaultReadFile;
   const readDir = deps.readDir ?? defaultReadDir;
   const configRaw = await readOptional(readFile, path.join(dir, "openclaw.json"));

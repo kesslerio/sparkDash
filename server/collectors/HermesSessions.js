@@ -60,11 +60,21 @@ function mapOneSession(session, profileOrigin) {
   if (!handle) return null;
   return {
     source: "hermes",
+    id: sessionIdentity(session) || handle,
     handle,
     originHost: origin.host,
     originPort: origin.port,
     midTurn: midTurnOf(session),
   };
+}
+
+function sessionIdentity(session) {
+  for (const field of ["id", "session_id", "sessionId"]) {
+    const value = session[field];
+    if (typeof value === "string" && value.trim()) return value.trim();
+    if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  }
+  return "";
 }
 
 function sessionHandle(session) {
@@ -140,7 +150,7 @@ async function loadProfilesFromUrl(raw, fetchJson, token) {
   for (const suffix of ["/api/config", "/api/profile"]) {
     try {
       const payload = await fetchJson(`${base}${suffix}`, { token });
-      if (payload && typeof payload === "object") return payload;
+      if (profileBaseUrl(payload)) return payload;
     } catch {
       // optional profile/config
     }
@@ -154,6 +164,7 @@ async function loadFromStateDir(attach, deps) {
     deps,
     deps.conventionalStateDir ?? conventionalStateDir("hermes")
   );
+  if (!dir) return { sessions: [], profiles: {} };
   const readFile = deps.readFile ?? defaultReadFile;
   const [sessionsRaw, profiles] = await Promise.all([
     readFile(path.join(dir, "sessions.json")).then((raw) => JSON.parse(raw)),
@@ -166,7 +177,7 @@ async function loadProfilesFromDir(dir, readFile) {
   for (const name of PROFILE_FILES) {
     try {
       const raw = JSON.parse(await readFile(path.join(dir, name)));
-      if (raw && typeof raw === "object") return raw;
+      if (profileBaseUrl(raw)) return raw;
     } catch {
       // optional
     }

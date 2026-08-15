@@ -278,3 +278,42 @@ test("v1 sparks-secrets.json passwords still load after session-token field is a
   assert.equal(loadSecrets().size, 0);
   assert.equal(getPublicSessionSources().hermes.hasToken, true);
 });
+
+test("enabled state-dir requires a non-empty path", () => {
+  resetFiles();
+  assert.throws(
+    () =>
+      updateSessionSources({
+        openclaw: { enabled: true, mode: "state-dir", stateDir: "" },
+      }),
+    /state dir/i
+  );
+  const pub = updateSessionSources({
+    openclaw: { enabled: false, mode: "state-dir", stateDir: "" },
+  });
+  assert.equal(pub.openclaw.enabled, false);
+  assert.equal(pub.openclaw.mode, "state-dir");
+  assert.equal(pub.openclaw.stateDir, "");
+});
+
+test("token patch rolls back when session-sources.json cannot be saved", () => {
+  resetFiles();
+  updateSessionSources({
+    openclaw: { enabled: true, mode: "url", url: "http://127.0.0.1:18789", token: "keep-me" },
+  });
+  assert.equal(getPublicSessionSources().openclaw.hasToken, true);
+  fs.unlinkSync(sourcesPath);
+  fs.mkdirSync(sourcesPath);
+  try {
+    assert.throws(
+      () =>
+        updateSessionSources({
+          openclaw: { enabled: true, mode: "url", url: "http://192.168.4.10:18789" },
+        }),
+      /Failed to write|EISDIR|ENOTDIR/i
+    );
+    assert.equal(getPublicSessionSources().openclaw.hasToken, true);
+  } finally {
+    fs.rmSync(sourcesPath, { recursive: true, force: true });
+  }
+});

@@ -138,7 +138,7 @@ test("per-source catch: throwing source contributes [] and sibling still project
     ],
   });
   assert.deepEqual(result["spark-local"], [
-    { source: "hermes", handle: "agent-1", badge: "unknown", port: 8888 },
+    { id: "hermes:8888:agent-1", source: "hermes", handle: "agent-1", badge: "unknown", port: 8888 },
   ]);
 });
 
@@ -208,6 +208,20 @@ test("occupancy loop: disable during poll applies {} not the hung result", async
   });
   await loop.tick();
   assert.deepEqual(applied, [{}]);
+});
+
+test("occupancy loop: source URL change during poll discards the stale result", async () => {
+  const { loop, applied, setSources } = loopHarness({
+    poll: async () => {
+      setSources({
+        openclaw: { enabled: true, mode: "url", url: "http://127.0.0.1:9", stateDir: "" },
+        hermes: { enabled: false, mode: "local", url: "", stateDir: "" },
+      });
+      return { "spark-local": [{ source: "openclaw", handle: "stale", badge: "generating", port: 8888 }] };
+    },
+  });
+  await loop.tick();
+  assert.deepEqual(applied, []);
 });
 
 test("occupancy loop: stop clears the timer so later ticks are caller-driven only", async () => {

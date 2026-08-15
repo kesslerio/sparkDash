@@ -66,6 +66,7 @@ export function createOccupancyLoop({
 
   async function tick() {
     const sources = getSources();
+    const tokens = getTokens();
     if (!sourcesEnabled(sources)) {
       apply({});
       return;
@@ -76,10 +77,15 @@ export function createOccupancyLoop({
       const bySpark = await poll({
         sparks: getSparks(),
         sources,
-        tokens: getTokens(),
+        tokens,
       });
-      if (!sourcesEnabled(getSources())) {
+      const currentSources = getSources();
+      const currentTokens = getTokens();
+      if (!sourcesEnabled(currentSources)) {
         apply({});
+        return;
+      }
+      if (sourcesSnapshot(sources, tokens) !== sourcesSnapshot(currentSources, currentTokens)) {
         return;
       }
       apply(bySpark);
@@ -108,6 +114,23 @@ export function createOccupancyLoop({
 
 export function sourcesEnabled(sources) {
   return Boolean(sources?.openclaw?.enabled || sources?.hermes?.enabled);
+}
+
+function attachSnapshot(attach, token) {
+  return {
+    enabled: Boolean(attach?.enabled),
+    mode: attach?.mode ?? "",
+    url: attach?.url ?? "",
+    stateDir: attach?.stateDir ?? "",
+    token: token ?? "",
+  };
+}
+
+function sourcesSnapshot(sources, tokens = {}) {
+  return JSON.stringify({
+    openclaw: attachSnapshot(sources?.openclaw, tokens.openclaw),
+    hermes: attachSnapshot(sources?.hermes, tokens.hermes),
+  });
 }
 
 async function collectSafe(collect, attach, deps) {

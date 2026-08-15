@@ -33,6 +33,7 @@ function session(overrides = {}) {
 function expectedRow(overrides = {}) {
   return {
     source: "hermes",
+    id: "sess-1",
     handle: "Coding session",
     originHost: "127.0.0.1",
     originPort: 8888,
@@ -90,6 +91,7 @@ test("handle is title; preview is absent from the JSON row", () => {
   assert.equal(json.includes("preview"), false);
   assert.deepEqual(Object.keys(rows[0]).sort(), [
     "handle",
+    "id",
     "midTurn",
     "originHost",
     "originPort",
@@ -304,6 +306,54 @@ test("local mode reads conventional state dir; profile.json supplies base_url", 
   assert.ok(seen.some((p) => p.endsWith("config.json") || p.endsWith("profile.json")));
   assert.equal(rows[0].midTurn, "unknown");
   assert.equal(rows[0].originHost, "127.0.0.1");
+  assert.equal(rows[0].originPort, 8888);
+});
+
+test("config.json without a base URL continues to profile.json", async () => {
+  const dir = "/tmp/hermes-profile-fallback";
+  const { billing_base_url: _omit, ...rest } = session();
+  const files = {
+    [`${dir}/sessions.json`]: JSON.stringify({ sessions: [rest] }),
+    [`${dir}/config.json`]: JSON.stringify({ theme: "dark" }),
+    [`${dir}/profile.json`]: JSON.stringify(PROFILE),
+  };
+  const rows = await collectHermesSessions(
+    { enabled: true, mode: "state-dir", stateDir: dir },
+    {
+      readFile: async (filePath) => {
+        if (!(filePath in files)) {
+          const err = new Error(`ENOENT ${filePath}`);
+          err.code = "ENOENT";
+          throw err;
+        }
+        return files[filePath];
+      },
+    }
+  );
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].originHost, "127.0.0.1");
+  assert.equal(rows[0].originPort, 8888);
+});
+
+test("url /api/config without a base URL continues to /api/profile", async () => {
+  const { billing_base_url: _omit, ...rest } = session();
+  const seen = [];
+  const rows = await collectHermesSessions(
+    { enabled: true, mode: "url", url: "http://127.0.0.1:9119" },
+    {
+      fetchJson: async (url) => {
+        seen.push(String(url));
+        if (String(url).includes("/api/sessions")) return { sessions: [rest] };
+        if (String(url).includes("/api/config")) return { status: "ok" };
+        if (String(url).includes("/api/profile")) return PROFILE;
+        const err = new Error("HTTP 404");
+        err.status = 404;
+        throw err;
+      },
+    }
+  );
+  assert.ok(seen.includes("http://127.0.0.1:9119/api/config"));
+  assert.ok(seen.includes("http://127.0.0.1:9119/api/profile"));
   assert.equal(rows[0].originPort, 8888);
 });
 

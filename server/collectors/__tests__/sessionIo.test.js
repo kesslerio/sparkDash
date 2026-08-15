@@ -60,6 +60,12 @@ test("resolveStateDir remaps state-dir paths the same as local conventional path
   assert.equal(fromLocal, "/host/root/opt/openclaw");
 });
 
+test("resolveStateDir does not fall back to conventional when state-dir is blank", () => {
+  const deps = { homedir: "/home/op", hostRoot: "", isReadable: () => true };
+  assert.equal(resolveStateDir({ mode: "state-dir", stateDir: "" }, deps, "~/.openclaw"), "");
+  assert.equal(resolveStateDir({ mode: "state-dir" }, deps, "/opt/openclaw"), "");
+});
+
 test("defaultFetchJson rejects file: protocol, userinfo, and disallowed IPs before fetch", async () => {
   await assert.rejects(
     () => defaultFetchJson("file:///etc/passwd"),

@@ -32,6 +32,7 @@ function session(overrides = {}) {
 function expectedRow(overrides = {}) {
   return {
     source: "openclaw",
+    id: "agent:main:telegram:topic:1",
     handle: "World Cup",
     originHost: "127.0.0.1",
     originPort: 4000,
@@ -92,6 +93,7 @@ test("handle comes from label, never lastMessage / preview / transcript", () => 
   assert.equal(json.includes("full transcript"), false);
   assert.deepEqual(Object.keys(rows[0]).sort(), [
     "handle",
+    "id",
     "midTurn",
     "originHost",
     "originPort",
@@ -321,6 +323,42 @@ test("state-dir falls back to agents/*/sessions/sessions.json", async () => {
     }
   );
   assert.deepEqual(rows, [expectedRow({ midTurn: true })]);
+});
+
+test("mixed array-form and map-form agent stores are merged", async () => {
+  const dir = "/tmp/openclaw-mixed-stores";
+  const files = {
+    [`${dir}/openclaw.json`]: JSON.stringify({ models: { providers: SPARK_PROVIDERS } }),
+    [`${dir}/agents/main/sessions/sessions.json`]: JSON.stringify([
+      session({ key: "array-sess", label: "FromArray", hasActiveRun: true }),
+    ]),
+    [`${dir}/agents/work/sessions/sessions.json`]: JSON.stringify({
+      "map-sess": { modelProvider: "spark", label: "FromMap", hasActiveRun: false },
+    }),
+  };
+  const rows = await collectOpenClawSessions(
+    { enabled: true, mode: "state-dir", stateDir: dir },
+    {
+      readFile: async (filePath) => {
+        if (!(filePath in files)) {
+          const err = new Error(`ENOENT ${filePath}`);
+          err.code = "ENOENT";
+          throw err;
+        }
+        return files[filePath];
+      },
+      readDir: async (dirPath) => {
+        assert.equal(dirPath, `${dir}/agents`);
+        return ["main", "work"];
+      },
+    }
+  );
+  const byHandle = Object.fromEntries(rows.map((r) => [r.handle, r]));
+  assert.equal(rows.length, 2);
+  assert.equal(byHandle.FromArray.midTurn, true);
+  assert.equal(byHandle.FromArray.id, "array-sess");
+  assert.equal(byHandle.FromMap.midTurn, false);
+  assert.equal(byHandle.FromMap.id, "map-sess");
 });
 
 test("missing state files return [] not throw", async () => {

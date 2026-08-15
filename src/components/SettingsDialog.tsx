@@ -395,7 +395,9 @@ export function SettingsDialog({ open, onClose, onSaved }: SettingsDialogProps) 
                     onSource={(patch) => patchSource(id, patch)}
                     onToken={(value) => {
                       setTokenDrafts((prev) => ({ ...prev, [id]: value }));
-                      setClearTokens((prev) => ({ ...prev, [id]: false }));
+                      if (value) {
+                        setClearTokens((prev) => ({ ...prev, [id]: false }));
+                      }
                       setDirty(true);
                     }}
                     onClearToken={() => {

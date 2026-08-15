@@ -33,7 +33,7 @@ function projectSpark(rows, spark) {
     matched.push(toConversationRow(row, port));
   }
   matched.sort(compareRows);
-  return matched.slice(0, LIST_CAP);
+  return uniquifyIds(matched).slice(0, LIST_CAP);
 }
 
 function listenPorts(spark) {
@@ -63,12 +63,32 @@ function normalizeHost(value) {
 }
 
 function toConversationRow(row, port) {
+  const handle = String(row.handle ?? "");
+  const source = row.source;
+  const nativeId = String(row.id ?? "").trim();
   return {
-    source: row.source,
-    handle: String(row.handle ?? ""),
+    id: nativeId || `${source}:${port}:${handle}`,
+    source,
+    handle,
     badge: badgeFromMidTurn(row.midTurn),
     port,
   };
+}
+
+function uniquifyIds(rows) {
+  const used = new Set();
+  return rows.map((row) => {
+    let { id } = row;
+    if (!used.has(id)) {
+      used.add(id);
+      return row;
+    }
+    let n = 2;
+    while (used.has(`${id}:${n}`)) n += 1;
+    id = `${id}:${n}`;
+    used.add(id);
+    return { ...row, id };
+  });
 }
 
 function badgeFromMidTurn(midTurn) {
@@ -82,5 +102,5 @@ const BADGE_RANK = { generating: 0, unknown: 1, stalled: 2 };
 function compareRows(a, b) {
   const rank = (BADGE_RANK[a.badge] ?? 9) - (BADGE_RANK[b.badge] ?? 9);
   if (rank) return rank;
-  return a.source.localeCompare(b.source) || a.handle.localeCompare(b.handle) || a.port - b.port;
+  return a.source.localeCompare(b.source) || a.handle.localeCompare(b.handle) || a.port - b.port || a.id.localeCompare(b.id);
 }

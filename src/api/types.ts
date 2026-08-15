@@ -209,8 +209,9 @@ export interface SparkMetrics {
 export type ConversationSource = "openclaw" | "hermes";
 export type ConversationBadge = "generating" | "stalled" | "unknown";
 
-/** Occupancy row: handle + badge only. No transcripts or session files. */
+/** Occupancy row: handle + badge only. `id` is list identity, not a transcript. */
 export interface ConversationRow {
+  id: string;
   source: ConversationSource;
   handle: string;
   badge: ConversationBadge;

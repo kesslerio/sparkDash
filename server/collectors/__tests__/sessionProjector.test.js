@@ -39,12 +39,12 @@ test("AE1: mid-turn + origin match is generating; midTurn false is stalled", () 
   const sparks = [spark()];
   const generating = projectConversations([row({ handle: "chat-a", midTurn: true })], sparks);
   assert.deepEqual(rowsFor(generating, "spark-local"), [
-    { source: "openclaw", handle: "chat-a", badge: "generating", port: 8888 },
+    { id: "openclaw:8888:chat-a", source: "openclaw", handle: "chat-a", badge: "generating", port: 8888 },
   ]);
 
   const stalled = projectConversations([row({ handle: "chat-a", midTurn: false })], sparks);
   assert.deepEqual(rowsFor(stalled, "spark-local"), [
-    { source: "openclaw", handle: "chat-a", badge: "stalled", port: 8888 },
+    { id: "openclaw:8888:chat-a", source: "openclaw", handle: "chat-a", badge: "stalled", port: 8888 },
   ]);
 });
 
@@ -69,7 +69,7 @@ test("AE3: midTurn unknown is unknown, never generating", () => {
     [spark()]
   );
   assert.deepEqual(rowsFor(result, "spark-local"), [
-    { source: "openclaw", handle: "chat-u", badge: "unknown", port: 8888 },
+    { id: "openclaw:8888:chat-u", source: "openclaw", handle: "chat-u", badge: "unknown", port: 8888 },
   ]);
 });
 
@@ -106,7 +106,7 @@ test("two Sparks, same model id, different ports: row only on matching port", ()
   );
   assert.equal("spark-a" in result, false);
   assert.deepEqual(rowsFor(result, "spark-b"), [
-    { source: "openclaw", handle: "shared-model-chat", badge: "generating", port: 4001 },
+    { id: "openclaw:4001:shared-model-chat", source: "openclaw", handle: "shared-model-chat", badge: "generating", port: 4001 },
   ]);
 });
 
@@ -128,7 +128,7 @@ test("local Spark matches loopback origin; non-local Spark with other lanIp does
     [localSpark, remoteSpark]
   );
   assert.deepEqual(rowsFor(result, "spark-local"), [
-    { source: "openclaw", handle: "loopback-chat", badge: "generating", port: 8888 },
+    { id: "openclaw:8888:loopback-chat", source: "openclaw", handle: "loopback-chat", badge: "generating", port: 8888 },
   ]);
   assert.equal("spark-remote" in result, false);
 });
@@ -175,7 +175,7 @@ test("projected JSON has no Date.now-like changing field", () => {
   assert.equal(json1, jsonAgain);
   assert.equal(/\d{13}/.test(json1), false, "must not embed millisecond timestamps");
   for (const conversation of first["spark-local"]) {
-    assert.deepEqual(Object.keys(conversation).sort(), ["badge", "handle", "port", "source"]);
+    assert.deepEqual(Object.keys(conversation).sort(), ["badge", "handle", "id", "port", "source"]);
   }
 });
 
@@ -221,4 +221,20 @@ test("list is capped at 20; generating rows survive ahead of stalled siblings", 
   const keys = stalled.map((r) => `${r.source}\0${r.handle}\0${r.port}`);
   const sorted = [...keys].sort();
   assert.deepEqual(keys, sorted);
+});
+
+test("duplicate handles keep distinct ids from native session identity", () => {
+  const result = projectConversations(
+    [
+      row({ id: "sess-a", handle: "World Cup", midTurn: true }),
+      row({ id: "sess-b", handle: "World Cup", midTurn: false }),
+    ],
+    [spark()]
+  );
+  const list = rowsFor(result, "spark-local");
+  assert.deepEqual(
+    list.map((r) => r.id).sort(),
+    ["sess-a", "sess-b"]
+  );
+  assert.equal(list.every((r) => r.handle === "World Cup"), true);
 });

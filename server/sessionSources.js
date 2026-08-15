@@ -71,6 +71,9 @@ function originKey(url) {
 }
 
 function validateAttach(attach) {
+  if (attach.enabled && attach.mode === "state-dir" && !attach.stateDir) {
+    throw new Error("State dir is required");
+  }
   if (attach.mode === "state-dir" && attach.stateDir && /[\0\r\n]/.test(attach.stateDir)) {
     throw new Error("Invalid state dir");
   }
@@ -171,7 +174,25 @@ export function updateSessionSources(patch) {
     if (originKey(current[id].url) === originKey(next[id].url)) continue;
     tokens[id] = "";
   }
-  if (Object.keys(tokens).length > 0) patchSessionSourceTokens(tokens);
-  saveSessionSources(next);
+  const previousTokens = tokenSnapshot();
+  let tokensPatched = false;
+  try {
+    if (Object.keys(tokens).length > 0) {
+      patchSessionSourceTokens(tokens);
+      tokensPatched = true;
+    }
+    saveSessionSources(next);
+  } catch (err) {
+    if (tokensPatched) patchSessionSourceTokens(previousTokens);
+    throw err;
+  }
   return getPublicSessionSources();
+}
+
+function tokenSnapshot() {
+  const current = loadSessionSourceTokens();
+  /** @type {Record<string, string>} */
+  const out = {};
+  for (const id of SOURCE_IDS) out[id] = current[id] ?? "";
+  return out;
 }

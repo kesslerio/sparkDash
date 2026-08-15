@@ -58,7 +58,8 @@ export function remapHostRoot(expanded, deps = {}) {
 
 export function resolveStateDir(attach, deps, conventional) {
   const home = deps.homedir ?? os.homedir();
-  if (attach.mode === "state-dir" && attach.stateDir) {
+  if (attach.mode === "state-dir") {
+    if (!attach.stateDir) return "";
     return remapHostRoot(expandTilde(attach.stateDir, home), deps);
   }
   return remapHostRoot(expandTilde(String(conventional || ""), home), deps);
