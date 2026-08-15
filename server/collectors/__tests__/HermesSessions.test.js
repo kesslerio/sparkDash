@@ -80,6 +80,20 @@ test("status running is midTurn true; is_active is ignored", () => {
   assert.equal(rows[0].midTurn, true);
 });
 
+test("running true is midTurn true; is_active is still ignored", () => {
+  const rows = mapHermesSessions([
+    session({ is_active: false, running: true }),
+  ]);
+  assert.equal(rows[0].midTurn, true);
+});
+
+test("running false without status stays unknown, never stalled", () => {
+  const rows = mapHermesSessions([
+    session({ is_active: true, running: false }),
+  ]);
+  assert.equal(rows[0].midTurn, "unknown");
+});
+
 test("handle is title; preview is absent from the JSON row", () => {
   const rows = mapHermesSessions([
     session({

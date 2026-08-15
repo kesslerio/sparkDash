@@ -1,7 +1,8 @@
 /**
  * Hermes Agent conversation reader.
  * Projector input rows only: source, handle, origin, midTurn.
- * Recency is_active is never mid-turn. Never transcripts. Never throws.
+ * Recency is_active is never mid-turn. running:true or status working/running
+ * is mid-turn. Never transcripts. Never throws.
  *
  * Local/state-dir: sessions.json plus optional config.json or profile.json
  * (`model.base_url`). URL mode: GET /api/sessions. Native sqlite (state.db)
@@ -113,6 +114,7 @@ function sessionHandle(session) {
 
 function midTurnOf(session) {
   if (LIVE_STATUS.has(session.status)) return true;
+  if (session.running === true) return true;
   return "unknown";
 }
 
