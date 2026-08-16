@@ -69,7 +69,12 @@ export async function diagnoseOpenClawSessions(attach, deps = {}) {
     }
     const list = normalizeSessions(loaded.sessions);
     const rows = mapOpenClawSessions(loaded.sessions, loaded.providers);
-    return { status: "ok", found: list.length, mapped: rows.length, error: null };
+    return {
+      status: "ok",
+      found: list.length,
+      mapped: deps.countMapped?.(rows) ?? rows.length,
+      error: null,
+    };
   } catch (err) {
     return { status: "error", found: 0, mapped: 0, error: sanitizeProbeError(err) };
   }

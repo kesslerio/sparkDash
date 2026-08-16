@@ -101,4 +101,13 @@ test("sanitizeProbeError strips paths and maps auth / connect codes", () => {
 
   const html = new Error("Unexpected token '<', \"<!doctype \"... is not valid JSON");
   assert.equal(sanitizeProbeError(html), "Not a JSON session list");
+
+  const denied = new Error("EACCES: permission denied, open '/home/op/.hermes/sessions.json'");
+  denied.code = "EACCES";
+  assert.equal(sanitizeProbeError(denied), "Permission denied");
+  assert.equal(String(sanitizeProbeError(denied)).includes("/home/op"), false);
+
+  const mystery = new Error("ENOENT-looking path /secret/layout in a generic failure");
+  assert.equal(sanitizeProbeError(mystery), "Request failed");
+  assert.equal(String(sanitizeProbeError(mystery)).includes("/secret/"), false);
 });

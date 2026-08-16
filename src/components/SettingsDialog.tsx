@@ -98,32 +98,34 @@ export function SettingsDialog({ open, onClose, onSaved }: SettingsDialogProps) 
     let cancelled = false;
     setLoading(true);
     Promise.all([fetchSettings(), fetchSessionSources()])
-      .then(async ([s, sources]) => {
+      .then(([s, sources]) => {
         if (cancelled) return;
         setSettings(s);
         setSessionSources(sources);
         setCheckingSources(true);
-        try {
-          const result = await testSessionSources({
-            openclaw: {
-              enabled: sources.openclaw.enabled,
-              mode: sources.openclaw.mode,
-              url: sources.openclaw.url,
-              stateDir: sources.openclaw.stateDir,
-            },
-            hermes: {
-              enabled: sources.hermes.enabled,
-              mode: sources.hermes.mode,
-              url: sources.hermes.url,
-              stateDir: sources.hermes.stateDir,
-            },
+        testSessionSources({
+          openclaw: {
+            enabled: sources.openclaw.enabled,
+            mode: sources.openclaw.mode,
+            url: sources.openclaw.url,
+            stateDir: sources.openclaw.stateDir,
+          },
+          hermes: {
+            enabled: sources.hermes.enabled,
+            mode: sources.hermes.mode,
+            url: sources.hermes.url,
+            stateDir: sources.hermes.stateDir,
+          },
+        })
+          .then((result) => {
+            if (!cancelled) setSourceHealth(result);
+          })
+          .catch((err: unknown) => {
+            if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+          })
+          .finally(() => {
+            if (!cancelled) setCheckingSources(false);
           });
-          if (!cancelled) setSourceHealth(result);
-        } catch (err: unknown) {
-          if (!cancelled) setError(err instanceof Error ? err.message : String(err));
-        } finally {
-          if (!cancelled) setCheckingSources(false);
-        }
       })
       .catch((err: Error) => {
         if (!cancelled) setError(err.message);

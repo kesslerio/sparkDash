@@ -4,8 +4,9 @@
  */
 import { loadSessionSources, conventionalStateDir } from "../sessionSources.js";
 import { loadSessionSourceTokens } from "../secretsStore.js";
-import { collectOpenClawSessions, diagnoseOpenClawSessions } from "./OpenClawSessions.js";
-import { collectHermesSessions, diagnoseHermesSessions } from "./HermesSessions.js";
+import { diagnoseOpenClawSessions } from "./OpenClawSessions.js";
+import { diagnoseHermesSessions } from "./HermesSessions.js";
+import { parseBaseUrl } from "./sessionIo.js";
 import { projectConversations } from "./sessionProjector.js";
 
 const SOURCE_IDS = Object.freeze(["openclaw", "hermes"]);
@@ -21,29 +22,26 @@ export async function testSessionSources(body = {}, deps = {}) {
   const sparks = deps.getSparks?.() ?? [];
   const patch = body && typeof body === "object" ? body : {};
   const [openclaw, hermes] = await Promise.all([
-    probeOne("openclaw", saved.openclaw, storedTokens.openclaw, patch.openclaw, sparks),
-    probeOne("hermes", saved.hermes, storedTokens.hermes, patch.hermes, sparks),
+    probeOne("openclaw", saved.openclaw, storedTokens.openclaw, patch.openclaw, sparks, deps),
+    probeOne("hermes", saved.hermes, storedTokens.hermes, patch.hermes, sparks, deps),
   ]);
   return { openclaw, hermes };
 }
 
-async function probeOne(id, saved, storedToken, patch, sparks) {
+async function probeOne(id, saved, storedToken, patch, sparks, deps) {
   const attach = attachForTest(saved, patch);
-  const token = tokenForTest(storedToken, patch);
+  const token = tokenForTest(storedToken, patch, saved, attach);
   const collectDeps = {
     token,
     conventionalStateDir: conventionalStateDir(id),
+    countMapped: (rows) => countBound(rows, sparks),
+    listSessions: deps.listSessions,
+    fetchJson: deps.fetchJson,
+    fetchResponse: deps.fetchResponse,
   };
-  const diag =
-    id === "openclaw"
-      ? await diagnoseOpenClawSessions(attach, collectDeps)
-      : await diagnoseHermesSessions(attach, collectDeps);
-  if (diag.status !== "ok") return diag;
-  const rows =
-    id === "openclaw"
-      ? await collectOpenClawSessions(attach, collectDeps)
-      : await collectHermesSessions(attach, collectDeps);
-  return { ...diag, mapped: countBound(rows, sparks) };
+  return id === "openclaw"
+    ? diagnoseOpenClawSessions(attach, collectDeps)
+    : diagnoseHermesSessions(attach, collectDeps);
 }
 
 function countBound(rows, sparks) {
@@ -62,11 +60,29 @@ function attachForTest(saved, patch) {
   };
 }
 
-function tokenForTest(storedToken, patch) {
+function tokenForTest(storedToken, patch, saved, attach) {
   if (patch && typeof patch === "object" && Object.prototype.hasOwnProperty.call(patch, "token")) {
     return patch.token == null ? "" : String(patch.token);
   }
+  if (!sameProbeTarget(saved, attach)) return "";
   return storedToken ?? "";
+}
+
+function sameProbeTarget(saved, attach) {
+  const savedMode = saved?.mode ?? "local";
+  if (attach.mode !== savedMode) return false;
+  if (attach.mode === "url") return sameOrigin(saved?.url, attach.url);
+  if (attach.mode === "state-dir") {
+    return String(saved?.stateDir ?? "").trim() === attach.stateDir;
+  }
+  return true;
+}
+
+function sameOrigin(left, right) {
+  const a = parseBaseUrl(String(left ?? "").trim());
+  const b = parseBaseUrl(String(right ?? "").trim());
+  if (!a || !b) return false;
+  return a.host.toLowerCase() === b.host.toLowerCase() && a.port === b.port;
 }
 
 export { SOURCE_IDS };

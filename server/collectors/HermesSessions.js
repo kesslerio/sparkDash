@@ -72,7 +72,12 @@ export async function diagnoseHermesSessions(attach, deps = {}) {
     const loaded = await loadHermesPayload(attach, deps);
     const list = normalizeSessions(loaded.sessions);
     const rows = mapHermesSessions(loaded.sessions, loaded.profiles);
-    return { status: "ok", found: list.length, mapped: rows.length, error: null };
+    return {
+      status: "ok",
+      found: list.length,
+      mapped: deps.countMapped?.(rows) ?? rows.length,
+      error: null,
+    };
   } catch (err) {
     return { status: "error", found: 0, mapped: 0, error: sanitizeProbeError(err) };
   }
@@ -179,19 +184,41 @@ function cookieCacheKey(origin, token) {
 }
 
 async function hermesAuthedGetter(origin, token, fetchResponse) {
-  let cookie = token ? await cookieFor(origin, token, fetchResponse) : "";
+  if (!token) {
+    return async function getJson(url) {
+      const res = await fetchResponse(url);
+      return res.json();
+    };
+  }
+  let cookie = "";
+  try {
+    cookie = await cookieFor(origin, token, fetchResponse);
+  } catch (err) {
+    if (!isMissingLoginEndpoint(err)) throw err;
+  }
+  if (!cookie) {
+    return async function getJson(url) {
+      const res = await fetchResponse(url, { token });
+      return res.json();
+    };
+  }
   return async function getJson(url) {
     try {
-      const res = await fetchResponse(url, { cookie: cookie || undefined });
+      const res = await fetchResponse(url, { cookie });
       return res.json();
     } catch (err) {
-      if (Number(err?.status) !== 401 || !token) throw err;
+      if (Number(err?.status) !== 401) throw err;
       cookieCache.delete(cookieCacheKey(origin, token));
       cookie = await cookieFor(origin, token, fetchResponse);
-      const res = await fetchResponse(url, { cookie: cookie || undefined });
+      const res = await fetchResponse(url, { cookie });
       return res.json();
     }
   };
+}
+
+function isMissingLoginEndpoint(err) {
+  const status = Number(err?.status);
+  return status === 404 || status === 405;
 }
 
 async function cookieFor(origin, token, fetchResponse) {

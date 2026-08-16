@@ -255,3 +255,36 @@ test("origin hostname matching the Spark name binds even when lanIp differs", ()
     { id: "hermes:8888:cli-chat", source: "hermes", handle: "cli-chat", badge: "unknown", port: 8888 },
   ]);
 });
+
+test("duplicate Spark names do not bind origin hostnames", () => {
+  const sparks = [
+    spark({ id: "a", name: "john", lanIp: "10.0.0.1", isLocal: false, llmPorts: [8888] }),
+    spark({ id: "b", name: "john", lanIp: "10.0.0.2", isLocal: false, llmPorts: [8888] }),
+  ];
+  const result = projectConversations(
+    [row({ source: "hermes", handle: "cli-chat", originHost: "john", originPort: 8888 })],
+    sparks
+  );
+  assert.equal("a" in result, false);
+  assert.equal("b" in result, false);
+});
+
+test("a Spark name that matches another Spark ssh.host does not steal that origin", () => {
+  const sparks = [
+    spark({ id: "named", name: "john", lanIp: "10.0.0.1", isLocal: false, llmPorts: [8888] }),
+    spark({
+      id: "sshed",
+      name: "ofus",
+      lanIp: "10.0.0.2",
+      isLocal: false,
+      llmPorts: [8888],
+      ssh: { host: "john" },
+    }),
+  ];
+  const result = projectConversations(
+    [row({ source: "hermes", handle: "cli-chat", originHost: "john", originPort: 8888 })],
+    sparks
+  );
+  assert.equal("named" in result, false);
+  assert.equal(rowsFor(result, "sshed")[0].handle, "cli-chat");
+});

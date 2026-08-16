@@ -422,6 +422,35 @@ test("url mode without fetchJson logs in then GETs sessions with Cookie", async 
   assert.equal(rows.length, 1);
 });
 
+test("login 404 falls back to Bearer instead of treating the token as a password", async () => {
+  resetHermesAuthCache();
+  const calls = [];
+  const rows = await collectHermesSessions(
+    { enabled: true, mode: "url", url: "http://127.0.0.1:9119" },
+    {
+      token: "gateway-bearer",
+      fetchResponse: async (url, opts = {}) => {
+        calls.push({ url: String(url), method: opts.method ?? "GET", token: opts.token, cookie: opts.cookie });
+        if (String(url).includes("/api/auth/login")) {
+          const err = new Error("HTTP 404");
+          err.status = 404;
+          throw err;
+        }
+        if (String(url).includes("/api/sessions")) {
+          assert.equal(opts.token, "gateway-bearer");
+          assert.equal(opts.cookie, undefined);
+          return { json: async () => ({ sessions: [session({ is_active: true })] }) };
+        }
+        const err = new Error("HTTP 404");
+        err.status = 404;
+        throw err;
+      },
+    }
+  );
+  assert.equal(calls[0].url, "http://127.0.0.1:9119/api/auth/login");
+  assert.equal(rows.length, 1);
+});
+
 test("diagnose reports HTTP 401 when Hermes login fails", async () => {
   resetHermesAuthCache();
   const result = await diagnoseHermesSessions(

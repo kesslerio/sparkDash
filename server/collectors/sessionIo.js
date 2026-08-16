@@ -127,6 +127,7 @@ export function normalizeSessionList(sessions) {
 export function sanitizeProbeError(err) {
   const code = err?.code;
   if (code === "ENOENT") return "State files not found";
+  if (code === "EACCES" || code === "EPERM") return "Permission denied";
   if (code === "ENOTFOUND") return "Host not found";
   if (code === "ECONNREFUSED") return "Connection refused";
   if (code === "ECONNRESET") return "Connection reset";
@@ -141,5 +142,5 @@ export function sanitizeProbeError(err) {
   if (/^HTTP 401\b/.test(raw) || /^HTTP 403\b/.test(raw)) return `${raw.split(/\s+/).slice(0, 2).join(" ")} (auth failed)`;
   const http = raw.match(/^HTTP \d+/);
   if (http) return http[0];
-  return raw.replace(/\s+/g, " ").slice(0, 120);
+  return "Request failed";
 }
