@@ -9,7 +9,7 @@ interface ConversationListProps {
   conversations: ConversationRow[];
 }
 
-export function formatSessionAge(lastUsedAt: number | undefined, now: number): string {
+function formatSessionAge(lastUsedAt: number | undefined, now: number): string {
   if (lastUsedAt == null || !Number.isFinite(lastUsedAt)) return "—";
   const delta = Math.max(0, now - lastUsedAt);
   const minute = 60_000;
