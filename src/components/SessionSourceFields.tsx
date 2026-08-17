@@ -11,7 +11,7 @@ const MODE_OPTIONS: { value: SessionSourceMode; label: string }[] = [
 const fieldClass =
   "w-full rounded border border-border bg-surface-elevated px-3 py-1.5 text-xs text-text outline-none focus:border-accent";
 
-function Toggle({ on, onClick }: { on: boolean; onClick: () => void }) {
+export function Toggle({ on, onClick }: { on: boolean; onClick: () => void }) {
   return (
     <button
       type="button"

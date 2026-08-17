@@ -13,7 +13,7 @@ import type {
   SessionSourcesPatch,
   Settings,
 } from "../api/types";
-import { SessionSourceFields } from "./SessionSourceFields";
+import { SessionSourceFields, Toggle } from "./SessionSourceFields";
 import { useModalPresence } from "../hooks/useModalPresence";
 
 interface SettingsDialogProps {
