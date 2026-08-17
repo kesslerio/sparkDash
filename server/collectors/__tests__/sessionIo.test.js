@@ -130,6 +130,7 @@ test("parseSessionTime accepts ms, seconds, and ISO strings", () => {
 test("sessionAgent prefers explicit fields, then fallback, then agent: key", () => {
   assert.equal(sessionAgent({ agentId: "work", key: "agent:main:telegram:t:1" }), "work");
   assert.equal(sessionAgent({ profile: "unleashed" }), "unleashed");
+  assert.equal(sessionAgent({ active_profile: "planner" }), "planner");
   assert.equal(sessionAgent({ key: "agent:niemand:telegram:t:1" }), "niemand");
   assert.equal(sessionAgent({ session_key: "agent:main:telegram:t:1" }, "unleashed"), "unleashed");
   assert.equal(sessionAgent({ key: "sess-a" }, "main"), "main");

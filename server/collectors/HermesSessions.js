@@ -35,7 +35,7 @@ const PROFILE_FILES = ["config.json", "profile.json"];
 export function mapHermesSessions(sessions, profiles, agentFallback = "") {
   const list = normalizeSessions(sessions);
   const profileOrigin = parseBaseUrl(profileBaseUrl(profiles));
-  const fallback = hermesAgentFallback(profiles, agentFallback);
+  const fallback = sessionAgent(profiles, agentFallback);
   const rows = [];
   for (const item of list) {
     const row = mapOneSession(item, profileOrigin, fallback);
@@ -75,9 +75,7 @@ export async function diagnoseHermesSessions(attach, deps = {}) {
   }
   try {
     const loaded = await loadHermesPayload(attach, deps);
-    const list = loaded.bundles
-      ? loaded.bundles.flatMap((bundle) => normalizeSessions(bundle.sessions))
-      : normalizeSessions(loaded.sessions);
+    const list = hermesBundles(loaded).flatMap((bundle) => normalizeSessions(bundle.sessions));
     const rows = mapLoadedHermes(loaded);
     return {
       status: "ok",
@@ -90,24 +88,15 @@ export async function diagnoseHermesSessions(attach, deps = {}) {
   }
 }
 
-function mapLoadedHermes(loaded) {
-  if (Array.isArray(loaded?.bundles) && loaded.bundles.length > 0) {
-    return loaded.bundles.flatMap((bundle) =>
-      mapHermesSessions(bundle.sessions, bundle.profiles, bundle.agent)
-    );
-  }
-  return mapHermesSessions(loaded?.sessions, loaded?.profiles, loaded?.agent);
+function hermesBundles(loaded) {
+  if (Array.isArray(loaded?.bundles)) return loaded.bundles;
+  return [{ sessions: loaded?.sessions, profiles: loaded?.profiles, agent: loaded?.agent }];
 }
 
-function hermesAgentFallback(profiles, agentFallback) {
-  const fromArg = typeof agentFallback === "string" ? agentFallback.trim() : "";
-  if (fromArg) return fromArg;
-  if (!profiles || typeof profiles !== "object") return "";
-  for (const field of ["profile", "profile_name", "active_profile"]) {
-    const value = profiles[field];
-    if (typeof value === "string" && value.trim()) return value.trim();
-  }
-  return "";
+function mapLoadedHermes(loaded) {
+  return hermesBundles(loaded).flatMap((bundle) =>
+    mapHermesSessions(bundle.sessions, bundle.profiles, bundle.agent)
+  );
 }
 
 function mapOneSession(session, profileOrigin, fallback) {
@@ -181,13 +170,14 @@ function normalizeSessions(sessions) {
 
 async function loadHermesPayload(attach, deps) {
   if (typeof deps.listSessions === "function") {
-    return {
-      sessions: await deps.listSessions(),
-      profiles: deps.profiles ?? {},
-    };
+    return hermesBundle(await deps.listSessions(), deps.profiles ?? {}, "");
   }
   if (attach.mode === "url") return loadFromUrl(attach, deps);
   return loadFromStateDir(attach, deps);
+}
+
+function hermesBundle(sessions, profiles, agent) {
+  return { bundles: [{ sessions, profiles, agent: sessionAgent(profiles, agent) }] };
 }
 
 async function loadFromUrl(attach, deps) {
@@ -195,14 +185,14 @@ async function loadFromUrl(attach, deps) {
   if (typeof deps.fetchJson === "function") {
     const payload = await deps.fetchJson(sessionsUrl(attach.url), { token });
     const profiles = deps.profiles ?? (await loadProfilesFromUrl(attach.url, deps.fetchJson, token));
-    return { sessions: payload, profiles, agent: hermesAgentFallback(profiles, "") };
+    return hermesBundle(payload, profiles, "");
   }
   const origin = gatewayOrigin(attach.url);
   const fetchResponse = deps.fetchResponse ?? defaultFetchResponse;
   const getJson = await hermesAuthedGetter(origin, token, fetchResponse);
   const payload = await getJson(sessionsUrl(attach.url));
   const profiles = deps.profiles ?? (await loadProfilesFromUrl(attach.url, getJson, token));
-  return { sessions: payload, profiles, agent: hermesAgentFallback(profiles, "") };
+  return hermesBundle(payload, profiles, "");
 }
 
 const cookieCache = new Map();
@@ -318,7 +308,7 @@ async function loadFromStateDir(attach, deps) {
     deps,
     deps.conventionalStateDir ?? conventionalStateDir("hermes")
   );
-  if (!dir) return { sessions: [], profiles: {} };
+  if (!dir) return { bundles: [] };
   const readFile = deps.readFile ?? defaultReadFile;
   const readDir = deps.readDir ?? defaultReadDir;
   const homes = await listHermesHomes(dir, readDir);
@@ -332,9 +322,7 @@ async function loadFromStateDir(attach, deps) {
       // skip missing or unreadable profile store
     }
   }
-  if (bundles.length === 1) return bundles[0];
-  if (bundles.length > 1) return { bundles };
-  return { sessions: [], profiles: {} };
+  return { bundles };
 }
 
 async function listHermesHomes(dir, readDir) {

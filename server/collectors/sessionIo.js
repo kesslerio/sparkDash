@@ -162,7 +162,7 @@ export function sessionLastUsedAt(session) {
   return null;
 }
 
-const AGENT_FIELDS = ["agentId", "agent_id", "agent", "profile", "profile_name"];
+const AGENT_FIELDS = ["agentId", "agent_id", "agent", "profile", "profile_name", "active_profile"];
 
 /** OpenClaw/Hermes key form `agent:<id>:…`. Empty when absent. */
 export function agentFromSessionKey(value) {
