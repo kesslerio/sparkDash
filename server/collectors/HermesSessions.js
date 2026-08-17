@@ -19,9 +19,14 @@ import {
   sanitizeProbeError,
   sessionLastUsedAt,
   sessionAgent,
+  applySessionContext,
   profileFromStateDir,
   defaultReadDir,
+  stampAttachRows,
 } from "./sessionIo.js";
+import { hermesAuthedGetter } from "./hermesAuth.js";
+
+export { resetHermesAuthCache } from "./hermesAuth.js";
 
 const HANDLE_FIELDS = ["title", "source", "id"];
 const LIVE_STATUS = new Set(["working", "running"]);
@@ -53,7 +58,7 @@ export async function collectHermesSessions(attach, deps = {}) {
   try {
     if (!attach?.enabled) return [];
     const loaded = await loadHermesPayload(attach, deps);
-    return mapLoadedHermes(loaded);
+    return stampAttachRows(mapLoadedHermes(loaded), attach);
   } catch {
     return [];
   }
@@ -76,7 +81,7 @@ export async function diagnoseHermesSessions(attach, deps = {}) {
   try {
     const loaded = await loadHermesPayload(attach, deps);
     const list = hermesBundles(loaded).flatMap((bundle) => normalizeSessions(bundle.sessions));
-    const rows = mapLoadedHermes(loaded);
+    const rows = stampAttachRows(mapLoadedHermes(loaded), attach);
     return {
       status: "ok",
       found: list.length,
@@ -117,7 +122,7 @@ function mapOneSession(session, profileOrigin, fallback) {
   };
   if (lastUsedAt != null) mapped.lastUsedAt = lastUsedAt;
   if (agent) mapped.agent = agent;
-  return mapped;
+  return applySessionContext(mapped, session);
 }
 
 function sessionIdentity(session) {
@@ -189,90 +194,10 @@ async function loadFromUrl(attach, deps) {
   }
   const origin = gatewayOrigin(attach.url);
   const fetchResponse = deps.fetchResponse ?? defaultFetchResponse;
-  const getJson = await hermesAuthedGetter(origin, token, fetchResponse);
+  const getJson = await hermesAuthedGetter(origin, token, fetchResponse, attach.username);
   const payload = await getJson(sessionsUrl(attach.url));
   const profiles = deps.profiles ?? (await loadProfilesFromUrl(attach.url, getJson, token));
   return hermesBundle(payload, profiles, "");
-}
-
-const cookieCache = new Map();
-
-export function resetHermesAuthCache() {
-  cookieCache.clear();
-}
-
-function cookieCacheKey(origin, token) {
-  return `${origin}\0${token}`;
-}
-
-async function hermesAuthedGetter(origin, token, fetchResponse) {
-  if (!token) {
-    return async function getJson(url) {
-      const res = await fetchResponse(url);
-      return res.json();
-    };
-  }
-  let cookie = "";
-  try {
-    cookie = await cookieFor(origin, token, fetchResponse);
-  } catch (err) {
-    if (!isMissingLoginEndpoint(err)) throw err;
-  }
-  if (!cookie) {
-    return async function getJson(url) {
-      const res = await fetchResponse(url, { token });
-      return res.json();
-    };
-  }
-  return async function getJson(url) {
-    try {
-      const res = await fetchResponse(url, { cookie });
-      return res.json();
-    } catch (err) {
-      if (Number(err?.status) !== 401) throw err;
-      cookieCache.delete(cookieCacheKey(origin, token));
-      cookie = await cookieFor(origin, token, fetchResponse);
-      const res = await fetchResponse(url, { cookie });
-      return res.json();
-    }
-  };
-}
-
-function isMissingLoginEndpoint(err) {
-  const status = Number(err?.status);
-  return status === 404 || status === 405;
-}
-
-async function cookieFor(origin, token, fetchResponse) {
-  const key = cookieCacheKey(origin, token);
-  const cached = cookieCache.get(key);
-  if (cached) return cached;
-  const cookie = await loginHermes(origin, token, fetchResponse);
-  if (cookie) cookieCache.set(key, cookie);
-  return cookie;
-}
-
-async function loginHermes(origin, token, fetchResponse) {
-  const res = await fetchResponse(`${origin}/api/auth/login`, {
-    method: "POST",
-    extraHeaders: { "Content-Type": "application/json" },
-    body: JSON.stringify({ password: token }),
-  });
-  return sessionCookieFromResponse(res);
-}
-
-function sessionCookieFromResponse(res) {
-  const headers = res?.headers;
-  if (!headers) return "";
-  const rawList =
-    typeof headers.getSetCookie === "function"
-      ? headers.getSetCookie()
-      : [headers.get("set-cookie")].filter(Boolean);
-  for (const raw of rawList) {
-    const first = String(raw).split(";", 1)[0].trim();
-    if (first.toLowerCase().startsWith("hermes_session=")) return first;
-  }
-  return "";
 }
 
 function gatewayOrigin(raw) {

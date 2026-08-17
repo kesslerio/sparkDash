@@ -52,6 +52,15 @@ test("updated_at is lastUsedAt; is_active is still not mid-turn", () => {
   assert.equal(rows[0].lastUsedAt, Date.parse("2024-01-15T12:00:00.000Z"));
 });
 
+test("last_prompt_tokens is contextUsed; preview is never copied", () => {
+  const rows = mapHermesSessions([
+    session({ last_prompt_tokens: 42_000, input_tokens: 900_000, preview: "secret" }),
+  ]);
+  assert.equal(rows[0].contextUsed, 42000);
+  assert.equal("contextWindow" in rows[0], false);
+  assert.equal(JSON.stringify(rows).includes("secret"), false);
+});
+
 test("is_active true without a mid-turn field is midTurn unknown", () => {
   const rows = mapHermesSessions([session({ is_active: true })]);
   assert.deepEqual(rows, [expectedRow({ midTurn: "unknown" })]);
@@ -399,23 +408,41 @@ test("url mode without fetchJson logs in then GETs sessions with Cookie", async 
   resetHermesAuthCache();
   const calls = [];
   const rows = await collectHermesSessions(
-    { enabled: true, mode: "url", url: "http://127.0.0.1:9119" },
+    { enabled: true, mode: "url", url: "http://127.0.0.1:9119", username: "ops" },
     {
       token: "ui-password",
       fetchResponse: async (url, opts = {}) => {
         calls.push({ url: String(url), method: opts.method ?? "GET", cookie: opts.cookie, body: opts.body });
-        if (String(url).includes("/api/auth/login")) {
-          assert.equal(JSON.parse(opts.body).password, "ui-password");
+        if (String(url).endsWith("/api/auth/providers")) {
+          return {
+            json: async () => ({
+              providers: [{ name: "basic", supports_password: true }],
+            }),
+            headers: { getSetCookie: () => [], get: () => null },
+          };
+        }
+        if (String(url).endsWith("/auth/password-login")) {
+          const body = JSON.parse(opts.body);
+          assert.equal(body.provider, "basic");
+          assert.equal(body.username, "ops");
+          assert.equal(body.password, "ui-password");
           return {
             json: async () => ({ ok: true }),
             headers: {
-              getSetCookie: () => ["hermes_session=abc.def; HttpOnly; Path=/"],
+              getSetCookie: () => [
+                "hermes_session_at=abc.def; HttpOnly; Path=/",
+                "hermes_session_rt=rt.1; HttpOnly; Path=/",
+                "hermes_session_provider=basic; Path=/",
+              ],
               get: () => null,
             },
           };
         }
         if (String(url).includes("/api/sessions")) {
-          assert.equal(opts.cookie, "hermes_session=abc.def");
+          assert.equal(
+            opts.cookie,
+            "hermes_session_at=abc.def; hermes_session_rt=rt.1; hermes_session_provider=basic"
+          );
           return { json: async () => ({ sessions: [session({ is_active: true })] }) };
         }
         const err = new Error("HTTP 404");
@@ -424,13 +451,18 @@ test("url mode without fetchJson logs in then GETs sessions with Cookie", async 
       },
     }
   );
-  assert.equal(calls[0].url, "http://127.0.0.1:9119/api/auth/login");
-  assert.equal(calls[0].method, "POST");
+  assert.equal(calls[0].url, "http://127.0.0.1:9119/api/auth/providers");
+  assert.equal(calls[1].url, "http://127.0.0.1:9119/auth/password-login");
+  assert.equal(calls[1].method, "POST");
+  assert.equal(
+    calls.some((c) => String(c.url).includes("/api/auth/login")),
+    false
+  );
   assert.ok(calls.some((c) => c.url.includes("/api/sessions?limit=50&include_cli=1")));
   assert.equal(rows.length, 1);
 });
 
-test("login 404 falls back to Bearer instead of treating the token as a password", async () => {
+test("providers 401 falls back to Bearer instead of treating the token as a password", async () => {
   resetHermesAuthCache();
   const calls = [];
   const rows = await collectHermesSessions(
@@ -439,7 +471,12 @@ test("login 404 falls back to Bearer instead of treating the token as a password
       token: "gateway-bearer",
       fetchResponse: async (url, opts = {}) => {
         calls.push({ url: String(url), method: opts.method ?? "GET", token: opts.token, cookie: opts.cookie });
-        if (String(url).includes("/api/auth/login")) {
+        if (String(url).endsWith("/api/auth/providers")) {
+          const err = new Error("HTTP 401");
+          err.status = 401;
+          throw err;
+        }
+        if (String(url).endsWith("/api/auth/login")) {
           const err = new Error("HTTP 404");
           err.status = 404;
           throw err;
@@ -455,8 +492,90 @@ test("login 404 falls back to Bearer instead of treating the token as a password
       },
     }
   );
-  assert.equal(calls[0].url, "http://127.0.0.1:9119/api/auth/login");
+  assert.equal(calls[0].url, "http://127.0.0.1:9119/api/auth/providers");
+  assert.equal(
+    calls.some((c) => String(c.url).includes("/auth/password-login")),
+    false
+  );
   assert.equal(rows.length, 1);
+});
+
+test("gated providers still use password-only /api/auth/login", async () => {
+  resetHermesAuthCache();
+  const calls = [];
+  const rows = await collectHermesSessions(
+    { enabled: true, mode: "url", url: "http://127.0.0.1:8787" },
+    {
+      token: "webui-password",
+      fetchResponse: async (url, opts = {}) => {
+        calls.push({ url: String(url), method: opts.method ?? "GET", cookie: opts.cookie, body: opts.body });
+        if (String(url).endsWith("/api/auth/providers")) {
+          const err = new Error("HTTP 401");
+          err.status = 401;
+          throw err;
+        }
+        if (String(url).endsWith("/api/auth/login")) {
+          assert.equal(JSON.parse(opts.body).password, "webui-password");
+          return {
+            json: async () => ({ ok: true }),
+            headers: {
+              getSetCookie: () => ["hermes_session=webui.cookie; HttpOnly; Path=/"],
+              get: () => null,
+            },
+          };
+        }
+        if (String(url).includes("/api/sessions")) {
+          assert.equal(opts.cookie, "hermes_session=webui.cookie");
+          return { json: async () => ({ sessions: [session({ is_active: true })] }) };
+        }
+        const err = new Error("HTTP 404");
+        err.status = 404;
+        throw err;
+      },
+    }
+  );
+  assert.equal(
+    calls.some((c) => String(c.url).includes("/auth/password-login")),
+    false
+  );
+  assert.ok(calls.some((c) => String(c.url).endsWith("/api/auth/login")));
+  assert.equal(rows.length, 1);
+});
+
+test("password login defaults username to admin", async () => {
+  resetHermesAuthCache();
+  let loginBody;
+  await collectHermesSessions(
+    { enabled: true, mode: "url", url: "http://127.0.0.1:9119" },
+    {
+      token: "ui-password",
+      fetchResponse: async (url, opts = {}) => {
+        if (String(url).endsWith("/api/auth/providers")) {
+          return {
+            json: async () => ({ providers: [{ name: "basic", supports_password: true }] }),
+            headers: { getSetCookie: () => [], get: () => null },
+          };
+        }
+        if (String(url).endsWith("/auth/password-login")) {
+          loginBody = JSON.parse(opts.body);
+          return {
+            json: async () => ({ ok: true }),
+            headers: {
+              getSetCookie: () => ["hermes_session_at=tok; HttpOnly; Path=/"],
+              get: () => null,
+            },
+          };
+        }
+        if (String(url).includes("/api/sessions")) {
+          return { json: async () => ({ sessions: [] }) };
+        }
+        const err = new Error("HTTP 404");
+        err.status = 404;
+        throw err;
+      },
+    }
+  );
+  assert.equal(loginBody.username, "admin");
 });
 
 test("diagnose reports HTTP 401 when Hermes login fails", async () => {

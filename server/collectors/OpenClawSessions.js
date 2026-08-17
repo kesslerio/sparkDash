@@ -10,12 +10,14 @@ import {
   resolveStateDir,
   defaultReadFile,
   defaultReadDir,
-  defaultFetchJson,
   normalizeSessionList,
   sanitizeProbeError,
   sessionLastUsedAt,
   sessionAgent,
+  applySessionContext,
+  stampAttachRows,
 } from "./sessionIo.js";
+import { defaultOpenClawGatewayRpc, gatewayDeviceKey } from "./openclawGateway.js";
 
 const HANDLE_FIELDS = ["label", "displayName", "key"];
 
@@ -44,7 +46,7 @@ export async function collectOpenClawSessions(attach, deps = {}) {
   try {
     if (!attach?.enabled) return [];
     const loaded = await loadOpenClawPayload(attach, deps);
-    return mapOpenClawSessions(loaded.sessions, loaded.providers);
+    return stampAttachRows(mapOpenClawSessions(loaded.sessions, loaded.providers), attach);
   } catch {
     return [];
   }
@@ -70,7 +72,7 @@ export async function diagnoseOpenClawSessions(attach, deps = {}) {
       return { status: "error", found: 0, mapped: 0, error: "OpenClaw state not found" };
     }
     const list = normalizeSessions(loaded.sessions);
-    const rows = mapOpenClawSessions(loaded.sessions, loaded.providers);
+    const rows = stampAttachRows(mapOpenClawSessions(loaded.sessions, loaded.providers), attach);
     return {
       status: "ok",
       found: list.length,
@@ -100,7 +102,7 @@ function mapOneSession(session, providers) {
   };
   if (lastUsedAt != null) mapped.lastUsedAt = lastUsedAt;
   if (agent) mapped.agent = agent;
-  return mapped;
+  return applySessionContext(mapped, session);
 }
 
 function sessionIdentity(session) {
@@ -148,8 +150,17 @@ async function loadOpenClawPayload(attach, deps) {
 }
 
 async function loadFromUrl(attach, deps) {
-  const fetchJson = deps.fetchJson ?? defaultFetchJson;
-  return unwrapGatewayPayload(await fetchJson(attach.url, { token: deps.token }));
+  if (typeof deps.gatewayRpc === "function") {
+    return unwrapGatewayPayload(await deps.gatewayRpc(attach.url, deps.token));
+  }
+  if (typeof deps.fetchJson === "function") {
+    return unwrapGatewayPayload(await deps.fetchJson(attach.url, { token: deps.token }));
+  }
+  return unwrapGatewayPayload(
+    await defaultOpenClawGatewayRpc(attach.url, deps.token, {
+      deviceKey: gatewayDeviceKey(attach.url, attach.id),
+    })
+  );
 }
 
 function unwrapGatewayPayload(payload) {
