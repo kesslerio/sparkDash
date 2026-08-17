@@ -292,15 +292,18 @@ export function LlmPanel({
           </div>
         </div>
       ) : !available ? (
-        <div className="space-y-3">
-          <div className="flex items-center gap-2 py-1">
-            <span className="h-1.5 w-1.5 rounded-full bg-muted" />
-            <p className="text-xs text-muted">No model loaded on :{llmPort}</p>
+        <div className="llm-operate">
+          <div className="llm-operate-metrics space-y-3">
+            <div className="flex items-center gap-2 py-1">
+              <span className="h-1.5 w-1.5 rounded-full bg-muted" />
+              <p className="text-xs text-muted">No model loaded on :{llmPort}</p>
+            </div>
           </div>
           <ConversationList conversations={conversations} />
         </div>
       ) : (
-        <div className="space-y-3">
+        <div className="llm-operate">
+          <div className="llm-operate-metrics space-y-3">
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
             <BackendBadge backend={llm?.backend ?? null} />
             {llm?.modelId && (
@@ -535,8 +538,6 @@ export function LlmPanel({
             </div>
           )}
 
-          <ConversationList conversations={conversations} />
-
           <div className="border-t border-border pt-3 space-y-2">
             <button
               type="button"
@@ -563,6 +564,8 @@ export function LlmPanel({
               Showcase
             </button>
           </div>
+          </div>
+          <ConversationList conversations={conversations} />
         </div>
       )}
 
