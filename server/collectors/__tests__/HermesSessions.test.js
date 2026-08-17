@@ -513,6 +513,92 @@ test("diagnose JSON has counts only", async () => {
   assert.equal(result.mapped, 1);
 });
 
+test("profile fallback labels the Hermes lane", () => {
+  const rows = mapHermesSessions([session()], PROFILE, "unleashed");
+  assert.equal(rows[0].agent, "unleashed");
+});
+
+test("session profile wins over fallback", () => {
+  const rows = mapHermesSessions([session({ profile: "planner" })], PROFILE, "unleashed");
+  assert.equal(rows[0].agent, "planner");
+});
+
+test("profiles/<name> state dir labels that profile", async () => {
+  const dir = "/tmp/hermes/profiles/unleashed";
+  const files = {
+    [`${dir}/sessions.json`]: JSON.stringify([session({ title: "FromUnleashed" })]),
+    [`${dir}/profile.json`]: JSON.stringify(PROFILE),
+  };
+  const rows = await collectHermesSessions(
+    { enabled: true, mode: "state-dir", stateDir: dir },
+    {
+      hostRoot: "",
+      readFile: async (filePath) => {
+        if (!(filePath in files)) {
+          const err = new Error(`ENOENT ${filePath}`);
+          err.code = "ENOENT";
+          throw err;
+        }
+        return files[filePath];
+      },
+      readDir: async () => {
+        const err = new Error("ENOENT");
+        err.code = "ENOENT";
+        throw err;
+      },
+    }
+  );
+  assert.equal(rows[0].handle, "FromUnleashed");
+  assert.equal(rows[0].agent, "unleashed");
+});
+
+test("local profiles/* are collected as separate lanes", async () => {
+  const dir = "/tmp/hermes-root";
+  const files = {
+    [`${dir}/profiles/unleashed/sessions.json`]: JSON.stringify([
+      session({ id: "u1", title: "Unleashed chat" }),
+    ]),
+    [`${dir}/profiles/unleashed/profile.json`]: JSON.stringify(PROFILE),
+    [`${dir}/profiles/planner/sessions.json`]: JSON.stringify([
+      session({
+        id: "p1",
+        title: "Planner chat",
+        billing_base_url: "http://127.0.0.1:4000/v1",
+      }),
+    ]),
+    [`${dir}/profiles/planner/profile.json`]: JSON.stringify({
+      model: { base_url: "http://127.0.0.1:4000/v1" },
+    }),
+  };
+  const rows = await collectHermesSessions(
+    { enabled: true, mode: "local" },
+    {
+      conventionalStateDir: dir,
+      hostRoot: "",
+      readFile: async (filePath) => {
+        if (!(filePath in files)) {
+          const err = new Error(`ENOENT ${filePath}`);
+          err.code = "ENOENT";
+          throw err;
+        }
+        return files[filePath];
+      },
+      readDir: async (dirPath) => {
+        if (dirPath === `${dir}/profiles`) return ["unleashed", "planner"];
+        const err = new Error("ENOENT");
+        err.code = "ENOENT";
+        throw err;
+      },
+    }
+  );
+  const byHandle = Object.fromEntries(rows.map((r) => [r.handle, r]));
+  assert.equal(rows.length, 2);
+  assert.equal(byHandle["Unleashed chat"].agent, "unleashed");
+  assert.equal(byHandle["Unleashed chat"].originPort, 8888);
+  assert.equal(byHandle["Planner chat"].agent, "planner");
+  assert.equal(byHandle["Planner chat"].originPort, 4000);
+});
+
 test("module has no CLI update probe, alphaclaw, or llmPorts HTTP", () => {
   const src = readFileSync(MODULE_PATH, "utf8");
   assert.equal(/hermes update/.test(src), false);

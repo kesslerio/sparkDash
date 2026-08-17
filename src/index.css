@@ -768,14 +768,32 @@ input[type="checkbox"] {
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 12px;
   max-height: min(28rem, 58vh);
   overflow: auto;
   scrollbar-color: var(--color-border-strong) transparent;
 }
+.occupancy-lane {
+  min-width: 0;
+}
+.occupancy-lane-label {
+  margin: 0 0 4px;
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  color: var(--color-muted);
+}
+.occupancy-lane-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
 .occupancy-row {
   display: grid;
-  grid-template-columns: 8px minmax(0, 1fr) auto auto;
+  grid-template-columns: 8px minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px 12px;
   min-height: 32px;
@@ -810,12 +828,6 @@ input[type="checkbox"] {
   font-size: 13px;
   font-weight: 550;
   color: var(--color-text);
-}
-.occupancy-source {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--color-muted);
-  white-space: nowrap;
 }
 .occupancy-state {
   font-size: 12px;

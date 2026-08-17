@@ -162,6 +162,43 @@ export function sessionLastUsedAt(session) {
   return null;
 }
 
+const AGENT_FIELDS = ["agentId", "agent_id", "agent", "profile", "profile_name"];
+
+/** OpenClaw/Hermes key form `agent:<id>:…`. Empty when absent. */
+export function agentFromSessionKey(value) {
+  const match = String(value || "").match(/^agent:([^:]+):/);
+  return match ? match[1].trim() : "";
+}
+
+/** `…/profiles/<name>/…` → name. Empty when the path is not a profile home. */
+export function profileFromStateDir(dir) {
+  const parts = String(dir || "").split(/[/\\]/).filter(Boolean);
+  const index = parts.indexOf("profiles");
+  const name = index >= 0 ? parts[index + 1] : "";
+  if (!name || name === "." || name === "..") return "";
+  return name;
+}
+
+function trimmedAgent(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : "";
+}
+
+/** OpenClaw agent id or Hermes profile/agent. Never a transcript. */
+export function sessionAgent(session, fallback = "") {
+  if (session && typeof session === "object") {
+    for (const field of AGENT_FIELDS) {
+      const value = trimmedAgent(session[field]);
+      if (value) return value;
+    }
+  }
+  const fromFallback = trimmedAgent(fallback);
+  if (fromFallback) return fromFallback;
+  if (session && typeof session === "object") {
+    return agentFromSessionKey(session.key ?? session.session_key ?? session.sessionKey);
+  }
+  return "";
+}
+
 /** Short probe error for Settings. No paths, tokens, or payloads. */
 export function sanitizeProbeError(err) {
   const code = err?.code;

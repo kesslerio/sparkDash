@@ -12,6 +12,8 @@ import {
   sanitizeProbeError,
   parseSessionTime,
   sessionLastUsedAt,
+  sessionAgent,
+  profileFromStateDir,
 } from "../sessionIo.js";
 
 test("expandTilde maps ~ and ~/path against injected home", () => {
@@ -123,4 +125,14 @@ test("parseSessionTime accepts ms, seconds, and ISO strings", () => {
   assert.equal(sessionLastUsedAt({ updatedAt: 1_700_000_000_000, createdAt: 1 }), 1_700_000_000_000);
   assert.equal(sessionLastUsedAt({ created_at: "2024-01-15T12:00:00.000Z" }), Date.parse("2024-01-15T12:00:00.000Z"));
   assert.equal(sessionLastUsedAt({ preview: "secret" }), null);
+});
+
+test("sessionAgent prefers explicit fields, then fallback, then agent: key", () => {
+  assert.equal(sessionAgent({ agentId: "work", key: "agent:main:telegram:t:1" }), "work");
+  assert.equal(sessionAgent({ profile: "unleashed" }), "unleashed");
+  assert.equal(sessionAgent({ key: "agent:niemand:telegram:t:1" }), "niemand");
+  assert.equal(sessionAgent({ session_key: "agent:main:telegram:t:1" }, "unleashed"), "unleashed");
+  assert.equal(sessionAgent({ key: "sess-a" }, "main"), "main");
+  assert.equal(profileFromStateDir("/home/op/.hermes/profiles/unleashed"), "unleashed");
+  assert.equal(profileFromStateDir("/home/op/.hermes"), "");
 });

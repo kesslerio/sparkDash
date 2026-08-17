@@ -38,6 +38,7 @@ function expectedRow(overrides = {}) {
     originHost: "127.0.0.1",
     originPort: 4000,
     midTurn: true,
+    agent: "main",
     ...overrides,
   };
 }
@@ -102,6 +103,7 @@ test("handle comes from label, never lastMessage / preview / transcript", () => 
   assert.equal(json.includes("preview text"), false);
   assert.equal(json.includes("full transcript"), false);
   assert.deepEqual(Object.keys(rows[0]).sort(), [
+    "agent",
     "handle",
     "id",
     "midTurn",
@@ -367,8 +369,10 @@ test("mixed array-form and map-form agent stores are merged", async () => {
   assert.equal(rows.length, 2);
   assert.equal(byHandle.FromArray.midTurn, true);
   assert.equal(byHandle.FromArray.id, "array-sess");
+  assert.equal(byHandle.FromArray.agent, "main");
   assert.equal(byHandle.FromMap.midTurn, false);
   assert.equal(byHandle.FromMap.id, "map-sess");
+  assert.equal(byHandle.FromMap.agent, "work");
 });
 
 test("missing state files return [] not throw", async () => {

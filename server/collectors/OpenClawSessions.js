@@ -14,6 +14,7 @@ import {
   normalizeSessionList,
   sanitizeProbeError,
   sessionLastUsedAt,
+  sessionAgent,
 } from "./sessionIo.js";
 
 const HANDLE_FIELDS = ["label", "displayName", "key"];
@@ -88,6 +89,7 @@ function mapOneSession(session, providers) {
   const handle = sessionHandle(session);
   if (!handle) return null;
   const lastUsedAt = sessionLastUsedAt(session);
+  const agent = sessionAgent(session);
   const mapped = {
     source: "openclaw",
     id: sessionIdentity(session) || handle,
@@ -97,6 +99,7 @@ function mapOneSession(session, providers) {
     midTurn: midTurnOf(session),
   };
   if (lastUsedAt != null) mapped.lastUsedAt = lastUsedAt;
+  if (agent) mapped.agent = agent;
   return mapped;
 }
 
@@ -168,14 +171,6 @@ async function readOptional(readFile, filePath) {
   }
 }
 
-function mergeSessionStores(stores) {
-  const rows = [];
-  for (const store of stores) {
-    rows.push(...normalizeSessions(store));
-  }
-  return rows;
-}
-
 async function loadAgentSessionStores(dir, readFile, readDir) {
   let names = [];
   try {
@@ -183,19 +178,22 @@ async function loadAgentSessionStores(dir, readFile, readDir) {
   } catch {
     return {};
   }
-  const stores = [];
+  const rows = [];
   for (const entry of names) {
     const name = typeof entry === "string" ? entry : entry?.name;
     if (!name || name.startsWith(".")) continue;
     const raw = await readOptional(readFile, path.join(dir, "agents", name, "sessions", "sessions.json"));
     if (!raw) continue;
     try {
-      stores.push(JSON.parse(raw));
+      for (const session of normalizeSessions(JSON.parse(raw))) {
+        if (!session || typeof session !== "object") continue;
+        rows.push(session.agentId ? session : { ...session, agentId: name });
+      }
     } catch {
       /* skip corrupt agent store */
     }
   }
-  return mergeSessionStores(stores);
+  return rows;
 }
 
 async function loadFromStateDir(attach, deps) {

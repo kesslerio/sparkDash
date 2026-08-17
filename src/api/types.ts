@@ -218,6 +218,8 @@ export interface ConversationRow {
   port: number;
   /** Session last-used epoch ms from the source. Omit when unknown. */
   lastUsedAt?: number;
+  /** OpenClaw agent id or Hermes profile/agent. Omit when unknown. */
+  agent?: string;
 }
 
 // ─── Spark snapshot (server pushes this) ──────────────────

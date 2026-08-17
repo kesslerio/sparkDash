@@ -50,6 +50,16 @@ test("unknown rows sort by lastUsedAt descending", () => {
   assert.deepEqual(list.map((r) => r.handle), ["new", "mid", "old"]);
 });
 
+test("agent is projected when present and omitted when empty", () => {
+  const withAgent = rowsFor(
+    projectConversations([row({ agent: "niemand" })], [spark()]),
+    "spark-local"
+  );
+  assert.equal(withAgent[0].agent, "niemand");
+  const without = rowsFor(projectConversations([row()], [spark()]), "spark-local");
+  assert.equal("agent" in without[0], false);
+});
+
 test("AE1: mid-turn + origin match is generating; midTurn false is stalled", () => {
   const sparks = [spark()];
   const generating = projectConversations([row({ handle: "chat-a", midTurn: true })], sparks);

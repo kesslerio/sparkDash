@@ -29,7 +29,8 @@ function sameConversationRows(a, b) {
       left.handle !== right.handle ||
       left.badge !== right.badge ||
       left.port !== right.port ||
-      left.lastUsedAt !== right.lastUsedAt
+      left.lastUsedAt !== right.lastUsedAt ||
+      left.agent !== right.agent
     ) {
       return false;
     }

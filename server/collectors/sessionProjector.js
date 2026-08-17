@@ -97,6 +97,7 @@ function toConversationRow(row, port) {
   const source = row.source;
   const nativeId = String(row.id ?? "").trim();
   const lastUsedAt = Number.isFinite(row.lastUsedAt) ? row.lastUsedAt : null;
+  const agent = typeof row.agent === "string" && row.agent.trim() ? row.agent.trim() : "";
   const projected = {
     id: nativeId || `${source}:${port}:${handle}`,
     source,
@@ -105,6 +106,7 @@ function toConversationRow(row, port) {
     port,
   };
   if (lastUsedAt != null) projected.lastUsedAt = lastUsedAt;
+  if (agent) projected.agent = agent;
   return projected;
 }
 
@@ -136,5 +138,5 @@ function compareRows(a, b) {
   const tb = b.lastUsedAt ?? 0;
   const ta = a.lastUsedAt ?? 0;
   if (tb !== ta) return tb - ta;
-  return a.source.localeCompare(b.source) || a.handle.localeCompare(b.handle) || a.port - b.port || a.id.localeCompare(b.id);
+  return a.source.localeCompare(b.source) || a.handle.localeCompare(b.handle) || a.port - b.port || (a.agent ?? "").localeCompare(b.agent ?? "") || a.id.localeCompare(b.id);
 }
