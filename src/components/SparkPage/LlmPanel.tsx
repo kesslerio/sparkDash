@@ -326,8 +326,8 @@ export function LlmPanel({
       {showSettings ? (
         <div className="max-h-[70vh] space-y-3 overflow-y-auto pr-1">
           <p className="text-[10px] text-muted">
-            HTTP port of the LLM server on this Spark (vLLM / llama.cpp / sglang / ds4 / OpenAI-compatible gateway). Occupancy
-            sources below are dashboard-wide and save separately.
+            HTTP port of the LLM server on this Spark (vLLM / llama.cpp / sglang / ds4 / OpenAI-compatible gateway). Harness
+            connections are dashboard-wide and managed via the Add harness button.
           </p>
           <label className="block space-y-1">
             <span className="text-xs text-muted">Port</span>
