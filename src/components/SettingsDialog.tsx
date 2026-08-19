@@ -217,9 +217,9 @@ export function SettingsDialog({ open, onClose, onSaved }: SettingsDialogProps) 
             </div>
 
             <div>
-              <label className="block text-xs text-text">Occupancy session age limit</label>
+              <label className="block text-xs text-text">Harness session age limit</label>
               <span className="mt-0.5 block text-[10px] leading-snug text-muted">
-                Hide occupancy sessions older than this many hours. 0 shows all.
+                Hide harness sessions older than this many hours. 0 shows all.
               </span>
               <input
                 type="number"

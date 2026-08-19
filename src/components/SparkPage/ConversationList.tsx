@@ -118,7 +118,7 @@ export function ConversationList({ conversations, onAddHarness }: ConversationLi
           )}
         </div>
       ) : (
-        <div className="occupancy-list" aria-label="Occupancy on this LLM">
+        <div className="occupancy-list" aria-label="Harness sessions on this LLM">
           {groups.map((group) => (
             <section key={group.key} className="occupancy-lane">
               <h3 className="occupancy-lane-label">{group.label}</h3>
