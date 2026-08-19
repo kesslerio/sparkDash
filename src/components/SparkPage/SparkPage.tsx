@@ -17,6 +17,7 @@ interface SparkPageProps {
   spark: SparkSnapshot;
   temperatureUnit: "celsius" | "fahrenheit";
   onEdit?: () => void;
+  onOpenHarnessWizard?: () => void;
 }
 
 const EMPTY_CONVERSATIONS: ConversationRow[] = [];
@@ -78,7 +79,7 @@ function SectionHeading({
   );
 }
 
-export function SparkPage({ spark, temperatureUnit, onEdit }: SparkPageProps) {
+export function SparkPage({ spark, temperatureUnit, onEdit, onOpenHarnessWizard }: SparkPageProps) {
   const { metrics } = spark;
   const [disabledDevices, setDisabledDevices] = useState<string[]>(spark.disabledDevices || []);
   const [disabledInterfaces, setDisabledInterfaces] = useState<string[]>(
@@ -219,6 +220,7 @@ export function SparkPage({ spark, temperatureUnit, onEdit }: SparkPageProps) {
         llmPorts={llmPorts}
         hasApiKey={Boolean(spark.llmApiKeyPorts?.includes(port))}
         onRemovePort={canRemove ? handleRemovePort : undefined}
+        onOpenHarnessWizard={onOpenHarnessWizard}
         className={className}
       />
     );

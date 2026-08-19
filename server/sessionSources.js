@@ -186,6 +186,10 @@ function publicAttach(kind, attach, tokens) {
     urlPlaceholder: meta?.urlPlaceholder || undefined,
     usesUsername: meta?.usesUsername || undefined,
     kindLabel: meta?.label || undefined,
+    description: meta?.description || undefined,
+    remoteOnly: meta?.remoteOnly || undefined,
+    helperHuman: meta?.helperHuman || undefined,
+    helperAgent: meta?.helperAgent || undefined,
   };
 }
 
