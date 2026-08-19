@@ -873,6 +873,7 @@ input[type="checkbox"] {
 }
 .occupancy-row.is-warm .occupancy-dot {
   background: var(--color-accent);
+  animation: occupancy-pulse-dim 4s ease-in-out infinite;
 }
 .occupancy-row.is-idle .occupancy-dot {
   background: var(--color-muted);
@@ -937,9 +938,20 @@ input[type="checkbox"] {
   }
 }
 
+@keyframes occupancy-pulse-dim {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.7;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .occupancy-row.is-generating .occupancy-dot,
-  .occupancy-row.is-recent .occupancy-dot {
+  .occupancy-row.is-recent .occupancy-dot,
+  .occupancy-row.is-warm .occupancy-dot {
     animation: none;
   }
 }
