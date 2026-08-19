@@ -6,14 +6,23 @@
  * LAN IP would miss them. Remote Sparks still use lanIp (they must bind a
  * reachable interface or sit behind a tunnel).
  *
- * Requires the dashboard process to share the host network namespace when
- * running in Docker (see docker-compose `network_mode: host`).
+ * When running in Docker with port mapping (not network_mode: host), the
+ * container cannot reach the host's 127.0.0.1. In that case HOST_ROOT_PATH
+ * is set and we fall back to lanIp for local sparks.
  *
  * @param {{ isLocal?: boolean, lanIp?: string } | null | undefined} spark
  * @returns {string}
  */
 export function llmProbeHost(spark) {
-  if (spark?.isLocal) return "127.0.0.1";
+  if (spark?.isLocal) {
+    // In Docker with port mapping, 127.0.0.1 is the container's loopback.
+    // HOST_ROOT_PATH indicates a containerized deployment; use lanIp instead.
+    if (process.env.HOST_ROOT_PATH) {
+      const ip = spark?.lanIp != null ? String(spark.lanIp).trim() : "";
+      if (ip) return ip;
+    }
+    return "127.0.0.1";
+  }
   const ip = spark?.lanIp != null ? String(spark.lanIp).trim() : "";
   return ip;
 }

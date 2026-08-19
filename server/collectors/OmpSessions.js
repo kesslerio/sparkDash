@@ -38,6 +38,7 @@ const PROJECTOR_ROW_KEYS = [
   "originPort",
   "lastUsedAt",
   "midTurn",
+  "gateway",
 ];
 
 export function sanitizeOmpRow(row) {
