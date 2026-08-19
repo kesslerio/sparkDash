@@ -7,7 +7,6 @@ import { BotIcon, GearIcon, InfoIcon } from "../ui/icons";
 import { useMetricsHistoryTail } from "../../hooks/metricsStore";
 import { BenchmarkDialog } from "./BenchmarkDialog";
 import { ConversationList } from "./ConversationList";
-import { SessionSourcesSettings } from "../SessionSourcesSettings";
 import { LlmDailyChart } from "./LlmDailyChart";
 
 interface LlmPanelProps {
@@ -18,6 +17,7 @@ interface LlmPanelProps {
   llmPorts?: number[];
   hasApiKey?: boolean;
   onRemovePort?: (port: number) => void;
+  onOpenHarnessWizard?: () => void;
   className?: string;
 }
 
@@ -174,6 +174,7 @@ export function LlmPanel({
   llmPorts,
   hasApiKey = false,
   onRemovePort,
+  onOpenHarnessWizard,
   className,
 }: LlmPanelProps) {
   // Tail keyed by port so multi-port LLM sparklines stay distinct (8b).
@@ -182,8 +183,6 @@ export function LlmPanel({
   const cachedPrefillHistory = useMetricsHistoryTail(sparkId, `llm:${llmPort}.prefillCached`);
   const uncachedPrefillHistory = useMetricsHistoryTail(sparkId, `llm:${llmPort}.prefillUncached`);
   const [showSettings, setShowSettings] = useState(false);
-  const [focusOccupancy, setFocusOccupancy] = useState(false);
-  const occupancySettingsRef = useRef<HTMLDivElement>(null);
   const [portDraft, setPortDraft] = useState(String(llmPort));
   const [apiKeyDraft, setApiKeyDraft] = useState("");
   const [clearApiKey, setClearApiKey] = useState(false);
@@ -235,15 +234,8 @@ export function LlmPanel({
   const settingsDirty = portDirty || apiKeyDirty;
 
   const openHarnessSettings = useCallback(() => {
-    setFocusOccupancy(true);
-    setShowSettings(true);
-  }, []);
-
-  useEffect(() => {
-    if (!showSettings || !focusOccupancy) return;
-    occupancySettingsRef.current?.scrollIntoView({ block: "nearest" });
-    setFocusOccupancy(false);
-  }, [showSettings, focusOccupancy]);
+    onOpenHarnessWizard?.();
+  }, [onOpenHarnessWizard]);
 
   const handleSaveSettings = async () => {
     if (parsedPort === null) {
@@ -423,9 +415,6 @@ export function LlmPanel({
             >
               {saving ? "Saving…" : "Save port"}
             </button>
-          </div>
-          <div ref={occupancySettingsRef}>
-            <SessionSourcesSettings />
           </div>
         </div>
       ) : !available ? (
