@@ -1,9 +1,8 @@
 /**
  * DeepSeek Harness (dsh) occupancy collector.
  * URL mode only: polls a helper that wraps the dsh web JSON-RPC API.
- * Projector input rows: source, handle, midTurn, gateway, context, agent,
- * originHost, originPort. The helper reads cordis.patch.yml to map
- * provider names to LLM endpoint host:port for spark-card projection.
+ * Projector input rows: source, handle, midTurn, gateway, context, agent.
+ * No originHost/originPort in v1 — sessions do not project onto spark cards.
  * Never throws.
  */
 import {
@@ -27,8 +26,6 @@ const PROJECTOR_ROW_KEYS = [
   "contextWindow",
   "contextApprox",
   "agent",
-  "originHost",
-  "originPort",
 ];
 
 export function sanitizeDshRow(row) {

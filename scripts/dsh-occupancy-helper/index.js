@@ -5,10 +5,6 @@
  * Polls the dsh web JSON-RPC API (POST /api/session.list + session.models)
  * and maps sessions to projector-input rows. dsh web must be running.
  *
- * Provider-to-origin mapping reads ~/.dsh/profiles/ <profile> /cordis.patch.yml to
- * extract baseURL per provider, then emits originHost/originPort so the
- * projector can map dsh sessions onto the correct spark cards.
- *
  * Run on the machine that hosts dsh web:
  *   DSH_OCCUPANCY_TOKEN="$(openssl rand -hex 32)" \
  *   DSH_OCCUPANCY_BIND="$(tailscale ip -4)" \
@@ -19,8 +15,6 @@
  * Paste the printed URL and token, then Check and Save occupancy.
  */
 import http from "node:http";
-import fs from "node:fs";
-import os from "node:os";
 import { timingSafeEqual } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -31,19 +25,17 @@ const MODELS_BATCH = 20;
 
 /**
  * Load dsh sessions from the web API and map to projector rows.
- * @param {{ webUrl?: string, fetchFn?: typeof fetch, profileDir?: string }} opts
+ * @param {{ webUrl?: string, fetchFn?: typeof fetch }} opts
  * @returns {Promise<{ found: number, rows: object[] }>}
  */
 export async function loadOccupancy(opts = {}) {
   const webUrl = String(opts.webUrl ?? process.env.DSH_WEB_URL ?? DSH_WEB_URL_DEFAULT).trim();
   const fetchFn = opts.fetchFn ?? fetch;
-  const profileDir = opts.profileDir ?? path.join(os.homedir(), ".dsh", "profiles");
   try {
-    const providerOrigins = loadProviderOrigins(profileDir);
     const items = await fetchSessionList(fetchFn, webUrl);
     const active = items.filter((item) => item && item.blank === false);
     const enriched = await enrichWithModels(fetchFn, webUrl, active.slice(0, MAX_SESSIONS));
-    const rows = enriched.map((item) => mapSessionRow(item, providerOrigins));
+    const rows = enriched.map(mapSessionRow);
     return { found: rows.length, rows };
   } catch {
     return { found: 0, rows: [] };
@@ -110,101 +102,7 @@ async function fetchSessionModels(fetchFn, webUrl, sessionId) {
   };
 }
 
-/**
- * Parse cordis.patch.yml files to build a provider→{host,port} map.
- * Reads all profiles and merges — last definition wins per provider.
- * Minimal YAML extraction: looks for `providers:` block, then
- * `<provider>:` entries with `baseURL:` values.
- * @param {string} profileDir
- * @returns {Map<string, {host: string, port: number}>}
- */
-export function loadProviderOrigins(profileDir) {
-  const origins = new Map();
-  let dirs;
-  try {
-    dirs = fs.readdirSync(profileDir, { withFileTypes: true })
-      .filter((d) => d.isDirectory())
-      .map((d) => d.name);
-  } catch {
-    return origins;
-  }
-  for (const name of dirs) {
-    const file = path.join(profileDir, name, "cordis.patch.yml");
-    let text;
-    try {
-      text = fs.readFileSync(file, "utf8");
-    } catch {
-      continue;
-    }
-    parseProviderBaseUrls(text, origins);
-  }
-  return origins;
-}
-
-/**
- * Extract provider→baseURL pairs from cordis.patch.yml text.
- * Scans for the `providers:` mapping block and collects `baseURL` values.
- * @param {string} text
- * @param {Map<string, {host: string, port: number}>} origins
- */
-export function parseProviderBaseUrls(text, origins) {
-  const lines = String(text).split("\n");
-  let inProviders = false;
-  let currentProvider = null;
-  let providerIndent = 0;
-  for (const line of lines) {
-    const indent = line.match(/^(\s*)/)?.[1].length ?? 0;
-    const trimmed = line.trim();
-    if (trimmed === "" || trimmed.startsWith("#")) continue;
-
-    // Detect `providers:` key at any indent level.
-    if (/^providers:\s*$/.test(trimmed)) {
-      inProviders = true;
-      continue;
-    }
-
-    if (!inProviders) continue;
-
-    // A new top-level key (same or less indent than providers parent) ends the block.
-    // The `providers:` key is typically nested under `config:` which is under
-    // an item like `llm-pi-ai`. We track the provider indent to detect block end.
-    if (currentProvider != null && indent <= providerIndent && trimmed.endsWith(":")) {
-      currentProvider = null;
-    }
-
-    // Provider key: `john-remote:` at deeper indent than `providers:`
-    const providerMatch = trimmed.match(/^([\w-]+):\s*$/);
-    if (providerMatch && currentProvider == null) {
-      currentProvider = providerMatch[1];
-      providerIndent = indent;
-      continue;
-    }
-
-    // baseURL value inside a provider block
-    if (currentProvider && /^baseURL:\s*["']?/.test(trimmed)) {
-      const urlMatch = trimmed.match(/baseURL:\s*["']?(https?:\/\/[^"'\s]+)/);
-      if (urlMatch) {
-        const origin = parseUrlHostPort(urlMatch[1]);
-        if (origin) origins.set(currentProvider, origin);
-      }
-      continue;
-    }
-  }
-}
-
-function parseUrlHostPort(url) {
-  try {
-    const parsed = new URL(url);
-    const host = parsed.hostname;
-    const port = parsed.port ? Number(parsed.port) : (parsed.protocol === "https:" ? 443 : 80);
-    if (host && Number.isInteger(port)) return { host, port };
-  } catch {
-    /* invalid URL — skip */
-  }
-  return null;
-}
-
-function mapSessionRow(item, providerOrigins = new Map()) {
+function mapSessionRow(item) {
   const sessionId = String(item.sessionId ?? "");
   const projections = item.projections?.values;
   const title = typeof projections?.title === "string" ? projections.title.trim() : "";
@@ -226,11 +124,6 @@ function mapSessionRow(item, providerOrigins = new Map()) {
   row.contextApprox = false;
   if (item._provider && item._model) {
     row.agent = `${item._provider}/${item._model}`;
-  }
-  const origin = providerOrigins.get(item._provider);
-  if (origin) {
-    row.originHost = origin.host;
-    row.originPort = origin.port;
   }
   return row;
 }

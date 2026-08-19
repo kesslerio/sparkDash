@@ -51,8 +51,6 @@ test("T1: sanitizeDshRow keeps allowed keys, forces source=dsh", () => {
     contextWindow: 1000,
     contextApprox: false,
     agent: "john-remote/model",
-    originHost: "100.120.26.16",
-    originPort: 8888,
     extraField: "removed",
   });
   assert.equal(row.source, "dsh");
@@ -64,8 +62,6 @@ test("T1: sanitizeDshRow keeps allowed keys, forces source=dsh", () => {
   assert.equal(row.contextWindow, 1000);
   assert.equal(row.contextApprox, false);
   assert.equal(row.agent, "john-remote/model");
-  assert.equal(row.originHost, "100.120.26.16");
-  assert.equal(row.originPort, 8888);
   assert.equal(row.extraField, undefined);
 });
 
@@ -169,15 +165,15 @@ test("T12: diagnoseDshSessions with invalid helper returns error", async () => {
   assert.equal(diag.error, "Invalid occupancy payload");
 });
 
-// T13: rows pass through originHost and originPort from helper
-test("T13: dsh rows pass through originHost and originPort", async () => {
-  const fetchJson = makeFetch(helperPayload([helperRow({ originHost: "100.120.26.16", originPort: 8888 })]));
+// T13: rows do not carry originHost or originPort
+test("T13: dsh rows have no originHost or originPort", async () => {
+  const fetchJson = makeFetch(helperPayload([helperRow()]));
   const loaded = await loadDshOccupancy(
     { enabled: true, mode: "url", url: "http://x", id: "dsh", label: "DSH" },
     { fetchJson },
   );
-  assert.equal(loaded.rows[0].originHost, "100.120.26.16");
-  assert.equal(loaded.rows[0].originPort, 8888);
+  assert.equal(loaded.rows[0].originHost, undefined);
+  assert.equal(loaded.rows[0].originPort, undefined);
 });
 
 // T14: gateway passthrough stamps attach label
