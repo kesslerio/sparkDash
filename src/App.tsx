@@ -12,7 +12,7 @@ import { ShowcasePage } from "./components/ShowcasePage/ShowcasePage";
 import { ThemeSwitch } from "./components/ThemeSwitch";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { HarnessWizard } from "./components/HarnessWizard";
-import { GearIcon, BoltIcon } from "./components/ui/icons";
+import { GearIcon, BoltIcon, BotIcon } from "./components/ui/icons";
 import { OVERVIEW_ID } from "./constants";
 import type { Settings, SparkSnapshot } from "./api/types";
 
@@ -158,8 +158,11 @@ function DashboardApp() {
   }, []);
 
   // First-run auto-open: open the harness wizard when zero harnesses are connected
+  // AND at least one Spark exists. Don't show harness onboarding to a user who
+  // hasn't added any Spark yet — they need a Spark before harnesses matter.
   useEffect(() => {
     if (didFirstRunCheck.current) return;
+    if (liveSparks.length === 0) return;
     didFirstRunCheck.current = true;
     fetchSessionSources()
       .then((sources) => {
@@ -171,7 +174,7 @@ function DashboardApp() {
       .catch(() => {
         // If we can't load sources, don't auto-open — user can open manually
       });
-  }, []);
+  }, [liveSparks]);
 
   const handleSettingsSaved = useCallback((s: Settings) => {
     setSettings(s);
@@ -273,6 +276,15 @@ function DashboardApp() {
             onReorder={handleReorder}
           />
           <div className="ml-auto flex items-center gap-2.5">
+            <button
+              type="button"
+              onClick={() => setShowHarnessWizard(true)}
+              className="icon-circle"
+              title="Harnesses"
+              aria-label="Manage harnesses"
+            >
+              <BotIcon className="h-4 w-4" />
+            </button>
             <button
               type="button"
               onClick={() => setShowSettings(true)}

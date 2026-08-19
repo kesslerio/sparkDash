@@ -35,17 +35,12 @@ interface CheckResult {
   message: string;
 }
 
-const STEPS = ["pick", "configure", "review"] as const;
-type StepPhase = (typeof STEPS)[number];
+type StepPhase = "pick" | "configure" | "review";
 
-function useEscape(onClose: () => void) {
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", handler);
-    return () => document.removeEventListener("keydown", handler);
-  }, [onClose]);
+interface WizardStep {
+  phase: StepPhase;
+  kind?: string;
+  label?: string;
 }
 
 function draftFromAttach(attach: SessionSourceAttach): HarnessConfigDraft {
@@ -86,8 +81,7 @@ function buildPatch(
 }
 
 export function HarnessWizard({ open, onClose, onSaved }: HarnessWizardProps) {
-  useEscape(onClose);
-  const { mounted, visible } = useModalPresence(open);
+  const { mounted, visible } = useModalPresence(open, 240, { escapeOnClose: onClose });
 
   const [loading, setLoading] = useState(false);
   const [sources, setSources] = useState<SessionSources | null>(null);
@@ -100,12 +94,12 @@ export function HarnessWizard({ open, onClose, onSaved }: HarnessWizardProps) {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const didAutoOpen = useRef(false);
+  const didLoadSources = useRef(false);
 
   // Load session sources when wizard opens
   useEffect(() => {
-    if (!open || !mounted) return;
-    if (sources && didAutoOpen.current) return;
+    if (!open || didLoadSources.current) return;
+    didLoadSources.current = true;
     setLoading(true);
     setLoadError(null);
     fetchSessionSources()
@@ -126,29 +120,18 @@ export function HarnessWizard({ open, onClose, onSaved }: HarnessWizardProps) {
       })
       .catch((err) => setLoadError(err.message || "Failed to load harnesses"))
       .finally(() => setLoading(false));
-    didAutoOpen.current = true;
-  }, [open, mounted, sources]);
+  }, [open]);
 
-  // Reset state when wizard closes
+  // Reset transient state when wizard closes
   useEffect(() => {
     if (!open) {
-      didAutoOpen.current = false;
+      didLoadSources.current = false;
       setStepIdx(0);
       setSaveError(null);
       setCheckResults({});
       setChecking({});
     }
   }, [open]);
-
-  // Lock body scroll
-  useEffect(() => {
-    if (!mounted) return;
-    const prev = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.body.style.overflow = prev;
-    };
-  }, [mounted]);
 
   const allKinds = useMemo<SessionSourceAttach[]>(() => {
     if (!sources) return [];
@@ -162,18 +145,9 @@ export function HarnessWizard({ open, onClose, onSaved }: HarnessWizardProps) {
     return result;
   }, [sources]);
 
-  const selectedList = useMemo(() => {
-    return allKinds.filter((k) => {
-      const kindId = k.id;
-      return selected.has(kindId) || Object.keys(sources || {}).find((key) => key === kindId && selected.has(key));
-    });
-  }, [allKinds, selected, sources]);
-
   // Build the step sequence: pick → one per selected → review
-  const stepSequence = useMemo(() => {
-    const steps: { phase: StepPhase; kind?: string; label?: string }[] = [
-      { phase: "pick", label: "Select harnesses" },
-    ];
+  const stepSequence = useMemo<WizardStep[]>(() => {
+    const steps: WizardStep[] = [{ phase: "pick", label: "Select harnesses" }];
     const selectedKinds = allKinds.filter((k) => selected.has(k.id));
     for (const kind of selectedKinds) {
       steps.push({ phase: "configure", kind: kind.id, label: kind.kindLabel || kind.id });
@@ -184,6 +158,12 @@ export function HarnessWizard({ open, onClose, onSaved }: HarnessWizardProps) {
 
   const currentStep = stepSequence[stepIdx] || stepSequence[0];
   const totalSteps = stepSequence.length;
+
+  // Derive the attach for the current configure step once, no repeated find() + !
+  const currentAttach = useMemo(() => {
+    if (currentStep.phase !== "configure" || !currentStep.kind) return null;
+    return allKinds.find((k) => k.id === currentStep.kind) ?? null;
+  }, [allKinds, currentStep]);
 
   const toggleKind = useCallback((kindId: string) => {
     setSelected((prev) => {
@@ -281,6 +261,13 @@ export function HarnessWizard({ open, onClose, onSaved }: HarnessWizardProps) {
       ? "Review and save"
       : `Configure ${currentStep.label}`;
 
+  const subtitle =
+    currentStep.phase === "pick"
+      ? "Select all the coding-agent harnesses you use, then configure each one."
+      : currentStep.phase === "review"
+      ? "Confirm your harness connections before saving."
+      : "Set up how SparkDash reaches this harness.";
+
   return createPortal(
     <div
       className={`harness-wizard-overlay${visible ? " is-open" : ""}`}
@@ -296,9 +283,12 @@ export function HarnessWizard({ open, onClose, onSaved }: HarnessWizardProps) {
       >
         <div className="harness-wizard__header">
           <div className="harness-wizard__header-row">
-            <h2 id="harness-wizard-title" className="harness-wizard__title">
-              {title}
-            </h2>
+            <div className="harness-wizard__header-text">
+              <h2 id="harness-wizard-title" className="harness-wizard__title">
+                {title}
+              </h2>
+              <p className="harness-wizard__subtitle">{subtitle}</p>
+            </div>
             <button
               type="button"
               className="harness-wizard__close"
@@ -311,13 +301,20 @@ export function HarnessWizard({ open, onClose, onSaved }: HarnessWizardProps) {
             </button>
           </div>
           <div className="harness-wizard__step-indicator">
-            <span className="harness-wizard__step-compact">{stepIdx + 1}/{totalSteps}</span>
-            <div className="harness-wizard__step-dots">
+            <span className="harness-wizard__step-compact">
+              Step {stepIdx + 1} of {totalSteps}
+            </span>
+            <div className="harness-wizard__step-track">
               {stepSequence.map((s, i) => (
                 <div
                   key={i}
-                  className={`harness-wizard__step-dot${i === stepIdx ? " is-current" : ""}${i < stepIdx ? " is-done" : ""}`}
-                />
+                  className={`harness-wizard__step-node${i === stepIdx ? " is-current" : ""}${i < stepIdx ? " is-done" : ""}`}
+                >
+                  <span className="harness-wizard__step-node-dot" />
+                  {i < stepSequence.length - 1 && (
+                    <span className="harness-wizard__step-node-line" />
+                  )}
+                </div>
               ))}
             </div>
           </div>
@@ -337,11 +334,11 @@ export function HarnessWizard({ open, onClose, onSaved }: HarnessWizardProps) {
             />
           )}
 
-          {!loading && currentStep.phase === "configure" && currentStep.kind && (
+          {!loading && currentStep.phase === "configure" && currentStep.kind && currentAttach && (
             <ConfigureStep
               kindId={currentStep.kind}
-              attach={allKinds.find((k) => k.id === currentStep.kind)!}
-              draft={configs[currentStep.kind] || draftFromAttach(allKinds.find((k) => k.id === currentStep.kind)!)}
+              attach={currentAttach}
+              draft={configs[currentStep.kind] || draftFromAttach(currentAttach)}
               snippetMode={snippetMode[currentStep.kind] || "human"}
               onSnippetModeChange={(mode) => setSnippetMode((prev) => ({ ...prev, [currentStep.kind!]: mode }))}
               onUpdate={(patch) => updateConfig(currentStep.kind!, patch)}
