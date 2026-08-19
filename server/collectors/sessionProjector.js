@@ -156,7 +156,14 @@ export function withOccupancyHosts(sparks, hosts = localInterfaceHosts()) {
   const extra = Array.isArray(hosts) ? hosts.filter(Boolean) : [];
   const list = Array.isArray(sparks) ? sparks : [];
   if (extra.length === 0) return list;
-  return list.map((spark) => (spark?.isLocal ? { ...spark, occupancyHosts: extra } : spark));
+  return list.map((spark) => {
+    if (!spark?.isLocal) return spark;
+    // Merge config-set occupancyHosts with detected local interface IPs.
+    // Replacing would lose manually configured LAN IPs in containerized deployments.
+    const existing = Array.isArray(spark.occupancyHosts) ? spark.occupancyHosts : [];
+    const merged = [...new Set([...existing, ...extra])];
+    return { ...spark, occupancyHosts: merged };
+  });
 }
 
 function exclusiveNameHosts(sparks) {
