@@ -781,7 +781,7 @@ export function LlmPanel({
         sparkId={sparkId}
         llmPort={llmPort}
         modelId={llm?.benchmarkModel ?? llm?.modelId ?? null}
-        modelList={llm?.modelPath ?? null}
+        models={llm?.models ?? undefined}
       />
     </Panel>
   );

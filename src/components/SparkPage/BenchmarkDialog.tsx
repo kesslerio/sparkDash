@@ -20,8 +20,8 @@ interface BenchmarkDialogProps {
   sparkId: string;
   llmPort: number;
   modelId: string | null;
-  /** Comma-separated model list from multi-model routers (e.g. LiteLLM). Null for single-model backends. */
-  modelList?: string | null;
+  /** All model IDs from /v1/models. Undefined for backends that don't report a list. */
+  models?: string[];
 }
 
 function useEscape(onClose: () => void, enabled: boolean) {
@@ -146,7 +146,7 @@ export function BenchmarkDialog({
   sparkId,
   llmPort,
   modelId,
-  modelList,
+  models,
 }: BenchmarkDialogProps) {
   const [selected, setSelected] = useState<number[]>([...DEFAULT_SELECTED]);
   const [maxTokensDraft, setMaxTokensDraft] = useState(String(DEFAULT_MAX_TOKENS));
@@ -159,10 +159,7 @@ export function BenchmarkDialog({
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const copyResetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Parse the comma-separated model list from multi-model routers.
-  const availableModels = modelList
-    ? modelList.split(",").map((s) => s.trim()).filter(Boolean)
-    : [];
+  const availableModels = models ?? [];
   const isMultiModel = availableModels.length > 1;
 
   // Sync selected model when the prop changes or dialog opens.
@@ -325,7 +322,7 @@ export function BenchmarkDialog({
         port: llmPort,
         concurrencies: selected,
         maxTokens,
-        modelId: selectedModel || modelId || undefined,
+        modelId: selectedModel || undefined,
       });
       setJob(started);
       startPolling(started.benchId);
@@ -355,7 +352,7 @@ export function BenchmarkDialog({
 
   const handleCopyResults = async () => {
     if (!job || job.results.length === 0) return;
-    const text = buildShareText(job, selectedModel || modelId);
+    const text = buildShareText(job, selectedModel);
     try {
       if (navigator.clipboard?.writeText) {
         await navigator.clipboard.writeText(text);
