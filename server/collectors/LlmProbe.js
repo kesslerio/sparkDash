@@ -434,7 +434,13 @@ export class LlmProbe {
         if (sgRes.ok) {
           this.backendType = "sglang";
           const sgData = await sgRes.json();
+          // Load before last_gen_throughput so inflight can keep a steady rate live.
+          await this._probeSglangLoad();
           this._applySglangServerInfo(sgData, dtSec);
+          // Engine tile: Active vs Sleeping. SGLang has no live sleep gauge
+          // (sleep_on_idle is a launch flag, not current state). A reachable
+          // server with weights resident is Active / ready.
+          if (this.gpuMemoryUtilization == null) this.gpuMemoryUtilization = 1;
         }
       } catch {}
     }
@@ -706,19 +712,103 @@ export class LlmProbe {
       }
     }
 
-    // No cumulative counters — sticky last_gen_throughput only while it moves
+    // No cumulative counters — sticky last_gen_throughput only while it moves,
+    // unless /v1/loads (or /get_load) says requests are in flight.
     const lastGen = LlmProbe._sglangLastGenThroughput(sgData);
-    this.generationTps = this._sglangStickyThroughput(lastGen);
+    this.generationTps = this._sglangStickyThroughput(lastGen, this._sglangInflight());
+  }
+
+  /** True when SGLang load probe reported running or waiting requests. */
+  _sglangInflight() {
+    return (
+      this.slotsActive > 0 ||
+      (this.requestsRunning != null && this.requestsRunning > 0) ||
+      (this.requestsWaiting != null && this.requestsWaiting > 0)
+    );
+  }
+
+  /**
+   * Prefer /v1/loads (num_running_reqs). Fall back to /get_load, where
+   * num_reqs is running + waiting.
+   */
+  async _probeSglangLoad() {
+    for (const path of ["/v1/loads", "/get_load"]) {
+      try {
+        const res = await this._fetch(`${this.baseUrl}${path}`);
+        if (!res.ok) continue;
+        const data = await res.json().catch(() => null);
+        if (this._applySglangLoad(data)) return;
+      } catch {
+        /* try next */
+      }
+    }
+  }
+
+  /**
+   * Apply SGLang /v1/loads or /get_load. Returns true when a row was applied.
+   * @param {unknown} payload
+   * @returns {boolean}
+   */
+  _applySglangLoad(payload) {
+    const rows = LlmProbe._sglangLoadRows(payload);
+    if (!rows.length) return false;
+    let running = 0;
+    let waiting = 0;
+    let saw = false;
+    for (const row of rows) {
+      const wait = Number(row.num_waiting_reqs);
+      const runDirect = Number(row.num_running_reqs);
+      const total = Number(row.num_reqs);
+      if (Number.isFinite(wait) && wait >= 0) {
+        waiting += wait;
+        saw = true;
+      }
+      if (Number.isFinite(runDirect) && runDirect >= 0) {
+        running += runDirect;
+        saw = true;
+      } else if (Number.isFinite(total) && total >= 0) {
+        const waitPart = Number.isFinite(wait) && wait >= 0 ? wait : 0;
+        running += Math.max(0, total - waitPart);
+        saw = true;
+      }
+    }
+    if (!saw) return false;
+    this.requestsRunning = running;
+    this.requestsWaiting = waiting;
+    this.slotsActive = Math.round(running);
+    return true;
+  }
+
+  /**
+   * @param {unknown} payload
+   * @returns {Array<Record<string, unknown>>}
+   */
+  static _sglangLoadRows(payload) {
+    if (payload == null) return [];
+    if (Array.isArray(payload)) {
+      return payload.filter((row) => row && typeof row === "object");
+    }
+    if (typeof payload !== "object") return [];
+    if (Array.isArray(payload.loads)) {
+      return payload.loads.filter((row) => row && typeof row === "object");
+    }
+    if (payload.num_reqs != null || payload.num_running_reqs != null) {
+      return [payload];
+    }
+    return [];
   }
 
   /**
    * Map SGLang's sticky last_gen_throughput gauge to a live panel rate.
    * Returns 0 until the value changes between polls (avoids showing a stale
    * leftover after idle); stays live for a short window after each change.
+   * When `inflight` is true (independent load signal), keep a positive rate
+   * even if the gauge is not moving — a busy decode can report a constant value.
    * @param {number | null} raw
+   * @param {boolean} [inflight]
    * @returns {number}
    */
-  _sglangStickyThroughput(raw) {
+  _sglangStickyThroughput(raw, inflight = false) {
     if (raw == null || !Number.isFinite(raw) || raw < 0) {
       this._sglangStickyTps = null;
       return 0;
@@ -728,9 +818,12 @@ export class LlmProbe {
     const prev = this._sglangStickyTps;
 
     if (!prev) {
-      // First sample after reset/start — seed only; do not display stale gauge
-      this._sglangStickyTps = { value: rounded, liveUntil: 0 };
-      return 0;
+      // First sample after reset/start — seed only unless load says we are busy
+      this._sglangStickyTps = {
+        value: rounded,
+        liveUntil: inflight && rounded > 0 ? now + SGLANG_STICKY_TPS_LIVE_MS : 0,
+      };
+      return inflight && rounded > 0 ? rounded : 0;
     }
 
     if (rounded !== prev.value) {
@@ -742,6 +835,9 @@ export class LlmProbe {
     }
 
     if (prev.liveUntil > now) {
+      return rounded;
+    }
+    if (inflight && rounded > 0) {
       return rounded;
     }
     return 0;
