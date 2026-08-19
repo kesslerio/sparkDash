@@ -395,7 +395,7 @@ export class LlmProbe {
           // Multi-model router (e.g. LiteLLM): show count, list IDs in modelPath.
           // Store first model for benchmark/showcase requests.
           this.models = models.map((m) => m?.id).filter(Boolean);
-          this.modelId = `${models.length} models`;
+          this.modelId = `${this.models.length} models`;
           this.modelPath = this.models.join(", ");
           this.benchmarkModel = this.models[0] || null;
           this.contextLength = null;
