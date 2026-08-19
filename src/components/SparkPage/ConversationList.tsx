@@ -6,6 +6,7 @@ const SOURCE_LABEL: Record<string, string> = {
   hermes: "Hermes",
   opencode: "OpenCode",
   omp: "oh-my-pi",
+  dsh: "DeepSeek Harness",
 };
 
 interface ConversationListProps {
@@ -109,7 +110,7 @@ export function ConversationList({ conversations, onAddHarness }: ConversationLi
       </div>
       {conversations.length === 0 ? (
         <div className="occupancy-empty">
-          <p>No sessions on this LLM. Attach OpenClaw, Hermes, OpenCode, or oh-my-pi.</p>
+          <p>No sessions on this LLM. Attach OpenClaw, Hermes, OpenCode, oh-my-pi, or DeepSeek Harness.</p>
           {onAddHarness && (
             <button type="button" onClick={onAddHarness} className="occupancy-add-harness">
               + Harness
