@@ -582,6 +582,14 @@ export interface SessionSourceAttach {
   urlPlaceholder?: string;
   /** Hermes dashboard username field. Omit when the kind has no username. */
   usesUsername?: boolean;
+  /** One-line connection-method description for the onboarding wizard. */
+  description?: string;
+  /** True for remote-only harnesses (dsh). Omit when the harness supports local mode. */
+  remoteOnly?: boolean;
+  /** Human-readable helper snippet for "Run it yourself" mode. Helper-backed kinds only. */
+  helperHuman?: string;
+  /** Agent-pasteable helper snippet for "Have an agent set it up" mode. Helper-backed kinds only. */
+  helperAgent?: string;
 }
 
 export type SessionSources = Record<string, SessionSourceAttach[]>;
