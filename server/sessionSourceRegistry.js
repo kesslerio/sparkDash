@@ -51,6 +51,12 @@ const KINDS = Object.freeze([
       return trimmedEnv(env?.OMP_CONFIG_DIR, "~/.omp/agent");
     },
   }),
+  Object.freeze({
+    id: "dsh",
+    label: "DeepSeek Harness",
+    urlPlaceholder: "http://127.0.0.1:8791/occupancy",
+    usesUsername: false,
+  }),
 ]);
 
 export function sessionSourceKinds() {
@@ -68,7 +74,10 @@ export function kindById(id) {
 
 export function conventionalStateDir(id, env = process.env) {
   const kind = kindById(id);
-  return kind ? kind.conventionalStateDir(env) : "";
+  if (kind && typeof kind.conventionalStateDir === "function") {
+    return kind.conventionalStateDir(env);
+  }
+  return "";
 }
 
 export function conventionalConfigDir(id, env = process.env) {
