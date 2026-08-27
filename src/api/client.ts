@@ -5,6 +5,7 @@ import type {
   HermesUpdatesResponse,
   LlmMetrics,
   LlmDailyResponse,
+  LlmTelemetryResponse,
   SessionSources,
   SessionSourcesHealth,
   SessionSourcesPatch,
@@ -58,6 +59,16 @@ export function fetchLlmDaily(
 ): Promise<LlmDailyResponse> {
   const q = new URLSearchParams({ port: String(port), days: String(days) });
   return apiFetch(`/api/sparks/${encodeURIComponent(id)}/llm/daily?${q.toString()}`);
+}
+
+/** Restart-safe ten-second LLM telemetry for incident and capacity analysis. */
+export function fetchLlmTelemetry(
+  id: string,
+  port: number,
+  hours = 24
+): Promise<LlmTelemetryResponse> {
+  const q = new URLSearchParams({ port: String(port), hours: String(hours) });
+  return apiFetch(`/api/sparks/${encodeURIComponent(id)}/llm/telemetry?${q.toString()}`);
 }
 
 export function addSpark(config: SparkConfig): Promise<{ success: boolean; spark: SparkConfig }> {

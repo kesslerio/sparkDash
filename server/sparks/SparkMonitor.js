@@ -6,6 +6,7 @@ import { ComfyProbe } from "../collectors/ComfyProbe.js";
 import { HermesProbe } from "../collectors/HermesProbe.js";
 import { TailscaleProbe } from "../collectors/TailscaleProbe.js";
 import { llmDaily } from "../collectors/LlmDaily.js";
+import { llmTelemetry } from "../collectors/LlmTelemetry.js";
 import { sshTest, sshExec } from "../collectors/ssh.js";
 import {
   POLL_INTERVAL_GPU,
@@ -632,7 +633,10 @@ export class SparkMonitor {
             const probes = Array.from(this.llmProbes.values());
             for (let i = 0; i < result.length; i++) {
               const probe = probes[i];
-              if (probe) llmDaily.record(this.spark.id, probe.port, result[i]);
+              if (probe) {
+                llmDaily.record(this.spark.id, probe.port, result[i]);
+                llmTelemetry.record(this.spark.id, probe.port, result[i]);
+              }
             }
           }
           break;
@@ -821,4 +825,3 @@ export class SparkMonitor {
     };
   }
 }
-

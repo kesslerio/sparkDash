@@ -16,6 +16,7 @@ vllm:prefix_cache_hits_total{engine="0"} 10.0
 vllm:prefix_cache_queries_total{engine="0"} 20.0
 vllm:spec_decode_num_accepted_tokens_total{engine="0"} 8.0
 vllm:spec_decode_num_draft_tokens_total{engine="0"} 10.0
+vllm:cache_config_info{engine="0",kv_cache_size_tokens="1579516",kv_cache_max_concurrency="1.5063438415527344"} 1.0
 `;
 
 function jsonRes(data, status = 200) {
@@ -98,6 +99,8 @@ test("vLLM probe: counter diffs + tiles; skips get_server_info when known vllm",
   assert.equal(snap.preemptionsTotal, 3);
   assert.equal(snap.prefixCacheHitRate, 0.5);
   assert.equal(snap.mtpAcceptanceRate, 0.8);
+  assert.equal(snap.kvCacheCapacityTokens, 1579516);
+  assert.equal(snap.kvCacheMaxConcurrency, 1.5063438415527344);
   assert.equal(snap.available, true);
   assert.ok(!hits.some((h) => h.includes("get_server_info")));
 });

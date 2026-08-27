@@ -40,6 +40,8 @@ const VLLM_METRIC_INFO = {
     "Lifetime speculative / MTP acceptance rate (accepted draft tokens ÷ drafted tokens). Higher means speculative decoding is paying off; — when speculation is off or unused.",
 } as const;
 
+const LONG_CONTEXT_REFERENCE_TOKENS = 500_000;
+
 /** Backend badge — neutral surfaces with a single accent dot. No blue/purple. */
 function BackendBadge({ backend }: { backend: string | null }) {
   if (!backend) return <span className="text-xs text-muted">No backend</span>;
@@ -673,6 +675,19 @@ export function LlmPanel({
                     : "—"}
                 </div>
               </div>
+            </div>
+          )}
+
+          {llm?.backend === "vllm" && llm.kvCacheCapacityTokens != null && (
+            <div
+              className="border-t border-border pt-2 text-[10px] text-muted"
+              title="Engine-reported KV token pool. The 500K figure is theoretical: generation tokens, scheduler limits, and safety headroom reduce usable concurrency."
+            >
+              Engine KV pool: {Math.round(llm.kvCacheCapacityTokens).toLocaleString()} tokens · about{" "}
+              {Math.floor(llm.kvCacheCapacityTokens / LONG_CONTEXT_REFERENCE_TOKENS)} × 500K contexts theoretical
+              {llm.kvCacheMaxConcurrency != null
+                ? ` · ${llm.kvCacheMaxConcurrency.toFixed(2)}× at configured max length`
+                : ""}
             </div>
           )}
 

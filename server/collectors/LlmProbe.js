@@ -101,6 +101,10 @@ export class LlmProbe {
     // vLLM inference metrics from /metrics (null when not vLLM / missing series)
     // Metric names follow stock vLLM Prometheus exposition (versions may differ).
     this.kvCacheUsage = null; // 0–1 fraction
+    /** Engine-reported total KV cache token pool. */
+    this.kvCacheCapacityTokens = null;
+    /** Engine-reported theoretical max concurrency at configured model length. */
+    this.kvCacheMaxConcurrency = null;
     this.requestsRunning = null;
     this.requestsWaiting = null;
     this.ttftP95Seconds = null;
@@ -240,6 +244,8 @@ export class LlmProbe {
     this.slotsTotal = 0;
     this.totalOutputTokens = 0;
     this.kvCacheUsage = null;
+    this.kvCacheCapacityTokens = null;
+    this.kvCacheMaxConcurrency = null;
     this.requestsRunning = null;
     this.requestsWaiting = null;
     this.ttftP95Seconds = null;
@@ -568,6 +574,8 @@ export class LlmProbe {
 
     // Clear tiles that are vLLM-histogram-specific (no ds4 equivalent yet)
     this.kvCacheUsage = null;
+    this.kvCacheCapacityTokens = null;
+    this.kvCacheMaxConcurrency = null;
     this.requestsWaiting = null;
     this.ttftP95Seconds = null;
     this.preemptionsTotal = null;
@@ -630,6 +638,16 @@ export class LlmProbe {
 
     this.requestsWaiting = this._getVllmMetric(txt, "num_requests_waiting");
     this.kvCacheUsage = this._getVllmMetric(txt, "kv_cache_usage_perc");
+    this.kvCacheCapacityTokens = this._getPromInfoNumber(
+      txt,
+      "vllm:cache_config_info",
+      "kv_cache_size_tokens"
+    );
+    this.kvCacheMaxConcurrency = this._getPromInfoNumber(
+      txt,
+      "vllm:cache_config_info",
+      "kv_cache_max_concurrency"
+    );
     this.preemptionsTotal = this._getVllmMetric(txt, "num_preemptions_total");
 
     const ttftHist = this._parseVllmHistogram(txt, "vllm:time_to_first_token_seconds");
@@ -669,6 +687,8 @@ export class LlmProbe {
    * @param {number} dtSec
    */
   _applySglangServerInfo(sgData, dtSec) {
+    this.kvCacheCapacityTokens = null;
+    this.kvCacheMaxConcurrency = null;
     // Prefer true max context (context_length / max_total_tokens). Do NOT use
     // max_total_num_tokens — that is the KV-cache pool budget across concurrent
     // sequences and is often ~2× the configured context (showed 2.1M for a 1M run).
@@ -1121,6 +1141,18 @@ export class LlmProbe {
     return this._getPromMetric(body, `vllm:${name}`);
   }
 
+  /** Read a numeric label from a Prometheus info metric. */
+  _getPromInfoNumber(body, name, labelKey) {
+    const escName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const escKey = labelKey.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const line = new RegExp(`^${escName}\\{([^}]*)\\}\\s+[\\d.eE+-]+\\s*$`, "m").exec(body);
+    if (!line) return null;
+    const label = new RegExp(`(?:^|,)\\s*${escKey}="([^"]+)"`).exec(line[1]);
+    if (!label) return null;
+    const value = Number(label[1]);
+    return Number.isFinite(value) && value >= 0 ? value : null;
+  }
+
   /**
    * Parse a vLLM Prometheus histogram from /metrics text.
    * Returns { buckets: [{upper, count}], total } with cumulative counts per `le`,
@@ -1283,6 +1315,8 @@ export class LlmProbe {
       uncachedPrefillTps: this.uncachedPrefillTps,
       totalOutputTokens: this.totalOutputTokens,
       kvCacheUsage: this.kvCacheUsage,
+      kvCacheCapacityTokens: this.kvCacheCapacityTokens,
+      kvCacheMaxConcurrency: this.kvCacheMaxConcurrency,
       requestsRunning: this.requestsRunning,
       requestsWaiting: this.requestsWaiting,
       ttftP95Seconds: this.ttftP95Seconds,
@@ -1313,6 +1347,8 @@ export class LlmProbe {
       uncachedPrefillTps: null,
       totalOutputTokens: 0,
       kvCacheUsage: null,
+      kvCacheCapacityTokens: null,
+      kvCacheMaxConcurrency: null,
       requestsRunning: null,
       requestsWaiting: null,
       ttftP95Seconds: null,
