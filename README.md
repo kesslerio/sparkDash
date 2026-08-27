@@ -54,6 +54,7 @@ It also supports **non-Spark units**: any Linux machine with an NVIDIA GPU (e.g.
 
 ### Version 1.8.1 — Daily LLM history and Docker SSH keys
 - **Daily decode / prefill history** — 14-day peak tok/s on the LLM card (busy samples only), persisted in `config/llm-daily.json`
+- **Forensic LLM telemetry** — restart-safe 10-second availability, queue, KV, latency, cache, speculation, and throughput samples retained for seven days in `config/llm-telemetry.json`, with a small recovery journal compacted hourly
 - **Cached vs uncached prefill** — live rows on ds4, llama.cpp (`n_prompt_tokens_cache`), and SGLang (`--enable-metrics`); vLLM keeps combined prefill + prefix-cache hit rate
 - **Docker SSH key auth** — document bind-mounting a host key into `/root/.ssh` (or `SSH_IDENTITY_FILE`); IPs are from the sparkDash host, not the browser
 
@@ -357,6 +358,7 @@ sparkDash/
 | DELETE | `/api/sparks/:id/llm-ports/:port` | Remove an LLM port (hot) |
 | PUT | `/api/sparks/:id/llm-port` | LLM port — backward-compat (hot) |
 | GET | `/api/sparks/:id/llm/daily` | Daily busy decode/prefill tok/s (`port`, `days`) |
+| GET | `/api/sparks/:id/llm/telemetry` | Ten-second forensic LLM telemetry (`port`, `hours`, up to 168) |
 | GET | `/api/settings` | Global settings |
 | PUT | `/api/settings` | Update global settings |
 | GET | `/api/session-sources` | Occupancy attaches (tokens redacted) |

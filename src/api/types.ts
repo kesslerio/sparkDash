@@ -303,6 +303,10 @@ export interface LlmMetrics {
   totalOutputTokens: number;
   /** vLLM KV cache usage fraction (0–1). null when backend !== vllm or unreachable. */
   kvCacheUsage?: number | null;
+  /** vLLM engine-reported total KV cache token pool. */
+  kvCacheCapacityTokens?: number | null;
+  /** vLLM engine-reported theoretical max concurrency at configured model length. */
+  kvCacheMaxConcurrency?: number | null;
   /** vLLM running request count. null when unavailable. */
   requestsRunning?: number | null;
   /** vLLM waiting request count. null when unavailable. */
@@ -345,6 +349,34 @@ export interface LlmDailyResponse {
   sparkId: string;
   port: number;
   days: LlmDailyDay[];
+}
+
+export interface LlmTelemetryPoint {
+  /** Start of the ten-second bucket, milliseconds since epoch. */
+  t: number;
+  available: boolean;
+  backend: string | null;
+  generationTps: number | null;
+  prefillTps: number | null;
+  requestsRunning: number | null;
+  requestsWaiting: number | null;
+  kvCacheUsage: number | null;
+  ttftP95Seconds: number | null;
+  e2eP95Seconds: number | null;
+  itlP95Seconds: number | null;
+  preemptionsTotal: number | null;
+  prefixCacheHitRate: number | null;
+  mtpAcceptanceRate: number | null;
+  kvCacheCapacityTokens: number | null;
+  kvCacheMaxConcurrency: number | null;
+}
+
+export interface LlmTelemetryResponse {
+  sparkId: string;
+  port: number;
+  bucketSeconds: number;
+  retentionHours: number;
+  points: LlmTelemetryPoint[];
 }
 
 /** Security posture badge payload from LlmProbe. */

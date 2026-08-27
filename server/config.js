@@ -21,6 +21,9 @@ const SESSION_SOURCES_JSON_PATH =
 /** Daily LLM tok/s rollups (gitignored). */
 const LLM_DAILY_JSON_PATH =
   process.env.LLM_DAILY_JSON_PATH || path.join(ROOT, "config", "llm-daily.json");
+/** Bounded high-resolution LLM telemetry (gitignored). */
+const LLM_TELEMETRY_JSON_PATH =
+  process.env.LLM_TELEMETRY_JSON_PATH || path.join(ROOT, "config", "llm-telemetry.json");
 
 // ─── LLM / Comfy probe timeouts ──────────────────────────
 const LLM_PROBE_TIMEOUT_MS = 3000;
@@ -99,6 +102,7 @@ export {
   SECRETS_KEY_PATH,
   SESSION_SOURCES_JSON_PATH,
   LLM_DAILY_JSON_PATH,
+  LLM_TELEMETRY_JSON_PATH,
   LLM_PROBE_TIMEOUT_MS,
   COMFY_PROBE_TIMEOUT_MS,
   TAILSCALE_PROBE_TIMEOUT_MS,

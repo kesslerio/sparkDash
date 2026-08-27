@@ -25,6 +25,7 @@ import {
 import { showcaseManager } from "./collectors/ShowcaseManager.js";
 import { llmProbeHost } from "./collectors/llmHost.js";
 import { llmDaily } from "./collectors/LlmDaily.js";
+import { llmTelemetry } from "./collectors/LlmTelemetry.js";
 import { compareSemver, getLatestRelease } from "./collectors/HermesReleases.js";
 
 dotenv.config();
@@ -820,6 +821,23 @@ app.get("/api/sparks/:id/llm/daily", (req, res) => {
   res.json(llmDaily.getSeries(spark.id, port, { days }));
 });
 
+/** Ten-second LLM telemetry buckets. Query: port, hours (1–168). */
+app.get("/api/sparks/:id/llm/telemetry", (req, res) => {
+  const spark = registry.getSpark(req.params.id);
+  if (!spark) return res.status(404).json({ error: "Spark not found" });
+  const ports =
+    Array.isArray(spark.llmPorts) && spark.llmPorts.length
+      ? spark.llmPorts
+      : [resolveLlmPort(spark)];
+  const port = req.query.port != null ? Number(req.query.port) : ports[0];
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    return res.status(400).json({ error: "Invalid port" });
+  }
+  let hours = req.query.hours != null ? Number(req.query.hours) : 24;
+  if (!Number.isFinite(hours)) hours = 24;
+  res.json(llmTelemetry.getSeries(spark.id, port, { hours }));
+});
+
 /**
  * Decode throughput benchmark (streaming, post-first-token tok/s).
  *
@@ -1453,6 +1471,11 @@ function shutdown(signal) {
     llmDaily.flush();
   } catch (err) {
     console.error("[sparkDash] failed to flush LLM daily history:", err.message);
+  }
+  try {
+    llmTelemetry.flush();
+  } catch (err) {
+    console.error("[sparkDash] failed to flush LLM telemetry:", err.message);
   }
   try {
     if (broadcastTimer) {
