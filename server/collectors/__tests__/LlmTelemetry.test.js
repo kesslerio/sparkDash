@@ -26,11 +26,28 @@ test("LlmTelemetryStore buckets, retains unavailable samples, and persists", () 
     assert.equal(series.points[1].available, false);
 
     store.flush();
+    assert.ok(fs.statSync(`${file}.journal`).size > 0);
     const restored = new LlmTelemetryStore(file);
     assert.deepEqual(
       restored.getSeries("john", 8888, { hours: 1, now: new Date(base.getTime() + 20_000) }),
       series
     );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("LlmTelemetryStore compacts its recovery journal without losing samples", () => {
+  const { dir, file, store } = makeStore();
+  try {
+    const now = new Date("2026-08-27T12:00:00.000Z");
+    store.record("john", 8888, { available: true, requestsWaiting: 3 }, now);
+    store.flush();
+    store.compact();
+
+    assert.equal(fs.readFileSync(`${file}.journal`, "utf8"), "");
+    const restored = new LlmTelemetryStore(file);
+    assert.equal(restored.getSeries("john", 8888, { hours: 1, now }).points[0].requestsWaiting, 3);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

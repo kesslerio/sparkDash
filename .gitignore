@@ -10,6 +10,7 @@ config/bench-active.json
 config/showcase-history.json
 config/llm-daily.json
 config/llm-telemetry.json
+config/llm-telemetry.json.journal
 config/gpu-memory.json
 config/gpu-memory.json.*
 config/bench-exports/

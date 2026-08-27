@@ -6,6 +6,7 @@
  * the inference process or dashboard restarts.
  */
 import fs from "fs";
+import path from "path";
 import { LLM_TELEMETRY_JSON_PATH } from "../config.js";
 import { atomicWrite } from "../util/atomicWrite.js";
 
@@ -14,6 +15,7 @@ const MAX_HOURS = 168;
 const RETENTION_MS = MAX_HOURS * 60 * 60 * 1000;
 const MAX_POINTS = RETENTION_MS / BUCKET_MS;
 const FLUSH_MS = 30_000;
+const COMPACT_MS = 60 * 60 * 1000;
 
 function seriesKey(sparkId, port) {
   return `${sparkId}:${port}`;
@@ -53,26 +55,62 @@ export class LlmTelemetryStore {
   /** @param {string} [filePath] */
   constructor(filePath = LLM_TELEMETRY_JSON_PATH) {
     this.filePath = filePath;
+    this.journalPath = `${filePath}.journal`;
     /** @type {Record<string, Array<Record<string, unknown>>>} */
     this._series = {};
     this._dirty = false;
+    this._pending = new Map();
     this._flushTimer = null;
+    this._lastCompactionAt = Date.now();
     this._load();
   }
 
   _load() {
-    try {
-      if (!fs.existsSync(this.filePath)) return;
-      const raw = JSON.parse(fs.readFileSync(this.filePath, "utf8"));
-      const series = raw?.series;
-      if (!series || typeof series !== "object" || Array.isArray(series)) return;
-      for (const [key, points] of Object.entries(series)) {
-        if (!Array.isArray(points)) continue;
-        this._series[key] = points.filter(validPoint).slice(-MAX_POINTS);
+    if (fs.existsSync(this.filePath)) {
+      try {
+        const raw = JSON.parse(fs.readFileSync(this.filePath, "utf8"));
+        const series = raw?.series;
+        if (series && typeof series === "object" && !Array.isArray(series)) {
+          for (const [key, points] of Object.entries(series)) {
+            if (!Array.isArray(points)) continue;
+            this._series[key] = points.filter(validPoint).slice(-MAX_POINTS);
+          }
+        }
+        this._lastCompactionAt = fs.statSync(this.filePath).mtimeMs;
+      } catch {
+        this._series = {};
       }
-    } catch {
-      this._series = {};
     }
+    try {
+      this._replayJournal();
+      if (!fs.existsSync(this.filePath) && fs.existsSync(this.journalPath)) this.compact();
+    } catch {
+      // Keep the last valid compacted snapshot if the journal cannot be read.
+    }
+  }
+
+  _replayJournal() {
+    if (!fs.existsSync(this.journalPath)) return;
+    for (const line of fs.readFileSync(this.journalPath, "utf8").split("\n")) {
+      if (!line) continue;
+      try {
+        const entry = JSON.parse(line);
+        if (typeof entry?.key !== "string" || !validPoint(entry.point)) continue;
+        this._upsert(entry.key, entry.point);
+      } catch {
+        // A torn final append must not hide the last valid snapshot or entries.
+      }
+    }
+  }
+
+  _upsert(key, point) {
+    const cutoff = point.t - RETENTION_MS + BUCKET_MS;
+    const points = (this._series[key] || []).filter((candidate) => candidate.t >= cutoff);
+    const existing = points.findIndex((candidate) => candidate.t === point.t);
+    if (existing >= 0) points[existing] = point;
+    else points.push(point);
+    points.sort((left, right) => left.t - right.t);
+    this._series[key] = points.slice(-MAX_POINTS);
   }
 
   _scheduleFlush() {
@@ -87,15 +125,28 @@ export class LlmTelemetryStore {
   flush() {
     if (!this._dirty) return;
     try {
-      atomicWrite(
-        this.filePath,
-        JSON.stringify({ version: 1, bucketMs: BUCKET_MS, retentionHours: MAX_HOURS, series: this._series }),
-        0o600
-      );
+      fs.mkdirSync(path.dirname(this.journalPath), { recursive: true });
+      const journal = `${Array.from(this._pending.values(), (entry) => JSON.stringify(entry)).join("\n")}\n`;
+      fs.appendFileSync(this.journalPath, journal, { encoding: "utf8", mode: 0o600 });
+      fs.chmodSync(this.journalPath, 0o600);
+      this._pending.clear();
       this._dirty = false;
+      if (Date.now() - this._lastCompactionAt >= COMPACT_MS) this.compact();
     } catch (err) {
       console.error("[LlmTelemetry] write failed:", err.message);
     }
+  }
+
+  compact() {
+    atomicWrite(
+      this.filePath,
+      JSON.stringify({ version: 1, bucketMs: BUCKET_MS, retentionHours: MAX_HOURS, series: this._series }),
+      0o600
+    );
+    atomicWrite(this.journalPath, "", 0o600);
+    this._pending.clear();
+    this._dirty = false;
+    this._lastCompactionAt = Date.now();
   }
 
   /** Record or replace the current ten-second bucket. */
@@ -105,11 +156,8 @@ export class LlmTelemetryStore {
     if (!Number.isFinite(time)) return;
     const key = seriesKey(sparkId, port);
     const point = pointFrom(metrics, time);
-    const cutoff = point.t - RETENTION_MS + BUCKET_MS;
-    const points = (this._series[key] || []).filter((p) => p.t >= cutoff);
-    if (points.at(-1)?.t === point.t) points[points.length - 1] = point;
-    else points.push(point);
-    this._series[key] = points.slice(-MAX_POINTS);
+    this._upsert(key, point);
+    this._pending.set(`${key}:${point.t}`, { key, point });
     this._dirty = true;
     this._scheduleFlush();
   }
