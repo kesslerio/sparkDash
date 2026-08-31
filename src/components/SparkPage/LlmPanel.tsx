@@ -42,6 +42,26 @@ const VLLM_METRIC_INFO = {
 
 const LONG_CONTEXT_REFERENCE_TOKENS = 500_000;
 
+type LlmStatus = NonNullable<LlmMetrics["status"]>;
+
+function formatRate(rate: number | null | undefined): string {
+  return rate == null || !Number.isFinite(rate) ? "—" : rate.toFixed(1);
+}
+
+function formatObservationAge(lastObservedAt: number | null | undefined): string {
+  if (lastObservedAt == null || !Number.isFinite(lastObservedAt)) return "never";
+  const ageSeconds = Math.max(0, Math.floor((Date.now() - lastObservedAt) / 1000));
+  if (ageSeconds < 2) return "just now";
+  if (ageSeconds < 60) return `${ageSeconds}s ago`;
+  const ageMinutes = Math.floor(ageSeconds / 60);
+  if (ageMinutes < 60) return `${ageMinutes}m ago`;
+  return `${Math.floor(ageMinutes / 60)}h ago`;
+}
+
+function statusLabel(status: LlmStatus): string {
+  return status === "ambiguous_model" ? "Model discovery ambiguous" : status;
+}
+
 /** Backend badge — neutral surfaces with a single accent dot. No blue/purple. */
 function BackendBadge({ backend }: { backend: string | null }) {
   if (!backend) return <span className="text-xs text-muted">No backend</span>;
@@ -208,12 +228,21 @@ export function LlmPanel({
     engineInfoTimer.current = setTimeout(() => setEngineInfoOpen(false), 2000);
   }, [clearEngineInfoTimer]);
 
-  const generationTps = llm?.generationTps ?? 0;
-  const prefillTps = llm?.prefillTps ?? 0;
+  const generationTps = llm?.generationTps ?? null;
+  const prefillTps = llm?.prefillTps ?? null;
   const showPrefillSplit = llm?.cachedPrefillTps != null || llm?.uncachedPrefillTps != null;
-  const cachedPrefillTps = llm?.cachedPrefillTps ?? 0;
-  const uncachedPrefillTps = llm?.uncachedPrefillTps ?? 0;
+  const cachedPrefillTps = llm?.cachedPrefillTps ?? null;
+  const uncachedPrefillTps = llm?.uncachedPrefillTps ?? null;
   const available = llm?.available ?? false;
+  const status: LlmStatus = llm?.status ?? (available ? "active" : "unavailable");
+  const modelLabel =
+    llm?.modelId ||
+    (llm?.models && llm.models.length > 0 ? `${llm.models.length} router models` : "No active model");
+  const statusReason =
+    llm?.statusReason ||
+    llm?.error ||
+    (status === "idle" ? null : "Telemetry has not produced a fresh observation.");
+  const observationAge = formatObservationAge(llm?.lastObservedAt);
 
   // Keep draft in sync when server pushes a different port (other tab / reload)
   useEffect(() => {
@@ -428,11 +457,13 @@ export function LlmPanel({
               ) : (
                 <span className="h-1.5 w-1.5 rounded-full bg-muted" />
               )}
-              <p className="text-xs text-muted">
-                {llm?.posture?.auth === "protected"
-                  ? `${llm.posture.label} on :${llmPort}`
-                  : `No model loaded on :${llmPort}`}
-              </p>
+              <div className="min-w-0 text-xs text-muted">
+                <p className="font-medium text-text">{statusLabel(status)}</p>
+                <p className="break-words [overflow-wrap:anywhere]">
+                  {modelLabel} · observed {observationAge} on :{llmPort}
+                </p>
+                {statusReason && <p className="mt-0.5 text-[10px] text-warning">{statusReason}</p>}
+              </div>
             </div>
             <div className="border-t border-border pt-3 space-y-2">
               <button
@@ -461,6 +492,7 @@ export function LlmPanel({
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
             <BackendBadge backend={llm?.backend ?? null} />
             {llm?.posture && <PostureBadge posture={llm.posture} />}
+            <span className="llm-badge capitalize">{statusLabel(status)}</span>
             {llm?.modelId && (
               <span
                 className="min-w-0 flex-1 whitespace-normal break-words text-xs leading-snug text-text [overflow-wrap:anywhere]"
@@ -470,6 +502,10 @@ export function LlmPanel({
               </span>
             )}
             <span className="shrink-0 font-tabular text-[10px] text-muted">:{llmPort}</span>
+          </div>
+          <div className="-mt-1 text-[10px] text-muted">
+            Last observation {observationAge}
+            {statusReason && ` · ${statusReason}`}
           </div>
           {llm?.modelPath &&
             llm.modelPath !== llm.modelId &&
@@ -484,7 +520,7 @@ export function LlmPanel({
             <div className="flex items-center gap-2">
               <Sparkline data={genHistory} color="var(--color-accent)" height={24} />
               <span className="font-tabular text-sm font-semibold text-accent">
-                {generationTps.toFixed(1)}
+                {formatRate(generationTps)}
               </span>
             </div>
           </div>
@@ -496,7 +532,7 @@ export function LlmPanel({
             <div className="flex items-center gap-2">
               <Sparkline data={prefillHistory} color="var(--color-text)" height={24} />
               <span className="font-tabular text-sm font-semibold text-text">
-                {prefillTps.toFixed(1)}
+                {formatRate(prefillTps)}
               </span>
             </div>
           </div>
@@ -510,7 +546,7 @@ export function LlmPanel({
                 <div className="flex items-center gap-2">
                   <Sparkline data={cachedPrefillHistory} color="var(--color-muted)" height={24} />
                   <span className="font-tabular text-sm font-semibold text-muted">
-                    {cachedPrefillTps.toFixed(1)}
+                    {formatRate(cachedPrefillTps)}
                   </span>
                 </div>
               </div>
@@ -522,7 +558,7 @@ export function LlmPanel({
                 <div className="flex items-center gap-2">
                   <Sparkline data={uncachedPrefillHistory} color="var(--color-text)" height={24} />
                   <span className="font-tabular text-sm font-semibold text-text">
-                    {uncachedPrefillTps.toFixed(1)}
+                    {formatRate(uncachedPrefillTps)}
                   </span>
                 </div>
               </div>
@@ -550,7 +586,7 @@ export function LlmPanel({
             </div>
             <div className="space-y-0.5">
               <div className="flex items-center gap-1 text-[10px] uppercase tracking-wide text-muted">
-                <span>Engine</span>
+                  <span>Status</span>
                 <button
                   type="button"
                   onClick={() => {
@@ -562,7 +598,7 @@ export function LlmPanel({
                   onMouseEnter={clearEngineInfoTimer}
                   onMouseLeave={startEngineInfoTimer}
                   className="relative cursor-pointer opacity-60 hover:opacity-100"
-                  aria-label="Engine state info"
+                  aria-label="Telemetry status info"
                 >
                   <svg
                     width="10"
@@ -584,25 +620,44 @@ export function LlmPanel({
                       onMouseLeave={startEngineInfoTimer}
                       className="absolute left-0 top-full z-10 mt-1 w-56 rounded-md border border-border bg-surface-elevated px-3 py-2 text-left text-[11px] font-normal normal-case text-text shadow-lg"
                     >
-                      Active = processing or ready for requests. Sleeping = idle, GPU memory freed until next request.
+                      Active means the telemetry source sees work in progress. Idle means a fresh source observation proves no work is running. Unknown, stale, and unavailable are not idle.
                     </div>
                   )}
                 </button>
               </div>
               <div className="font-tabular text-sm text-text">
-                {llm?.gpuMemoryUtilization != null
-                  ? llm.gpuMemoryUtilization === 0
-                    ? "Sleeping"
-                    : "Active"
+                {statusLabel(status)}
+              </div>
+            </div>
+            <div className="space-y-0.5">
+              <div className="text-[10px] uppercase tracking-wide text-muted">Process output</div>
+              <div className="font-tabular text-sm text-text">
+                {llm?.totalOutputTokens != null
+                  ? llm.totalOutputTokens.toLocaleString()
+                  : "—"}
+              </div>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-2 border-t border-border pt-3 sm:grid-cols-3">
+            <div className="space-y-0.5">
+              <div className="text-[10px] uppercase tracking-wide text-muted">Process prompt</div>
+              <div className="font-tabular text-sm text-text">
+                {llm?.totalPromptTokens != null ? llm.totalPromptTokens.toLocaleString() : "—"}
+              </div>
+            </div>
+            <div className="space-y-0.5">
+              <div className="text-[10px] uppercase tracking-wide text-muted">Completed requests</div>
+              <div className="font-tabular text-sm text-text">
+                {llm?.completedRequestsTotal != null
+                  ? llm.completedRequestsTotal.toLocaleString()
                   : "—"}
               </div>
             </div>
             <div className="space-y-0.5">
-              <div className="text-[10px] uppercase tracking-wide text-muted">Total Generated</div>
+              <div className="text-[10px] uppercase tracking-wide text-muted">Telemetry source</div>
               <div className="font-tabular text-sm text-text">
-                {llm && llm.totalOutputTokens > 0
-                  ? llm.totalOutputTokens.toLocaleString()
-                  : "—"}
+                {llm?.telemetrySource === "relay" ? "Mama relay" : llm?.telemetrySource === "direct" ? "Direct" : "—"}
               </div>
             </div>
           </div>

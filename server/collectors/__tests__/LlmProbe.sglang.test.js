@@ -282,7 +282,9 @@ test("probe: modern sglang without totals still reports last_gen tok/s", async (
     return { ok: false, status: 404, json: async () => ({}), text: async () => "" };
   };
   const seed = await probe.probe();
-  assert.equal(seed.generationTps, 0);
+  assert.equal(seed.status, "unknown");
+  assert.equal(seed.statusReason, "workload_state_unavailable");
+  assert.equal(seed.generationTps, null);
   gen = 41.2;
   probe.lastProbeTime = Date.now() - 2000;
   const snap = await probe.probe();
@@ -373,7 +375,7 @@ test("probe: reachable SGLang without sleep metric is Active, not Sleeping", asy
   assert.equal(snap.available, true);
   assert.equal(snap.backend, "sglang");
   assert.equal(snap.gpuMemoryUtilization, 1);
-  assert.equal(snap.totalOutputTokens, 0);
+  assert.equal(snap.totalOutputTokens, null);
 });
 
 test("probe: /v1/loads inflight keeps last_gen on the first sample", async () => {
@@ -472,4 +474,32 @@ test("_applySglangPrefillSplit does not clobber server_info tok/s", () => {
   assert.equal(probe.prefillTps, 100);
   assert.equal(probe.lastTokenCounts.output, 150);
   assert.equal(probe.cachedPrefillTps, 0); // first split sample seeds
+});
+
+test("_applySglangMetrics reseeds counters after a reset", () => {
+  const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 30000);
+  probe._applySglangMetrics(
+    "sglang:generation_tokens_total 5000000\n" +
+      "sglang:prompt_tokens_total 6000000\n" +
+      "sglang:num_running_reqs 0\n",
+    2
+  );
+  assert.equal(probe.generationTps, 0);
+
+  probe._applySglangMetrics(
+    "sglang:generation_tokens_total 5000010\n" +
+      "sglang:prompt_tokens_total 6000020\n" +
+      "sglang:num_running_reqs 1\n",
+    2
+  );
+  assert.equal(probe.generationTps, 5);
+
+  probe._resetRateBaselines();
+  probe._applySglangMetrics(
+    "sglang:generation_tokens_total 5000100\n" +
+      "sglang:prompt_tokens_total 6000200\n" +
+      "sglang:num_running_reqs 0\n",
+    2
+  );
+  assert.equal(probe.generationTps, 0);
 });

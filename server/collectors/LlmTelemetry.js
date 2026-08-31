@@ -16,6 +16,14 @@ const RETENTION_MS = MAX_HOURS * 60 * 60 * 1000;
 const MAX_POINTS = RETENTION_MS / BUCKET_MS;
 const FLUSH_MS = 30_000;
 const COMPACT_MS = 60 * 60 * 1000;
+const LLM_STATUSES = new Set([
+  "active",
+  "idle",
+  "unknown",
+  "stale",
+  "unavailable",
+  "ambiguous_model",
+]);
 
 function seriesKey(sparkId, port) {
   return `${sparkId}:${port}`;
@@ -27,12 +35,28 @@ function finiteOrNull(value) {
 }
 
 function pointFrom(metrics, time) {
+  const status = LLM_STATUSES.has(metrics?.status)
+    ? metrics.status
+    : metrics?.available === true
+      ? "active"
+      : "unavailable";
   return {
     t: Math.floor(time / BUCKET_MS) * BUCKET_MS,
     available: metrics?.available === true,
+    status,
+    lastObservedAt: finiteOrNull(metrics?.lastObservedAt),
+    statusReason: typeof metrics?.statusReason === "string" ? metrics.statusReason : null,
+    modelId: typeof metrics?.modelId === "string" ? metrics.modelId : null,
+    telemetrySource:
+      metrics?.telemetrySource === "direct" || metrics?.telemetrySource === "relay"
+        ? metrics.telemetrySource
+        : null,
     backend: typeof metrics?.backend === "string" ? metrics.backend : null,
     generationTps: finiteOrNull(metrics?.generationTps),
     prefillTps: finiteOrNull(metrics?.prefillTps),
+    totalPromptTokens: finiteOrNull(metrics?.totalPromptTokens),
+    totalOutputTokens: finiteOrNull(metrics?.totalOutputTokens),
+    completedRequestsTotal: finiteOrNull(metrics?.completedRequestsTotal),
     requestsRunning: finiteOrNull(metrics?.requestsRunning),
     requestsWaiting: finiteOrNull(metrics?.requestsWaiting),
     kvCacheUsage: finiteOrNull(metrics?.kvCacheUsage),
@@ -49,6 +73,30 @@ function pointFrom(metrics, time) {
 
 function validPoint(point) {
   return point && Number.isFinite(point.t) && typeof point.available === "boolean";
+}
+
+/** Read old v1 points while giving every point the current status vocabulary. */
+function migratePoint(point) {
+  if (!validPoint(point)) return null;
+  const status = LLM_STATUSES.has(point.status)
+    ? point.status
+    : point.available
+      ? "unknown"
+      : "unavailable";
+  return {
+    ...point,
+    status,
+    lastObservedAt: finiteOrNull(point.lastObservedAt),
+    statusReason: typeof point.statusReason === "string" ? point.statusReason : null,
+    modelId: typeof point.modelId === "string" ? point.modelId : null,
+    telemetrySource:
+      point.telemetrySource === "direct" || point.telemetrySource === "relay"
+        ? point.telemetrySource
+        : null,
+    totalPromptTokens: finiteOrNull(point.totalPromptTokens),
+    totalOutputTokens: finiteOrNull(point.totalOutputTokens),
+    completedRequestsTotal: finiteOrNull(point.completedRequestsTotal),
+  };
 }
 
 export class LlmTelemetryStore {
@@ -73,7 +121,7 @@ export class LlmTelemetryStore {
         if (series && typeof series === "object" && !Array.isArray(series)) {
           for (const [key, points] of Object.entries(series)) {
             if (!Array.isArray(points)) continue;
-            this._series[key] = points.filter(validPoint).slice(-MAX_POINTS);
+            this._series[key] = points.map(migratePoint).filter(Boolean).slice(-MAX_POINTS);
           }
         }
         this._lastCompactionAt = fs.statSync(this.filePath).mtimeMs;
@@ -95,8 +143,10 @@ export class LlmTelemetryStore {
       if (!line) continue;
       try {
         const entry = JSON.parse(line);
-        if (typeof entry?.key !== "string" || !validPoint(entry.point)) continue;
-        this._upsert(entry.key, entry.point);
+        if (typeof entry?.key !== "string") continue;
+        const point = migratePoint(entry.point);
+        if (!point) continue;
+        this._upsert(entry.key, point);
       } catch {
         // A torn final append must not hide the last valid snapshot or entries.
       }
@@ -140,7 +190,7 @@ export class LlmTelemetryStore {
   compact() {
     atomicWrite(
       this.filePath,
-      JSON.stringify({ version: 1, bucketMs: BUCKET_MS, retentionHours: MAX_HOURS, series: this._series }),
+      JSON.stringify({ version: 2, bucketMs: BUCKET_MS, retentionHours: MAX_HOURS, series: this._series }),
       0o600
     );
     atomicWrite(this.journalPath, "", 0o600);

@@ -110,8 +110,14 @@ export function ingestSnapshots(sparks: SparkSnapshot[]): void {
         const llm = m.llm[i];
         const port = ports[i];
         const portKey = port != null ? `:${port}` : `:${i}`;
-        pushHistory(`${s.id}:llm${portKey}.tps`, llm.generationTps);
-        pushHistory(`${s.id}:llm${portKey}.prefill`, llm.prefillTps);
+        // Null means the source is stale/unavailable/ambiguous. Never turn it
+        // into a fake zero in the chart; zero is reserved for fresh idle data.
+        if (llm.generationTps != null && Number.isFinite(llm.generationTps)) {
+          pushHistory(`${s.id}:llm${portKey}.tps`, llm.generationTps);
+        }
+        if (llm.prefillTps != null && Number.isFinite(llm.prefillTps)) {
+          pushHistory(`${s.id}:llm${portKey}.prefill`, llm.prefillTps);
+        }
         if (llm.cachedPrefillTps != null) {
           pushHistory(`${s.id}:llm${portKey}.prefillCached`, llm.cachedPrefillTps);
         }

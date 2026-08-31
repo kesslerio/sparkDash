@@ -85,6 +85,20 @@ function resolveLlmApiKey(spark, port) {
   return key || null;
 }
 
+/** Return only an explicitly active/idle model; never guess from a router catalog. */
+function activeLlmModel(metrics) {
+  if (!metrics || typeof metrics !== "object") return null;
+  const status = metrics.status;
+  const trustworthyStatus = status === "active" || status === "idle";
+  const legacySingleModel =
+    status == null && metrics.available === true && (!Array.isArray(metrics.models) || metrics.models.length <= 1);
+  if (!trustworthyStatus && !legacySingleModel) return null;
+  const model = metrics.benchmarkModel ?? metrics.modelId;
+  return typeof model === "string" && model.trim() && !/^\d+ models$/.test(model.trim())
+    ? model.trim()
+    : null;
+}
+
 // Rate-limit ephemeral + registered connectivity tests (per client IP)
 const allowTest = createRateLimiter(20, 60_000);
 
@@ -878,9 +892,8 @@ app.post("/api/sparks/:id/llm/bench", (req, res) => {
     const portIndex = ports.indexOf(port);
     const llm =
       (portIndex >= 0 ? llmList[portIndex] : null) ||
-      llmList.find((m) => m?.available) ||
-      llmList[0];
-    modelId = llm?.modelId || null;
+      (portIndex < 0 ? llmList[0] : null);
+    modelId = activeLlmModel(llm);
   }
 
   try {
@@ -1035,9 +1048,8 @@ app.post("/api/sparks/:id/llm/showcase", (req, res) => {
     const portIndex = ports.indexOf(port);
     const llm =
       (portIndex >= 0 ? llmList[portIndex] : null) ||
-      llmList.find((m) => m?.available) ||
-      llmList[0];
-    modelId = llm?.modelId || null;
+      (portIndex < 0 ? llmList[0] : null);
+    modelId = activeLlmModel(llm);
   }
 
   try {

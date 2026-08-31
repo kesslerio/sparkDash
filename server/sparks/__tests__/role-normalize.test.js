@@ -27,6 +27,20 @@ test("comfyMonitoring is opt-in for all roles; comfyPort defaults to 8188", () =
   assert.equal(n({ comfyPort: "8190" }).comfyPort, 8190);
 });
 
+test("normalizes optional request-port to telemetry-port mappings", () => {
+  const out = n({
+    llmPorts: [4000, 8888],
+    llmTelemetryPorts: {
+      "4000": 9341,
+      "8888": "8888",
+      bad: 9341,
+      "70000": 9341,
+      "9000": "not-a-port",
+    },
+  });
+  assert.deepEqual(out.llmTelemetryPorts, { "4000": 9341, "8888": 8888 });
+});
+
 test("tailscaleMonitoring is opt-in for all roles", () => {
   assert.equal(n({ role: "head" }).tailscaleMonitoring, false);
   assert.equal(n({ role: "worker" }).tailscaleMonitoring, false);

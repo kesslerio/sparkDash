@@ -66,3 +66,51 @@ test("LlmTelemetryStore prunes samples older than seven days", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("LlmTelemetryStore persists model/status/counters and migrates old points", () => {
+  const { dir, file, store } = makeStore();
+  try {
+    const now = new Date("2026-08-27T12:00:00.000Z");
+    store.record(
+      "mama",
+      4000,
+      {
+        available: false,
+        status: "ambiguous_model",
+        statusReason: "ambiguous_model",
+        modelId: null,
+        lastObservedAt: now.getTime() - 45_000,
+        telemetrySource: "relay",
+        generationTps: null,
+        prefillTps: null,
+        totalPromptTokens: 12,
+        totalOutputTokens: 8,
+        completedRequestsTotal: 1,
+      },
+      now
+    );
+    store.flush();
+    const point = new LlmTelemetryStore(file).getSeries("mama", 4000, { hours: 1, now }).points[0];
+    assert.equal(point.status, "ambiguous_model");
+    assert.equal(point.telemetrySource, "relay");
+    assert.equal(point.totalPromptTokens, 12);
+    assert.equal(point.totalOutputTokens, 8);
+    assert.equal(point.completedRequestsTotal, 1);
+
+    fs.writeFileSync(
+      file,
+      JSON.stringify({
+        version: 1,
+        series: {
+          "old:8888": [{ t: now.getTime(), available: true, backend: "vllm" }],
+        },
+      })
+    );
+    const migrated = new LlmTelemetryStore(file).getSeries("old", 8888, { hours: 1, now }).points[0];
+    assert.equal(migrated.status, "unknown");
+    assert.equal(migrated.modelId, null);
+    assert.equal(migrated.statusReason, null);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -30,6 +30,19 @@ function fmtStorage(mb: number, unit: boolean): string {
   return unit ? `${s} ${label}` : s;
 }
 
+function overviewLlm(llmArr: SparkSnapshot["metrics"]["llm"]) {
+  if (!Array.isArray(llmArr) || llmArr.length === 0) return null;
+  return (
+    llmArr.find((llm) => llm.status === "active" || llm.status === "idle") ||
+    llmArr.find((llm) => llm.modelId) ||
+    llmArr[0]
+  );
+}
+
+function formatLlmRate(rate: number | null | undefined): string {
+  return rate == null || !Number.isFinite(rate) ? "—" : rate.toFixed(0);
+}
+
 function MiniStat({
   label,
   value,
@@ -322,11 +335,11 @@ function SparkCard({
 
               // Head / Standalone: same as before — live backend + model id.
               const llmArr = spark.metrics.llm;
-              const llm = Array.isArray(llmArr) ? llmArr.find((l) => l.available) : null;
+              const llm = overviewLlm(llmArr);
               if (!llm) return null;
               return (
                 <MiniStat
-                  label={
+                  label={`${
                     llm.backend === "vllm"
                       ? "vLLM"
                       : llm.backend === "ds4"
@@ -334,7 +347,7 @@ function SparkCard({
                         : llm.backend === "sglang"
                           ? "sgLang"
                           : llm.backend ?? "LLM"
-                  }
+                  } · ${llm.status ?? (llm.available ? "active" : "unavailable")}`}
                   value={llm.modelId ?? "unknown"}
                   tone="accent"
                   title={llm.modelId ?? undefined}
@@ -348,19 +361,19 @@ function SparkCard({
             const role = resolveSparkRole(spark);
             if (role === "worker") return null;
             const llmArr = spark.metrics.llm;
-            const llm = Array.isArray(llmArr) ? llmArr.find((l) => l.available) : null;
+            const llm = overviewLlm(llmArr);
             if (!llm) return null;
             return (
               <div className="mt-3.5 grid grid-cols-2 gap-2 border-t border-border pt-3">
                 <div className="text-center">
                   <span className="font-tabular text-[28px] font-bold leading-none text-text-strong">
-                    {llm.generationTps.toFixed(0)}
+                    {formatLlmRate(llm.generationTps)}
                   </span>
                   <span className="text-sm font-normal text-muted"> tok/s</span>
                 </div>
                 <div className="border-l border-border text-center">
                   <span className="font-tabular text-[28px] font-bold leading-none text-text-strong">
-                    {llm.prefillTps.toFixed(0)}
+                    {formatLlmRate(llm.prefillTps)}
                   </span>
                   <span className="text-sm font-normal text-muted"> prefill</span>
                 </div>
