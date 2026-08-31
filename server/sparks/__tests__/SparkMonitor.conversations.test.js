@@ -102,3 +102,24 @@ test("setConversations stores a copy", () => {
   rows[0].handle = "mutated";
   assert.equal(monitor.snapshot().conversations[0].handle, "chat-a");
 });
+
+test("telemetry mapping changes source port while request port remains the probe key", () => {
+  const monitor = new SparkMonitor(
+    stubSpark({
+      llmPorts: [4000],
+      llmTelemetryPorts: { "4000": 9341 },
+      lanIp: "10.0.0.4",
+      isLocal: false,
+    })
+  );
+  const probe = monitor.llmProbes.get(4000);
+  assert.equal(probe.port, 4000);
+  assert.equal(probe.telemetryPort, 9341);
+  assert.equal(probe.telemetrySource, "relay");
+  assert.equal(probe.baseUrl, "http://10.0.0.4:9341");
+  monitor.updateConfig(stubSpark({ llmPorts: [4000], lanIp: "10.0.0.5", isLocal: false }));
+  assert.equal(probe.port, 4000);
+  assert.equal(probe.telemetryPort, 4000);
+  assert.equal(probe.telemetrySource, "direct");
+  assert.equal(probe.baseUrl, "http://10.0.0.5:4000");
+});

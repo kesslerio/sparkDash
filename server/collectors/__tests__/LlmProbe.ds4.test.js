@@ -173,7 +173,9 @@ test("probe: ds4 path reads context_length and does not mislabel as vllm", async
   assert.equal(snap.modelId, "deepseek-v4-flash");
   assert.equal(snap.contextLength, 1000000);
   // Idle relative to seeded counters (same totals) → 0, not window gauge
-  assert.equal(snap.generationTps, 0);
-  assert.equal(snap.prefillTps, 0);
+  // The engine still reports two in-flight requests. Flat counters are not
+  // proof of an idle engine, so rates remain unknown rather than fake zeroes.
+  assert.equal(snap.generationTps, null);
+  assert.equal(snap.prefillTps, null);
   assert.equal(snap.available, true);
 });

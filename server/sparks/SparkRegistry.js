@@ -475,6 +475,7 @@ export class SparkRegistry {
       auth: sshIn.auth === "pass" ? "pass" : "key",
     };
     const llmPorts = this._normalizeLlmPorts(config.llmPorts ?? config.llmPort);
+    const llmTelemetryPorts = this._normalizeLlmTelemetryPorts(config.llmTelemetryPorts);
     const role = this._normalizeRole(config);
     const isWorker = role === "worker";
     // Never keep password on the persisted object
@@ -492,6 +493,7 @@ export class SparkRegistry {
       isLocal: Boolean(config.isLocal),
       ssh,
       llmPorts,
+      llmTelemetryPorts,
       role,
       /** When true, this Spark is an LLM worker — no local API card / probe. */
       workerNode: isWorker,
@@ -588,5 +590,30 @@ export class SparkRegistry {
     const n = typeof value === "string" ? parseInt(value, 10) : Number(value);
     if (Number.isInteger(n) && n >= 1 && n <= 65535) return [n];
     return [LLM_PORT];
+  }
+
+  /**
+   * Normalize the optional request-port → telemetry-port mapping. The map is
+   * server-side configuration: request ports remain the identity used for
+   * API keys and showcase traffic, while telemetry may come from a relay.
+   */
+  _normalizeLlmTelemetryPorts(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+    const out = {};
+    for (const [requestPort, telemetryPort] of Object.entries(value)) {
+      const request = Number(requestPort);
+      const telemetry = Number(telemetryPort);
+      if (
+        Number.isInteger(request) &&
+        request >= 1 &&
+        request <= 65535 &&
+        Number.isInteger(telemetry) &&
+        telemetry >= 1 &&
+        telemetry <= 65535
+      ) {
+        out[String(request)] = telemetry;
+      }
+    }
+    return out;
   }
 }

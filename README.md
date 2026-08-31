@@ -253,6 +253,10 @@ npm run dev
 - **Docker**: open **http://&lt;host-ip&gt;:5555** (arm64 image, auto-restart, host mounts for GPU/metrics access)
 - **Dev**: Vite on **http://localhost:5173** (proxies API/WS to Express)
 
+The current John deployment is published at
+**http://100.120.26.16:5556** on the tailnet. The container still listens on its
+internal default port `5555`; `:5556` is the host-facing mapping.
+
 For development with Docker (source-mounted, HMR):
 ```bash
 docker compose -f docker-compose.dev.yml up --build
@@ -382,6 +386,32 @@ Gear icon in the header, or `GET`/`PUT` `/api/settings`:
 | Default LLM port | 8888 | Default for new Sparks |
 | Auto-hide offline | false | Hide offline Sparks on Overview |
 | Temperature unit | Celsius | Display GPU temperature in °C or °F |
+
+### Separate request and telemetry ports
+
+An LLM may expose user requests through one port while a private relay exposes
+model residency and Prometheus telemetry through another. Add an optional
+server-side mapping to that Spark's `config/sparks.json` entry:
+
+```json
+{
+  "id": "mama",
+  "llmPorts": [4000],
+  "llmTelemetryPorts": { "4000": 9341 }
+}
+```
+
+The request port remains the source for benchmark/showcase completions and its
+configured API key. The mapped port is used only for `/v1/models` and
+`/metrics`; the active model is the one explicitly marked loaded by that
+telemetry source. If a router advertises several models without identifying a
+loaded one, sparkDash shows the catalog as ambiguous and does not guess a
+benchmark target. Older entries without `llmTelemetryPorts` continue to use
+the request port for both paths.
+
+For the current Mama setup, port `4000` is the user-facing Kalliope route and
+port `9341` is the Tailscale-only, bearer-protected telemetry relay. The relay
+returns no cached metrics after its backend disappears.
 
 ### Environment variables
 
@@ -531,7 +561,7 @@ Each configured LLM port gets its own `LlmProbe` instance running in parallel. P
 - **ds4-server** (Entrpi/ds4-on-spark) — `/v1/models` (`owned_by: ds4.c`) + Prometheus `ds4_*` token counters for live tok/s
 - **vLLM / sglang** — `/v1/models`; sglang via `/get_server_info` (`last_gen_throughput` when metrics off), vLLM via Prometheus `/metrics` counters (scientific notation supported)
 
-Rates are derived from per-probe cumulative counter diffs (or SGLang sticky throughput while it moves). Multiple ports can be added or removed at runtime without restarting the monitor.
+Rates are derived from per-probe cumulative counter diffs (or SGLang sticky throughput while it moves). A rate of `0` means fresh telemetry proved the engine idle; stale, unavailable, ambiguous, and model-mismatched telemetry remains nullable and is shown as `—` with a reason. The dashboard also retains seven days of ten-second forensic points, including model and status fields, and reads older point files without migration downtime. Multiple ports can be added or removed at runtime without restarting the monitor.
 
 ---
 

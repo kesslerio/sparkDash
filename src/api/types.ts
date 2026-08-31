@@ -35,6 +35,8 @@ export interface SparkConfig {
   llmPort?: number;
   /** HTTP ports for LLM servers on this Spark (default [8888]) */
   llmPorts?: number[];
+  /** Optional telemetry/model-discovery port per request port (server-side only). */
+  llmTelemetryPorts?: Record<string, number>;
   /**
    * Ports that have an encrypted LLM API key stored server-side.
    * The key itself is never returned by the API.
@@ -281,6 +283,12 @@ export interface UnifiedMemoryMetrics {
 // ─── LLM metrics ─────────────────────────────────────────
 export interface LlmMetrics {
   available: boolean;
+  /** Truthful current telemetry state; unavailable is not the same as idle. */
+  status?: "active" | "idle" | "unknown" | "stale" | "unavailable" | "ambiguous_model";
+  /** Epoch milliseconds for the last fresh observation, or null when never observed. */
+  lastObservedAt?: number | null;
+  /** Human-readable reason for unknown/stale/unavailable/ambiguous telemetry. */
+  statusReason?: string | null;
   backend: "vllm" | "llama.cpp" | "sglang" | "ds4" | null;
   modelId: string | null;
   modelPath: string | null;
@@ -293,14 +301,20 @@ export interface LlmMetrics {
   gpuMemoryUtilization: number | null;
   slotsActive: number;
   slotsTotal: number;
-  generationTps: number;
-  prefillTps: number;
+  generationTps: number | null;
+  prefillTps: number | null;
   /** Live cached-prefill tok/s when the backend splits kinds (ds4, llama.cpp, sglang). */
   cachedPrefillTps?: number | null;
   /** Live uncached/computed prefill tok/s when split is available. */
   uncachedPrefillTps?: number | null;
   /** Cumulative total output (generation) tokens as reported by the LLM server */
-  totalOutputTokens: number;
+  totalOutputTokens: number | null;
+  /** Cumulative process/runtime prompt tokens, not user-request totals. */
+  totalPromptTokens?: number | null;
+  /** Cumulative completed requests reported by the engine, when available. */
+  completedRequestsTotal?: number | null;
+  /** Direct endpoint or Mama telemetry relay. */
+  telemetrySource?: "direct" | "relay" | null;
   /** vLLM KV cache usage fraction (0–1). null when backend !== vllm or unreachable. */
   kvCacheUsage?: number | null;
   /** vLLM engine-reported total KV cache token pool. */
@@ -355,9 +369,17 @@ export interface LlmTelemetryPoint {
   /** Start of the ten-second bucket, milliseconds since epoch. */
   t: number;
   available: boolean;
+  status?: "active" | "idle" | "unknown" | "stale" | "unavailable" | "ambiguous_model";
+  lastObservedAt?: number | null;
+  statusReason?: string | null;
+  modelId?: string | null;
+  telemetrySource?: "direct" | "relay" | null;
   backend: string | null;
   generationTps: number | null;
   prefillTps: number | null;
+  totalPromptTokens?: number | null;
+  totalOutputTokens?: number | null;
+  completedRequestsTotal?: number | null;
   requestsRunning: number | null;
   requestsWaiting: number | null;
   kvCacheUsage: number | null;
@@ -553,6 +575,8 @@ export interface SparkSnapshot {
   llmPort: number;
   /** All LLM server ports configured for this Spark */
   llmPorts: number[];
+  /** Optional telemetry/model-discovery port per request port (server-only mapping). */
+  llmTelemetryPorts?: Record<string, number>;
   /** Ports with a stored LLM API key (key itself never exposed) */
   llmApiKeyPorts?: number[];
   /** Whether ComfyUI is probed (opt-in; all roles) */

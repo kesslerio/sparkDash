@@ -10,6 +10,17 @@ import { llmProbeHost } from "./llmHost.js";
 
 const FAIL_RESET_THRESHOLD = 3;
 const REDETECT_INTERVAL_MS = 60_000;
+const TELEMETRY_STALE_MS = 30_000;
+const ACTIVE_MODEL_STATUSES = new Set(["active", "loaded", "ready", "running", "serving"]);
+const INACTIVE_MODEL_STATUSES = new Set([
+  "idle",
+  "loading",
+  "starting",
+  "stopped",
+  "stopping",
+  "unloaded",
+  "exited",
+]);
 /**
  * SGLang's last_gen_throughput is a sticky gauge (holds last decode rate when
  * idle). Only treat it as live after we observe a change between polls, and
@@ -52,15 +63,104 @@ export function isHfHubCachePath(id) {
 function applyModelRef(probe, raw) {
   if (raw == null || raw === "") return;
   const s = String(raw);
-  probe.modelId = normalizeModelId(s);
+  const nextId = normalizeModelId(s);
+  if (probe.modelId && nextId && probe.modelId !== nextId) probe._resetRateBaselines();
+  probe.modelId = nextId;
   probe.modelPath = isHfHubCachePath(s) ? null : s;
 }
 
+function modelStatusValue(model) {
+  if (!model || typeof model !== "object") return null;
+  let value = model.status ?? model.state ?? model.model_status;
+  if (value && typeof value === "object") value = value.value;
+  if (typeof value === "string") return value.trim().toLowerCase() || null;
+  if (model.active === true || model.loaded === true || model.ready === true) return "active";
+  if (model.loaded === false || model.active === false) return "unloaded";
+  return null;
+}
+
+/**
+ * Select the one model that the telemetry source says is resident/usable.
+ * A single unqualified model is the normal OpenAI-compatible server shape;
+ * multiple unqualified router entries are intentionally ambiguous.
+ * @param {unknown} entries
+ * @returns {{ model: Record<string, unknown> | null, modelId: string | null, models: string[], reason: string | null }}
+ */
+export function selectActiveModel(entries) {
+  const rows = Array.isArray(entries) ? entries : [];
+  const valid = rows.filter(
+    (row) => row && typeof row === "object" && normalizeModelId(row.id)
+  );
+  const catalog = [];
+  const seen = new Set();
+  for (const row of valid) {
+    const id = normalizeModelId(row.id);
+    if (id && !seen.has(id)) {
+      seen.add(id);
+      catalog.push(id);
+    }
+  }
+  if (!valid.length) {
+    return { model: null, modelId: null, models: catalog, reason: "no_active_model" };
+  }
+  const active = valid.filter((row) => ACTIVE_MODEL_STATUSES.has(modelStatusValue(row)));
+  if (active.length > 1) {
+    return { model: null, modelId: null, models: catalog, reason: "ambiguous_model" };
+  }
+  if (active.length === 1) {
+    return {
+      model: active[0],
+      modelId: normalizeModelId(active[0].id),
+      models: catalog,
+      reason: null,
+    };
+  }
+  if (valid.length === 1 && modelStatusValue(valid[0]) == null) {
+    return {
+      model: valid[0],
+      modelId: normalizeModelId(valid[0].id),
+      models: catalog,
+      reason: null,
+    };
+  }
+  if (valid.every((row) => INACTIVE_MODEL_STATUSES.has(modelStatusValue(row)))) {
+    return { model: null, modelId: null, models: catalog, reason: "no_active_model" };
+  }
+  return { model: null, modelId: null, models: catalog, reason: "ambiguous_model" };
+}
+
+/** Parse the small label grammar used by Prometheus exposition. */
+function parsePromLabels(raw) {
+  const labels = {};
+  if (typeof raw !== "string") return labels;
+  const re = /([A-Za-z_][A-Za-z0-9_]*)="((?:\\.|[^"])*)"/g;
+  let match;
+  while ((match = re.exec(raw)) !== null) {
+    labels[match[1]] = match[2].replace(/\\([\\"nrt])/g, (_all, escaped) => {
+      if (escaped === "n") return "\n";
+      if (escaped === "r") return "\r";
+      if (escaped === "t") return "\t";
+      return escaped;
+    });
+  }
+  return labels;
+}
+
+function promLabelValue(raw, key) {
+  return parsePromLabels(raw)[key] ?? null;
+}
+
 export class LlmProbe {
-  constructor(spark, port = 8888) {
+  constructor(spark, port = 8888, options = {}) {
     this.spark = spark;
-    this.port = port;
-    this.baseUrl = `http://${llmProbeHost(spark)}:${port}`;
+    this.port = Number.isInteger(Number(port)) ? Number(port) : 8888;
+    const configuredTelemetryPort = Number(options?.telemetryPort);
+    this.telemetryPort =
+      Number.isInteger(configuredTelemetryPort) && configuredTelemetryPort >= 1 && configuredTelemetryPort <= 65535
+        ? configuredTelemetryPort
+        : this.port;
+    this.telemetrySource = this.telemetryPort === this.port ? "direct" : "relay";
+    this.baseUrl = `http://${llmProbeHost(spark)}:${this.telemetryPort}`;
 
     // State
     this.backendType = null; // 'vllm' | 'llama.cpp' | 'sglang' | 'ds4' | null
@@ -83,6 +183,12 @@ export class LlmProbe {
     /** Live uncached/computed prefill tok/s when split is available. null otherwise. */
     this.uncachedPrefillTps = null;
     this.error = null;
+    /** Fresh telemetry state; unavailable is never rendered as idle. */
+    this.status = "unavailable";
+    this.statusReason = "not_observed";
+    this.lastObservedAt = null;
+    this.metricsAvailable = false;
+    this._metricsModelMatched = false;
 
     // Per-slot rate tracking (for llama.cpp native path)
     this.slotState = new Map();
@@ -94,9 +200,17 @@ export class LlmProbe {
     /** Previous `vllm:iteration_tokens_total_sum` (engine-step tokens). */
     this.lastIterSum = null;
     this.lastProbeTime = 0;
+    this._rateBaselineReady = false;
 
     // Cumulative total output tokens (generation) as reported by the LLM server
     this.totalOutputTokens = 0;
+    // Cumulative process/runtime prompt tokens, when reported by the backend.
+    this.totalPromptTokens = null;
+    // Cumulative completed requests, when reported by the backend.
+    this.completedRequestsTotal = null;
+    this._promptCounterObserved = false;
+    this._outputCounterObserved = false;
+    this._completedCounterObserved = false;
 
     // vLLM inference metrics from /metrics (null when not vLLM / missing series)
     // Metric names follow stock vLLM Prometheus exposition (versions may differ).
@@ -171,11 +285,29 @@ export class LlmProbe {
   /** Update probe port (and host from spark). Resets detection when the target changes. */
   setPort(port) {
     const next = Number(port);
+    const wasDirect = this.telemetryPort === this.port;
     const prevUrl = this.baseUrl;
     if (Number.isInteger(next) && next >= 1 && next <= 65535) {
       this.port = next;
+      if (wasDirect) this.telemetryPort = next;
     }
-    this.baseUrl = `http://${llmProbeHost(this.spark)}:${this.port}`;
+    this.telemetrySource = this.telemetryPort === this.port ? "direct" : "relay";
+    this.baseUrl = `http://${llmProbeHost(this.spark)}:${this.telemetryPort}`;
+    if (this.baseUrl !== prevUrl) {
+      this._resetDetection();
+      this._lastDetectAt = 0;
+      this._consecutiveFailures = 0;
+    }
+  }
+
+  /** Update the telemetry/model-discovery port while preserving request-port API keys. */
+  setTelemetryPort(port) {
+    const next = Number(port);
+    if (!Number.isInteger(next) || next < 1 || next > 65535) return;
+    const prevUrl = this.baseUrl;
+    this.telemetryPort = next;
+    this.telemetrySource = this.telemetryPort === this.port ? "direct" : "relay";
+    this.baseUrl = `http://${llmProbeHost(this.spark)}:${this.telemetryPort}`;
     if (this.baseUrl !== prevUrl) {
       this._resetDetection();
       this._lastDetectAt = 0;
@@ -220,6 +352,10 @@ export class LlmProbe {
 
   _noteFailure(message) {
     this.error = message;
+    this.metricsAvailable = false;
+    this._metricsModelMatched = false;
+    this.statusReason = message || "telemetry_unavailable";
+    this.status = this.lastObservedAt != null ? "stale" : "unavailable";
     this._consecutiveFailures += 1;
     if (this._consecutiveFailures >= FAIL_RESET_THRESHOLD) {
       this._resetDetection();
@@ -238,11 +374,21 @@ export class LlmProbe {
     this.prefillTps = 0;
     this.cachedPrefillTps = null;
     this.uncachedPrefillTps = null;
+    this.status = "unavailable";
+    this.statusReason = "not_observed";
+    this.lastObservedAt = null;
+    this.metricsAvailable = false;
+    this._metricsModelMatched = false;
     this.contextLength = null;
     this.gpuMemoryUtilization = null;
     this.slotsActive = 0;
     this.slotsTotal = 0;
     this.totalOutputTokens = 0;
+    this.totalPromptTokens = null;
+    this.completedRequestsTotal = null;
+    this._promptCounterObserved = false;
+    this._outputCounterObserved = false;
+    this._completedCounterObserved = false;
     this.kvCacheUsage = null;
     this.kvCacheCapacityTokens = null;
     this.kvCacheMaxConcurrency = null;
@@ -260,6 +406,109 @@ export class LlmProbe {
     this.lastTtftSum = null;
     this.lastIterSum = null;
     this._sglangStickyTps = null;
+    this._rateBaselineReady = false;
+  }
+
+  /** Clear all counter-delta state after a model swap or source change. */
+  _resetRateBaselines() {
+    this.generationTps = 0;
+    this.prefillTps = 0;
+    this.cachedPrefillTps = null;
+    this.uncachedPrefillTps = null;
+    this.slotState.clear();
+    this.lastTokenCounts = { input: 0, output: 0 };
+    this.lastPrefillKinds = null;
+    this.lastTtftSum = null;
+    this.lastIterSum = null;
+    this._sglangStickyTps = null;
+    this.totalPromptTokens = null;
+    this.totalOutputTokens = 0;
+    this.completedRequestsTotal = null;
+    this._promptCounterObserved = false;
+    this._outputCounterObserved = false;
+    this._completedCounterObserved = false;
+    this._rateBaselineReady = false;
+  }
+
+  /** Apply the model catalog and select exactly one resident/usable model. */
+  _acceptModelCatalog(models) {
+    const selection = selectActiveModel(models);
+    const previous = this.modelId;
+    this.models = selection.models;
+    if (
+      selection.modelId &&
+      previous &&
+      normalizeModelId(previous) !== normalizeModelId(selection.modelId)
+    ) {
+      this._resetRateBaselines();
+      this.statusReason = "model_changed";
+    }
+
+    if (selection.modelId && selection.model) {
+      this.modelId = selection.modelId;
+      this.benchmarkModel = selection.modelId;
+      this.modelPath = isHfHubCachePath(selection.model.id) ? null : String(selection.model.id);
+      this.contextLength =
+        selection.model.max_model_len ??
+        selection.model.context_length ??
+        this.contextLength;
+      this.statusReason = null;
+      return selection;
+    }
+
+    this.modelId = null;
+    this.modelPath = selection.models.join(", ") || null;
+    this.benchmarkModel = null;
+    this.contextLength = null;
+    this.metricsAvailable = false;
+    this._metricsModelMatched = false;
+    this.status = selection.reason === "ambiguous_model" ? "ambiguous_model" : "unavailable";
+    this.statusReason = selection.reason;
+    this._resetRateBaselines();
+    return selection;
+  }
+
+  /** Mark a successful fresh metrics/model observation and derive active vs idle. */
+  _noteFreshTelemetry(observedAt = Date.now()) {
+    this.metricsAvailable = true;
+    this.lastObservedAt = observedAt;
+    this._setWorkloadStatus();
+  }
+
+  _setWorkloadStatus() {
+    if (!this.metricsAvailable) return;
+    if (this._metricsModelMatched === false) {
+      this.status = "unknown";
+      this.statusReason = "metric_model_mismatch";
+      return;
+    }
+    const running =
+      (this.requestsRunning != null && this.requestsRunning > 0) ||
+      this.slotsActive > 0 ||
+      this.generationTps > 0 ||
+      this.prefillTps > 0;
+    const waiting = this.requestsWaiting != null && this.requestsWaiting > 0;
+    if (running || waiting) {
+      this.status = "active";
+      this.statusReason = null;
+      return;
+    }
+    // A fresh metrics response is only evidence of idleness when it contains
+    // an explicit zero-work signal. Counters alone (or an otherwise empty
+    // metrics body) must not be rendered as a proven zero rate.
+    const hasWorkloadSignal =
+      this.requestsRunning != null ||
+      this.requestsWaiting != null ||
+      this.slotsTotal > 0;
+    if (hasWorkloadSignal && (this.requestsRunning == null || this.requestsRunning === 0) &&
+        (this.requestsWaiting == null || this.requestsWaiting === 0) &&
+        this.slotsActive === 0) {
+      this.status = "idle";
+      this.statusReason = null;
+      return;
+    }
+    this.status = "unknown";
+    this.statusReason = "workload_state_unavailable";
   }
 
   /** Note auth from an HTTP status on an unauthenticated probe request. */
@@ -383,6 +632,8 @@ export class LlmProbe {
     const now = Date.now();
     const dtSec = (now - this.lastProbeTime) / 1000;
     this.lastProbeTime = now;
+    this.metricsAvailable = false;
+    this._metricsModelMatched = false;
 
     // Model info from /v1/models — 401/403 means protected; other failure = down
     let modelsOk = false;
@@ -391,35 +642,24 @@ export class LlmProbe {
       const modelsRes = await this._fetch(`${this.baseUrl}/v1/models`);
       const auth = this._noteAuthStatus(modelsRes.status);
       if (auth === "auth") {
+        this.status = "unavailable";
+        this.statusReason = "model_catalog_auth_required";
+        this.models = [];
+        this.modelId = null;
+        this.benchmarkModel = null;
         return this._getSnapshot();
       }
       if (auth === "ok") {
         modelsOk = true;
         const modelsData = await modelsRes.json();
         const models = Array.isArray(modelsData?.data) ? modelsData.data : [];
-        if (models.length > 1) {
-          // Multi-model router (e.g. LiteLLM): show count, list IDs in modelPath.
-          // Store first model for benchmark/showcase requests.
-          this.models = models.map((m) => m?.id).filter(Boolean);
-          this.modelId = `${this.models.length} models`;
-          this.modelPath = this.models.join(", ");
-          this.benchmarkModel = this.models[0] || null;
-          this.contextLength = null;
-          owned = models[0]?.owned_by;
-        } else {
-          const model = models[0];
-          this.modelId = normalizeModelId(model?.id || null);
-          this.benchmarkModel = this.modelId;
-          this.models = this.modelId ? [this.modelId] : [];
-          // Drop HF hub cache paths from modelPath if /v1/models id was a cache dir
-          if (isHfHubCachePath(model?.id)) this.modelPath = null;
-          // ds4-server uses context_length; vLLM uses max_model_len
-          this.contextLength =
-            model?.max_model_len ?? model?.context_length ?? this.contextLength;
-          owned = model?.owned_by;
-        }
+        const selection = this._acceptModelCatalog(models);
+        if (selection.model) owned = selection.model.owned_by;
+        if (selection.reason) return this._getSnapshot();
       }
-    } catch {}
+    } catch (err) {
+      throw new Error(err instanceof Error ? err.message : "OpenAI-compatible model catalog invalid");
+    }
 
     if (!modelsOk) {
       throw new Error("OpenAI-compatible /v1/models unreachable");
@@ -439,6 +679,7 @@ export class LlmProbe {
         const sgRes = await this._fetch(`${this.baseUrl}/get_server_info`);
         if (sgRes.ok) {
           this.backendType = "sglang";
+          this._metricsModelMatched = true;
           const sgData = await sgRes.json();
           // Load before last_gen_throughput so inflight can keep a steady rate live.
           await this._probeSglangLoad();
@@ -447,6 +688,7 @@ export class LlmProbe {
           // (sleep_on_idle is a launch flag, not current state). A reachable
           // server with weights resident is Active / ready.
           if (this.gpuMemoryUtilization == null) this.gpuMemoryUtilization = 1;
+          this._noteFreshTelemetry(now);
         }
       } catch {}
     }
@@ -461,6 +703,7 @@ export class LlmProbe {
           const idle = this.generationTps === 0 && this.prefillTps === 0;
           if (idle) this._applySglangMetrics(txt, dtSec);
           else this._applySglangPrefillSplit(txt, dtSec);
+          this._noteFreshTelemetry(Date.now());
         }
       } catch {
         /* metrics optional */
@@ -484,11 +727,18 @@ export class LlmProbe {
           this.backendType = "vllm";
           this._applyVllmMetrics(txt, dtSec);
         }
-      } else if (this.backendType !== "ds4") {
-        this.backendType = "vllm";
+        this._noteFreshTelemetry(Date.now());
+      } else {
+        this.status = "unavailable";
+        this.statusReason = "metrics_unavailable";
+        if (this.backendType !== "ds4") {
+          this.backendType = "vllm";
+        }
       }
     } catch {
       if (this.backendType !== "ds4") this.backendType = "vllm";
+      this.status = "unavailable";
+      this.statusReason = "metrics_unavailable";
     }
 
     return this._getSnapshot();
@@ -503,6 +753,8 @@ export class LlmProbe {
    * @param {number} dtSec
    */
   _applyDs4Metrics(txt, dtSec) {
+    this.generationTps = 0;
+    this.prefillTps = 0;
     const decoded = this._getPromMetric(txt, "ds4_tokens_decoded_total");
     const computedPrefill = this._getPromMetricLabeled(
       txt,
@@ -516,19 +768,37 @@ export class LlmProbe {
     const inflight = inflightHint != null && inflightHint > 0;
 
     if (decoded != null) {
+      const baselineReady =
+        this._rateBaselineReady ||
+        this.lastTokenCounts.input !== 0 ||
+        this.lastTokenCounts.output !== 0;
+      const counterReset =
+        (prefilled != null && prefilled < this.lastTokenCounts.input) ||
+        decoded < this.lastTokenCounts.output;
       if (prefilled != null && dtSec > 0 && dtSec < 10) {
         const deltaIn = prefilled - this.lastTokenCounts.input;
         const deltaOut = decoded - this.lastTokenCounts.output;
-        this.generationTps = Math.max(0, Math.round((deltaOut / dtSec) * 100) / 100);
-        this.prefillTps = Math.max(0, Math.round((deltaIn / dtSec) * 100) / 100);
+        if (!baselineReady || counterReset) {
+          this.generationTps = 0;
+          this.prefillTps = 0;
+        } else {
+          this.generationTps = Math.max(0, Math.round((deltaOut / dtSec) * 100) / 100);
+          this.prefillTps = Math.max(0, Math.round((deltaIn / dtSec) * 100) / 100);
+        }
       } else if (dtSec > 0 && dtSec < 10) {
         const deltaOut = decoded - this.lastTokenCounts.output;
-        this.generationTps = Math.max(0, Math.round((deltaOut / dtSec) * 100) / 100);
-        if (!inflight && deltaOut <= 0) this.prefillTps = 0;
+        this.generationTps = !baselineReady || counterReset
+          ? 0
+          : Math.max(0, Math.round((deltaOut / dtSec) * 100) / 100);
+        if (!inflight && (counterReset || deltaOut <= 0)) this.prefillTps = 0;
       }
       if (prefilled != null) this.lastTokenCounts.input = prefilled;
       this.lastTokenCounts.output = decoded;
+      this._rateBaselineReady = true;
       this.totalOutputTokens = decoded;
+      this.totalPromptTokens = prefilled;
+      this._outputCounterObserved = true;
+      this._promptCounterObserved = prefilled != null;
     } else {
       // No counters — fall back to window gauges only while something is in flight
       const gaugeGen = this._getPromMetric(txt, "ds4_decode_tok_s");
@@ -545,6 +815,11 @@ export class LlmProbe {
         this.prefillTps = 0;
       }
     }
+
+    this.completedRequestsTotal =
+      this._getPromMetric(txt, "ds4_requests_completed_total") ??
+      this._getPromMetric(txt, "ds4_requests_completed");
+    this._completedCounterObserved = this.completedRequestsTotal != null;
 
     const inflightCount = this._getPromMetric(txt, "ds4_requests_inflight");
     this.requestsRunning = inflightCount;
@@ -589,27 +864,41 @@ export class LlmProbe {
    * @param {number} dtSec
    */
   _applyVllmMetrics(txt, dtSec) {
+    this.generationTps = 0;
+    this.prefillTps = 0;
     const promptTokens = this._getVllmMetric(txt, "prompt_tokens_total");
     const genTokens = this._getVllmMetric(txt, "generation_tokens_total");
     const running = this._getVllmMetric(txt, "num_requests_running");
     const iterSum = this._getVllmMetric(txt, "iteration_tokens_total_sum");
     if (promptTokens != null && genTokens != null) {
+      const baselineReady =
+        this._rateBaselineReady ||
+        this.lastTokenCounts.input !== 0 ||
+        this.lastTokenCounts.output !== 0;
       const deltaIn = promptTokens - this.lastTokenCounts.input;
       const deltaOut = genTokens - this.lastTokenCounts.output;
+      const counterReset = deltaIn < 0 || deltaOut < 0;
       this.lastTokenCounts.input = promptTokens;
       this.lastTokenCounts.output = genTokens;
+      this.totalPromptTokens = promptTokens;
       this.totalOutputTokens = genTokens;
+      this._promptCounterObserved = true;
+      this._outputCounterObserved = true;
       const ttftSum = this._getVllmMetric(txt, "time_to_first_token_seconds_sum");
       const deltaIter =
         iterSum != null && this.lastIterSum != null ? iterSum - this.lastIterSum : 0;
       if (dtSec > 0 && dtSec < 10) {
-        this.generationTps = Math.max(0, Math.round((deltaOut / dtSec) * 100) / 100);
+        this.generationTps = !baselineReady || counterReset
+          ? 0
+          : Math.max(0, Math.round((deltaOut / dtSec) * 100) / 100);
+        if (!baselineReady || counterReset) this.prefillTps = 0;
         const deltaTtft =
           ttftSum != null && this.lastTtftSum != null ? ttftSum - this.lastTtftSum : 0;
         // Engine-step tokens include prefill+decode. Surplus over generation is
         // prefill, including the common case where a short/cached prefill lands
         // in the same poll as the first decode tokens.
-        const prefillIter = Math.max(0, deltaIter - Math.max(0, deltaOut));
+        const prefillIter =
+          !baselineReady || counterReset ? 0 : Math.max(0, deltaIter - Math.max(0, deltaOut));
         const specNoise = deltaOut > 0 && prefillIter > 0 && prefillIter < deltaOut * 0.5;
         const livePrefill =
           prefillIter > 0 && !specNoise ? prefillIter / dtSec : 0;
@@ -625,6 +914,7 @@ export class LlmProbe {
         );
       }
       if (ttftSum != null) this.lastTtftSum = ttftSum;
+      this._rateBaselineReady = true;
     }
     if (iterSum != null) this.lastIterSum = iterSum;
 
@@ -649,6 +939,10 @@ export class LlmProbe {
       "kv_cache_max_concurrency"
     );
     this.preemptionsTotal = this._getVllmMetric(txt, "num_preemptions_total");
+    this.completedRequestsTotal =
+      this._getVllmMetric(txt, "num_requests_success_total") ??
+      this._getVllmMetric(txt, "request_success_total");
+    this._completedCounterObserved = this.completedRequestsTotal != null;
 
     const ttftHist = this._parseVllmHistogram(txt, "vllm:time_to_first_token_seconds");
     const ttftP95 = this._histogramQuantile(ttftHist.buckets, ttftHist.total, 0.95);
@@ -704,7 +998,7 @@ export class LlmProbe {
         null;
     }
 
-    if (sgData.model_path) {
+    if (sgData.model_path && !this.modelId) {
       applyModelRef(this, sgData.model_path);
     }
 
@@ -719,15 +1013,26 @@ export class LlmProbe {
       const input = Number(inTok);
       const output = Number(outTok);
       if (Number.isFinite(input) && Number.isFinite(output)) {
+        const baselineReady =
+          this._rateBaselineReady ||
+          this.lastTokenCounts.input !== 0 ||
+          this.lastTokenCounts.output !== 0;
         const deltaIn = input - this.lastTokenCounts.input;
         const deltaOut = output - this.lastTokenCounts.output;
+        const counterReset = deltaIn < 0 || deltaOut < 0;
         this.lastTokenCounts.input = input;
         this.lastTokenCounts.output = output;
+        this.totalPromptTokens = input;
         this.totalOutputTokens = output;
+        this._promptCounterObserved = true;
+        this._outputCounterObserved = true;
         if (dtSec > 0 && dtSec < 10) {
-          this.generationTps = Math.max(0, Math.round((deltaOut / dtSec) * 100) / 100);
-          this._setPrefillTps(deltaIn / dtSec, deltaOut > 0);
+          this.generationTps = !baselineReady || counterReset
+            ? 0
+            : Math.max(0, Math.round((deltaOut / dtSec) * 100) / 100);
+          this._setPrefillTps(!baselineReady || counterReset ? 0 : deltaIn / dtSec, deltaOut > 0);
         }
+        this._rateBaselineReady = true;
         return;
       }
     }
@@ -901,6 +1206,8 @@ export class LlmProbe {
    * @param {number} dtSec
    */
   _applySglangMetrics(txt, dtSec) {
+    this.generationTps = 0;
+    this.prefillTps = 0;
     const gen =
       this._getPromMetric(txt, "sglang:generation_tokens_total") ??
       this._getPromMetric(txt, "sglang_generation_tokens_total");
@@ -929,7 +1236,14 @@ export class LlmProbe {
       }
     }
     this.lastTokenCounts.output = gen;
+    if (prompt != null) this.totalPromptTokens = prompt;
     this.totalOutputTokens = gen;
+    this._promptCounterObserved = prompt != null;
+    this._outputCounterObserved = true;
+    this.completedRequestsTotal =
+      this._getPromMetric(txt, "sglang:request_success_total") ??
+      this._getPromMetric(txt, "sglang_request_success_total");
+    this._completedCounterObserved = this.completedRequestsTotal != null;
 
     const running =
       this._getPromMetric(txt, "sglang:num_running_reqs") ??
@@ -977,7 +1291,7 @@ export class LlmProbe {
         const data = await res.json();
         const raw = data?.model_path || data?.tokenizer_path;
         if (!raw) continue;
-        applyModelRef(this, raw);
+        if (!this.modelId) applyModelRef(this, raw);
         return;
       } catch {
         /* try next */
@@ -990,6 +1304,8 @@ export class LlmProbe {
     const now = Date.now();
     const dtSec = (now - this.lastProbeTime) / 1000;
     this.lastProbeTime = now;
+    this.metricsAvailable = false;
+    this._metricsModelMatched = false;
 
     // Slots
     let slotsOk = false;
@@ -997,12 +1313,15 @@ export class LlmProbe {
       const slotsRes = await this._fetch(`${this.baseUrl}/slots`);
       const auth = this._noteAuthStatus(slotsRes.status);
       if (auth === "auth") {
+        this.status = "unavailable";
+        this.statusReason = "metrics_auth_required";
         return this._getSnapshot();
       }
       if (auth === "ok") {
         const slots = await slotsRes.json();
         if (Array.isArray(slots)) {
           slotsOk = true;
+          this._metricsModelMatched = true;
           this.slotsTotal = slots.length;
           // Some llama.cpp builds use is_processing instead of state
           this.slotsActive = slots.filter((s) => s.is_processing || (s.state && s.state !== "idle")).length;
@@ -1025,20 +1344,27 @@ export class LlmProbe {
               sawCache = true;
               cachedSum += cached;
             }
+            const hasBaseline = this.slotState.has(slotId);
             const lastState = this.slotState.get(slotId) || { decoded: 0, prompted: 0 };
             const dDecoded = decoded - lastState.decoded;
             const dPrompted = prompted - lastState.prompted;
             this.slotState.set(slotId, { decoded, prompted });
-            if (dtSec > 0 && dtSec < 10) {
-              totalGen += dDecoded / dtSec;
-              totalPrefill += dPrompted / dtSec;
+            if (hasBaseline && dtSec > 0 && dtSec < 10) {
+              // A restarted slot can expose lower counters. Re-seed it and
+              // omit the negative delta from the live rate.
+              if (dDecoded >= 0) totalGen += dDecoded / dtSec;
+              if (dPrompted >= 0) totalPrefill += dPrompted / dtSec;
             }
           }
 
           this.totalOutputTokens = totalDecoded;
+          this.totalPromptTokens = promptedSum;
+          this._outputCounterObserved = true;
+          this._promptCounterObserved = true;
           this.generationTps = Math.max(0, Math.round(totalGen * 100) / 100);
           this._setPrefillTps(totalPrefill, totalGen > 0);
           if (sawCache) this._setPrefillSplitRates(cachedSum, promptedSum, dtSec);
+          this._noteFreshTelemetry(now);
         }
       }
     } catch {}
@@ -1058,7 +1384,16 @@ export class LlmProbe {
         } else if (isHfHubCachePath(props.model_path) || isHfHubCachePath(props.model_alias)) {
           this.modelPath = null;
         }
-        if (raw) this.modelId = normalizeModelId(raw);
+        if (raw) {
+          applyModelRef(this, raw);
+          this.benchmarkModel = this.modelId;
+          this.models = this.modelId ? [this.modelId] : [];
+        }
+        // Preserve the native server's explicit model path even though the
+        // alias is the user-facing model id.
+        if (props.model_path && !isHfHubCachePath(props.model_path)) {
+          this.modelPath = props.model_path;
+        }
         this.contextLength = props.total_context_length || props.context_length || this.contextLength;
       }
     } catch {}
@@ -1069,6 +1404,28 @@ export class LlmProbe {
 
   // ─── Metrics helpers ─────────────────────────────────────
   /**
+   * Keep labeled Prometheus series scoped to the exact model selected from
+   * /v1/models. Unlabeled legacy series remain usable; labeled series without
+   * a selected model are rejected instead of being guessed or summed.
+   */
+  _promLabelsMatchModel(rawLabels) {
+    const labels = parsePromLabels(rawLabels);
+    const labeledModel = labels.model_name ?? labels.model;
+    if (labeledModel == null) {
+      this._metricsModelMatched = true;
+      return true;
+    }
+    // Direct helper callers and legacy native backends may not have a model
+    // id yet. Live OpenAI-compatible probing never reaches metrics without a
+    // selected model, so retaining this compatibility does not permit a
+    // model guess on the monitored path.
+    if (!this.modelId) return true;
+    const matches = normalizeModelId(labeledModel) === normalizeModelId(this.modelId);
+    if (matches) this._metricsModelMatched = true;
+    return matches;
+  }
+
+  /**
    * Sum all Prometheus series matching `name` (optional labels).
    * @param {string} body
    * @param {string} name Full metric name, e.g. "ds4_decode_tok_s" or "vllm:prompt_tokens_total"
@@ -1076,12 +1433,13 @@ export class LlmProbe {
    */
   _getPromMetric(body, name) {
     const esc = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const re = new RegExp(`^${esc}(?:\\{[^}]*\\})?\\s+([\\d.eE+-]+)\\s*$`, "gm");
+    const re = new RegExp(`^${esc}(?:\\{([^}]*)\\})?\\s+([\\d.eE+-]+)\\s*$`, "gm");
     let sum = 0;
     let found = false;
     let m;
     while ((m = re.exec(body)) !== null) {
-      const v = parseFloat(m[1]);
+      if (!this._promLabelsMatchModel(m[1])) continue;
+      const v = parseFloat(m[2]);
       if (Number.isFinite(v)) {
         sum += v;
         found = true;
@@ -1098,11 +1456,12 @@ export class LlmProbe {
    */
   _getPromMetricMax(body, name) {
     const esc = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const re = new RegExp(`^${esc}(?:\\{[^}]*\\})?\\s+([\\d.eE+-]+)\\s*$`, "gm");
+    const re = new RegExp(`^${esc}(?:\\{([^}]*)\\})?\\s+([\\d.eE+-]+)\\s*$`, "gm");
     let best = null;
     let m;
     while ((m = re.exec(body)) !== null) {
-      const v = parseFloat(m[1]);
+      if (!this._promLabelsMatchModel(m[1])) continue;
+      const v = parseFloat(m[2]);
       if (Number.isFinite(v)) best = best == null ? v : Math.max(best, v);
     }
     return best;
@@ -1118,17 +1477,14 @@ export class LlmProbe {
    */
   _getPromMetricLabeled(body, name, labelKey, labelValue) {
     const escName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const escKey = labelKey.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const escVal = labelValue.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const re = new RegExp(
-      `^${escName}\\{[^}]*\\b${escKey}="${escVal}"[^}]*\\}\\s+([\\d.eE+-]+)\\s*$`,
-      "gm"
-    );
+    const re = new RegExp(`^${escName}\\{([^}]*)\\}\\s+([\\d.eE+-]+)\\s*$`, "gm");
     let sum = 0;
     let found = false;
     let m;
     while ((m = re.exec(body)) !== null) {
-      const v = parseFloat(m[1]);
+      if (promLabelValue(m[1], labelKey) !== labelValue) continue;
+      if (!this._promLabelsMatchModel(m[1])) continue;
+      const v = parseFloat(m[2]);
       if (Number.isFinite(v)) {
         sum += v;
         found = true;
@@ -1144,12 +1500,10 @@ export class LlmProbe {
   /** Read a numeric label from a Prometheus info metric. */
   _getPromInfoNumber(body, name, labelKey) {
     const escName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const escKey = labelKey.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const line = new RegExp(`^${escName}\\{([^}]*)\\}\\s+[\\d.eE+-]+\\s*$`, "m").exec(body);
     if (!line) return null;
-    const label = new RegExp(`(?:^|,)\\s*${escKey}="([^"]+)"`).exec(line[1]);
-    if (!label) return null;
-    const value = Number(label[1]);
+    if (!this._promLabelsMatchModel(line[1])) return null;
+    const value = Number(promLabelValue(line[1], labelKey));
     return Number.isFinite(value) && value >= 0 ? value : null;
   }
 
@@ -1161,15 +1515,14 @@ export class LlmProbe {
   _parseVllmHistogram(body, metricPrefix) {
     const esc = metricPrefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     // Bucket lines: <metricPrefix>_bucket{...le="X"...} VALUE
-    const bucketRe = new RegExp(
-      `^${esc}_bucket\\{[^}]*\\ble="([^"]+)"[^}]*\\}\\s+([\\d.eE+-]+)\\s*$`,
-      "gm"
-    );
+    const bucketRe = new RegExp(`^${esc}_bucket\\{([^}]*)\\}\\s+([\\d.eE+-]+)\\s*$`, "gm");
     const byUpper = new Map();
     let infCount = 0;
     let m;
     while ((m = bucketRe.exec(body)) !== null) {
-      const le = m[1];
+      if (!this._promLabelsMatchModel(m[1])) continue;
+      const le = promLabelValue(m[1], "le");
+      if (le == null) continue;
       const count = parseFloat(m[2]);
       if (!Number.isFinite(count)) continue;
       const upper = le === "+Inf" ? Infinity : parseFloat(le);
@@ -1296,10 +1649,38 @@ export class LlmProbe {
     return { level, auth, scope, label, detail };
   }
 
+  _snapshotStatus() {
+    if (this.status === "ambiguous_model") return "ambiguous_model";
+    if (this.metricsAvailable && (this.status === "active" || this.status === "idle")) {
+      return this.status;
+    }
+    if (
+      this.lastObservedAt != null &&
+      Date.now() - this.lastObservedAt > TELEMETRY_STALE_MS
+    ) {
+      return "stale";
+    }
+    return this.status === "unknown" ? "unknown" : "unavailable";
+  }
+
   _getSnapshot() {
-    const metricsLive = this.serverIsOpenAI !== null && this.authOpen !== false;
+    const status = this._snapshotStatus();
+    const metricsLive = this.metricsAvailable && (status === "active" || status === "idle");
+    const liveRate = (value) => {
+      if (!metricsLive || !Number.isFinite(value)) return null;
+      if (status === "idle") return 0;
+      return value > 0 ? value : null;
+    };
+    const liveCounter = (value, observed) =>
+      metricsLive && observed && Number.isFinite(value) ? value : null;
     return {
       available: metricsLive,
+      status,
+      lastObservedAt: this.lastObservedAt,
+      statusReason:
+        status === "active" || status === "idle"
+          ? null
+          : this.statusReason || (status === "stale" ? "telemetry_stale" : "telemetry_unavailable"),
       backend: this.backendType,
       modelId: this.modelId || null,
       modelPath: this.modelPath || null,
@@ -1309,57 +1690,35 @@ export class LlmProbe {
       gpuMemoryUtilization: this.gpuMemoryUtilization,
       slotsActive: this.slotsActive,
       slotsTotal: this.slotsTotal,
-      generationTps: this.generationTps,
-      prefillTps: this.prefillTps,
-      cachedPrefillTps: this.cachedPrefillTps,
-      uncachedPrefillTps: this.uncachedPrefillTps,
-      totalOutputTokens: this.totalOutputTokens,
-      kvCacheUsage: this.kvCacheUsage,
-      kvCacheCapacityTokens: this.kvCacheCapacityTokens,
-      kvCacheMaxConcurrency: this.kvCacheMaxConcurrency,
-      requestsRunning: this.requestsRunning,
-      requestsWaiting: this.requestsWaiting,
-      ttftP95Seconds: this.ttftP95Seconds,
-      preemptionsTotal: this.preemptionsTotal,
-      prefixCacheHitRate: this.prefixCacheHitRate,
-      e2eP95Seconds: this.e2eP95Seconds,
-      itlP95Seconds: this.itlP95Seconds,
-      mtpAcceptanceRate: this.mtpAcceptanceRate,
+      generationTps: liveRate(this.generationTps),
+      prefillTps: liveRate(this.prefillTps),
+      cachedPrefillTps: liveRate(this.cachedPrefillTps),
+      uncachedPrefillTps: liveRate(this.uncachedPrefillTps),
+      totalPromptTokens: liveCounter(this.totalPromptTokens, this._promptCounterObserved),
+      totalOutputTokens: liveCounter(this.totalOutputTokens, this._outputCounterObserved),
+      completedRequestsTotal: liveCounter(
+        this.completedRequestsTotal,
+        this._completedCounterObserved
+      ),
+      telemetrySource: this.telemetrySource,
+      kvCacheUsage: metricsLive ? this.kvCacheUsage : null,
+      kvCacheCapacityTokens: metricsLive ? this.kvCacheCapacityTokens : null,
+      kvCacheMaxConcurrency: metricsLive ? this.kvCacheMaxConcurrency : null,
+      requestsRunning: metricsLive ? this.requestsRunning : null,
+      requestsWaiting: metricsLive ? this.requestsWaiting : null,
+      ttftP95Seconds: metricsLive ? this.ttftP95Seconds : null,
+      preemptionsTotal: metricsLive ? this.preemptionsTotal : null,
+      prefixCacheHitRate: metricsLive ? this.prefixCacheHitRate : null,
+      e2eP95Seconds: metricsLive ? this.e2eP95Seconds : null,
+      itlP95Seconds: metricsLive ? this.itlP95Seconds : null,
+      mtpAcceptanceRate: metricsLive ? this.mtpAcceptanceRate : null,
       posture: this._buildPosture(),
       error: this.error,
     };
   }
 
   _defaultLlm() {
-    return {
-      available: false,
-      backend: this.backendType,
-      modelId: null,
-      modelPath: null,
-      models: [],
-      contextLength: null,
-      gpuMemoryUtilization: null,
-      slotsActive: 0,
-      slotsTotal: 0,
-      generationTps: 0,
-      prefillTps: 0,
-      cachedPrefillTps: null,
-      uncachedPrefillTps: null,
-      totalOutputTokens: 0,
-      kvCacheUsage: null,
-      kvCacheCapacityTokens: null,
-      kvCacheMaxConcurrency: null,
-      requestsRunning: null,
-      requestsWaiting: null,
-      ttftP95Seconds: null,
-      preemptionsTotal: null,
-      prefixCacheHitRate: null,
-      e2eP95Seconds: null,
-      itlP95Seconds: null,
-      mtpAcceptanceRate: null,
-      posture: this._buildPosture(),
-      error: this.error,
-    };
+    return this._getSnapshot();
   }
 
   // ─── HTTP helpers ────────────────────────────────────────

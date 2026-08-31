@@ -71,7 +71,10 @@ export class SparkMonitor {
     this.llmProbes = new Map();
     if (this._llmMonitoringEnabled(spark)) {
       for (const port of this._llmPorts()) {
-        this.llmProbes.set(port, new LlmProbe(spark, port));
+        this.llmProbes.set(
+          port,
+          new LlmProbe(spark, port, { telemetryPort: this._llmTelemetryPort(port, spark) })
+        );
       }
     }
 
@@ -177,9 +180,13 @@ export class SparkMonitor {
       const existing = prevProbes.get(port);
       if (existing) {
         existing.spark = spark;
+        existing.setTelemetryPort(this._llmTelemetryPort(port, spark));
         this.llmProbes.set(port, existing);
       } else {
-        this.llmProbes.set(port, new LlmProbe(spark, port));
+        this.llmProbes.set(
+          port,
+          new LlmProbe(spark, port, { telemetryPort: this._llmTelemetryPort(port, spark) })
+        );
       }
     }
     if (!this._llmMonitoringEnabled()) {
@@ -367,6 +374,19 @@ export class SparkMonitor {
     return [LLM_PORT];
   }
 
+  /**
+   * Return the optional server-side telemetry source for a request port.
+   * Invalid mappings fail closed to the request/API port.
+   */
+  _llmTelemetryPort(requestPort, spark = this.spark) {
+    const raw = spark?.llmTelemetryPorts;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return requestPort;
+    const telemetry = Number(raw[String(requestPort)] ?? raw[requestPort]);
+    return Number.isInteger(telemetry) && telemetry >= 1 && telemetry <= 65535
+      ? telemetry
+      : requestPort;
+  }
+
   /** Start background polling. */
   start() {
     if (this._running) return;
@@ -447,6 +467,23 @@ export class SparkMonitor {
       llmMonitoring: this._llmMonitoringEnabled(),
       llmPort: ports[0] ?? LLM_PORT,
       llmPorts: ports,
+      llmTelemetryPorts:
+        this.spark?.llmTelemetryPorts && typeof this.spark.llmTelemetryPorts === "object"
+          ? Object.fromEntries(
+              Object.entries(this.spark.llmTelemetryPorts).filter(([request, telemetry]) => {
+                const requestPort = Number(request);
+                const telemetryPort = Number(telemetry);
+                return (
+                  Number.isInteger(requestPort) &&
+                  requestPort >= 1 &&
+                  requestPort <= 65535 &&
+                  Number.isInteger(telemetryPort) &&
+                  telemetryPort >= 1 &&
+                  telemetryPort <= 65535
+                );
+              })
+            )
+          : {},
       llmApiKeyPorts: Array.isArray(this.spark.llmApiKeyPorts)
         ? this.spark.llmApiKeyPorts
         : Object.keys(this.spark.llmApiKeys || {})
