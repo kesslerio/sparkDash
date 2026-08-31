@@ -123,3 +123,10 @@ test("telemetry mapping changes source port while request port remains the probe
   assert.equal(probe.telemetrySource, "direct");
   assert.equal(probe.baseUrl, "http://10.0.0.5:4000");
 });
+
+test("server-only telemetry mapping is not published in snapshots", () => {
+  const monitor = monitorWithLlm(
+    stubSpark({ llmPorts: [4000], llmTelemetryPorts: { "4000": 9341 } })
+  );
+  assert.equal("llmTelemetryPorts" in monitor.snapshot(), false);
+});

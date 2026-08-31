@@ -81,7 +81,7 @@ function migratePoint(point) {
   const status = LLM_STATUSES.has(point.status)
     ? point.status
     : point.available
-      ? "active"
+      ? "unknown"
       : "unavailable";
   return {
     ...point,

@@ -35,8 +35,6 @@ export interface SparkConfig {
   llmPort?: number;
   /** HTTP ports for LLM servers on this Spark (default [8888]) */
   llmPorts?: number[];
-  /** Optional telemetry/model-discovery port per request port (server-side only). */
-  llmTelemetryPorts?: Record<string, number>;
   /**
    * Ports that have an encrypted LLM API key stored server-side.
    * The key itself is never returned by the API.
@@ -575,8 +573,6 @@ export interface SparkSnapshot {
   llmPort: number;
   /** All LLM server ports configured for this Spark */
   llmPorts: number[];
-  /** Optional telemetry/model-discovery port per request port (server-only mapping). */
-  llmTelemetryPorts?: Record<string, number>;
   /** Ports with a stored LLM API key (key itself never exposed) */
   llmApiKeyPorts?: number[];
   /** Whether ComfyUI is probed (opt-in; all roles) */

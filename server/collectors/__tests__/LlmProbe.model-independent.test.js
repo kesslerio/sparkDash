@@ -164,3 +164,54 @@ test("missing vLLM counter series cannot reuse a prior live rate", () => {
   assert.equal(probe.generationTps, 0);
   assert.equal(probe.prefillTps, 0);
 });
+
+test("malformed Prometheus labels do not cause parser backtracking", () => {
+  const probe = new LlmProbe({ lanIp: "127.0.0.1" }, 8888);
+  probe.modelId = "model";
+  const malformed = `vllm:num_requests_running{model_name="${"\\".repeat(64)}} 0\n`;
+  assert.equal(probe._getPromMetric(malformed, "vllm:num_requests_running"), null);
+});
+
+test("unlabeled metrics without workload series remain unknown, not model mismatch", () => {
+  const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 8888);
+  probe.modelId = "active-model";
+  probe.metricsAvailable = true;
+  probe._metricsModelSeen = false;
+  probe._metricsModelMatched = false;
+  probe._getPromMetric("process_cpu_seconds_total 12\n", "process_cpu_seconds_total");
+  probe._noteFreshTelemetry(Date.now());
+  assert.equal(probe.status, "unknown");
+  assert.equal(probe.statusReason, "workload_state_unavailable");
+});
+
+test("stale telemetry clears live rates and reports an explicit reason", () => {
+  const probe = new LlmProbe({ lanIp: "127.0.0.1" }, 8888);
+  probe.status = "active";
+  probe.statusReason = null;
+  probe.metricsAvailable = false;
+  probe.lastObservedAt = Date.now() - 31_000;
+  probe.generationTps = 42;
+  const snapshot = probe._getSnapshot();
+  assert.equal(snapshot.status, "stale");
+  assert.equal(snapshot.statusReason, "telemetry_stale");
+  assert.equal(snapshot.generationTps, null);
+  assert.equal(snapshot.available, false);
+});
+
+test("missing Prometheus info labels stay unknown instead of becoming zero", () => {
+  const probe = new LlmProbe({ lanIp: "127.0.0.1" }, 8888);
+  probe.modelId = "model";
+  const body = 'vllm:cache_config_info{model_name="model"} 1\n';
+  assert.equal(
+    probe._getPromInfoNumber(body, "vllm:cache_config_info", "kv_cache_size_tokens"),
+    null
+  );
+  assert.equal(
+    probe._getPromInfoNumber(
+      'vllm:cache_config_info{model_name="model",kv_cache_size_tokens="123"} 1\n',
+      "vllm:cache_config_info",
+      "kv_cache_size_tokens"
+    ),
+    123
+  );
+});

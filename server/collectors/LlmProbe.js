@@ -133,7 +133,10 @@ export function selectActiveModel(entries) {
 function parsePromLabels(raw) {
   const labels = {};
   if (typeof raw !== "string") return labels;
-  const re = /([A-Za-z_][A-Za-z0-9_]*)="((?:\\.|[^"])*)"/g;
+  // Keep the alternatives disjoint: a backslash is either an escape prefix
+  // or a non-escape character, never both. This prevents malformed labels
+  // from causing catastrophic backtracking on the Node event loop.
+  const re = /([A-Za-z_][A-Za-z0-9_]*)="((?:\\.|[^"\\])*)"/g;
   let match;
   while ((match = re.exec(raw)) !== null) {
     labels[match[1]] = match[2].replace(/\\([\\"nrt])/g, (_all, escaped) => {
@@ -189,6 +192,7 @@ export class LlmProbe {
     this.lastObservedAt = null;
     this.metricsAvailable = false;
     this._metricsModelMatched = false;
+    this._metricsModelSeen = false;
 
     // Per-slot rate tracking (for llama.cpp native path)
     this.slotState = new Map();
@@ -354,6 +358,7 @@ export class LlmProbe {
     this.error = message;
     this.metricsAvailable = false;
     this._metricsModelMatched = false;
+    this._metricsModelSeen = false;
     this.statusReason = message || "telemetry_unavailable";
     this.status = this.lastObservedAt != null ? "stale" : "unavailable";
     this._consecutiveFailures += 1;
@@ -379,6 +384,7 @@ export class LlmProbe {
     this.lastObservedAt = null;
     this.metricsAvailable = false;
     this._metricsModelMatched = false;
+    this._metricsModelSeen = false;
     this.contextLength = null;
     this.gpuMemoryUtilization = null;
     this.slotsActive = 0;
@@ -462,6 +468,7 @@ export class LlmProbe {
     this.contextLength = null;
     this.metricsAvailable = false;
     this._metricsModelMatched = false;
+    this._metricsModelSeen = false;
     this.status = selection.reason === "ambiguous_model" ? "ambiguous_model" : "unavailable";
     this.statusReason = selection.reason;
     this._resetRateBaselines();
@@ -477,7 +484,7 @@ export class LlmProbe {
 
   _setWorkloadStatus() {
     if (!this.metricsAvailable) return;
-    if (this._metricsModelMatched === false) {
+    if (this._metricsModelSeen && this._metricsModelMatched === false) {
       this.status = "unknown";
       this.statusReason = "metric_model_mismatch";
       return;
@@ -634,6 +641,7 @@ export class LlmProbe {
     this.lastProbeTime = now;
     this.metricsAvailable = false;
     this._metricsModelMatched = false;
+    this._metricsModelSeen = false;
 
     // Model info from /v1/models — 401/403 means protected; other failure = down
     let modelsOk = false;
@@ -1224,18 +1232,30 @@ export class LlmProbe {
       return;
     }
 
+    const baselineReady =
+      this._rateBaselineReady ||
+      this.lastTokenCounts.input !== 0 ||
+      this.lastTokenCounts.output !== 0;
+    const deltaOut = gen - this.lastTokenCounts.output;
+    const deltaIn = prompt != null ? prompt - this.lastTokenCounts.input : null;
+    const counterReset = deltaOut < 0 || (deltaIn != null && deltaIn < 0);
     if (dtSec > 0 && dtSec < 10) {
-      const deltaOut = gen - this.lastTokenCounts.output;
-      this.generationTps = Math.max(0, Math.round((deltaOut / dtSec) * 100) / 100);
+      this.generationTps =
+        !baselineReady || counterReset
+          ? 0
+          : Math.max(0, Math.round((deltaOut / dtSec) * 100) / 100);
       if (prompt != null) {
-        const deltaIn = prompt - this.lastTokenCounts.input;
-        this._setPrefillTps(deltaIn / dtSec, deltaOut > 0);
-        this.lastTokenCounts.input = prompt;
+        this._setPrefillTps(
+          !baselineReady || counterReset ? 0 : deltaIn / dtSec,
+          deltaOut > 0
+        );
       } else if (deltaOut <= 0) {
         this.prefillTps = 0;
       }
     }
+    if (prompt != null) this.lastTokenCounts.input = prompt;
     this.lastTokenCounts.output = gen;
+    this._rateBaselineReady = true;
     if (prompt != null) this.totalPromptTokens = prompt;
     this.totalOutputTokens = gen;
     this._promptCounterObserved = prompt != null;
@@ -1306,6 +1326,7 @@ export class LlmProbe {
     this.lastProbeTime = now;
     this.metricsAvailable = false;
     this._metricsModelMatched = false;
+    this._metricsModelSeen = false;
 
     // Slots
     let slotsOk = false;
@@ -1412,14 +1433,23 @@ export class LlmProbe {
     const labels = parsePromLabels(rawLabels);
     const labeledModel = labels.model_name ?? labels.model;
     if (labeledModel == null) {
-      this._metricsModelMatched = true;
+      // A malformed model label must not be mistaken for an unlabeled legacy
+      // series. Reject it so malformed exposition cannot bypass model scoping.
+      if (typeof rawLabels === "string" && /(?:^|,)\s*(?:model_name|model)\s*=/.test(rawLabels)) {
+        this._metricsModelSeen = true;
+        return false;
+      }
       return true;
     }
+    this._metricsModelSeen = true;
     // Direct helper callers and legacy native backends may not have a model
     // id yet. Live OpenAI-compatible probing never reaches metrics without a
     // selected model, so retaining this compatibility does not permit a
     // model guess on the monitored path.
-    if (!this.modelId) return true;
+    if (!this.modelId) {
+      this._metricsModelMatched = true;
+      return true;
+    }
     const matches = normalizeModelId(labeledModel) === normalizeModelId(this.modelId);
     if (matches) this._metricsModelMatched = true;
     return matches;
@@ -1503,7 +1533,9 @@ export class LlmProbe {
     const line = new RegExp(`^${escName}\\{([^}]*)\\}\\s+[\\d.eE+-]+\\s*$`, "m").exec(body);
     if (!line) return null;
     if (!this._promLabelsMatchModel(line[1])) return null;
-    const value = Number(promLabelValue(line[1], labelKey));
+    const raw = promLabelValue(line[1], labelKey);
+    if (raw == null) return null;
+    const value = Number(raw);
     return Number.isFinite(value) && value >= 0 ? value : null;
   }
 

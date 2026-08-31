@@ -475,3 +475,31 @@ test("_applySglangPrefillSplit does not clobber server_info tok/s", () => {
   assert.equal(probe.lastTokenCounts.output, 150);
   assert.equal(probe.cachedPrefillTps, 0); // first split sample seeds
 });
+
+test("_applySglangMetrics reseeds counters after a reset", () => {
+  const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 30000);
+  probe._applySglangMetrics(
+    "sglang:generation_tokens_total 5000000\n" +
+      "sglang:prompt_tokens_total 6000000\n" +
+      "sglang:num_running_reqs 0\n",
+    2
+  );
+  assert.equal(probe.generationTps, 0);
+
+  probe._applySglangMetrics(
+    "sglang:generation_tokens_total 5000010\n" +
+      "sglang:prompt_tokens_total 6000020\n" +
+      "sglang:num_running_reqs 1\n",
+    2
+  );
+  assert.equal(probe.generationTps, 5);
+
+  probe._resetRateBaselines();
+  probe._applySglangMetrics(
+    "sglang:generation_tokens_total 5000100\n" +
+      "sglang:prompt_tokens_total 6000200\n" +
+      "sglang:num_running_reqs 0\n",
+    2
+  );
+  assert.equal(probe.generationTps, 0);
+});

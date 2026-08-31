@@ -467,23 +467,6 @@ export class SparkMonitor {
       llmMonitoring: this._llmMonitoringEnabled(),
       llmPort: ports[0] ?? LLM_PORT,
       llmPorts: ports,
-      llmTelemetryPorts:
-        this.spark?.llmTelemetryPorts && typeof this.spark.llmTelemetryPorts === "object"
-          ? Object.fromEntries(
-              Object.entries(this.spark.llmTelemetryPorts).filter(([request, telemetry]) => {
-                const requestPort = Number(request);
-                const telemetryPort = Number(telemetry);
-                return (
-                  Number.isInteger(requestPort) &&
-                  requestPort >= 1 &&
-                  requestPort <= 65535 &&
-                  Number.isInteger(telemetryPort) &&
-                  telemetryPort >= 1 &&
-                  telemetryPort <= 65535
-                );
-              })
-            )
-          : {},
       llmApiKeyPorts: Array.isArray(this.spark.llmApiKeyPorts)
         ? this.spark.llmApiKeyPorts
         : Object.keys(this.spark.llmApiKeys || {})

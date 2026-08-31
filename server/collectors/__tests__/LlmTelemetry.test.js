@@ -102,12 +102,12 @@ test("LlmTelemetryStore persists model/status/counters and migrates old points",
       JSON.stringify({
         version: 1,
         series: {
-          "old:8888": [{ t: now.getTime(), available: false, backend: "vllm" }],
+          "old:8888": [{ t: now.getTime(), available: true, backend: "vllm" }],
         },
       })
     );
     const migrated = new LlmTelemetryStore(file).getSeries("old", 8888, { hours: 1, now }).points[0];
-    assert.equal(migrated.status, "unavailable");
+    assert.equal(migrated.status, "unknown");
     assert.equal(migrated.modelId, null);
     assert.equal(migrated.statusReason, null);
   } finally {

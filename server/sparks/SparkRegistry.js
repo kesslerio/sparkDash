@@ -54,7 +54,7 @@ export class SparkRegistry {
     if (ssh.auth === "pass" || this._passwords.has(spark.id)) {
       ssh.hasPassword = this._passwords.has(spark.id);
     }
-    const { llmApiKeys: _drop, ...rest } = spark;
+    const { llmApiKeys: _drop, llmTelemetryPorts: _telemetry, ...rest } = spark;
     return {
       ...rest,
       ssh,
