@@ -371,6 +371,9 @@ async function scanOmpSessions(sessionsDir, deps, readDir, stat) {
     }
   }
   await walk(sessionsDir, 0);
+  // Sort by mtime first and read only the newest OMP_MAX_SESSION_FILES:
+  // stat is cheap, file reads/parsing are not. Idle scans must not read every
+  // session file on disk just to discard all but 100.
   results.sort((a, b) => b.mtime - a.mtime);
   return results.slice(0, OMP_MAX_SESSION_FILES);
 }
