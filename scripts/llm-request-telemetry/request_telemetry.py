@@ -1,6 +1,7 @@
 """ASGI request metadata only: never persist prompts, outputs, headers or keys."""
 import hashlib
 import json
+import os
 import sys
 import time
 import uuid
@@ -8,7 +9,7 @@ import uuid
 BODY_LIMIT = 8 * 1024 * 1024
 EVENT_LIMIT = 1024 * 1024
 TIMINGS = ('time_to_first_token_ms', 'generation_time_ms', 'queue_time_ms',
-           'mean_itl_ms', 'tokens_per_second')
+           'prefill_time_ms', 'mean_itl_ms', 'tokens_per_second')
 
 
 def number(value):
@@ -24,15 +25,25 @@ def emit(marker, record):
 class RequestTelemetry:
     def __init__(self, app):
         self.app = app
+        self.inflight = 0
+        self.profile = os.environ.get('VLLM_QUALIFICATION_ID')
+        self.profile_sha256 = os.environ.get('VLLM_QUALIFICATION_SHA256')
+        try:
+            self.defaults = json.loads(os.environ.get('VLLM_QUALIFICATION_DEFAULT_SAMPLING', '{}'))
+        except ValueError:
+            self.defaults = {}
 
     async def __call__(self, scope, receive, send):
         if scope['type'] != 'http' or scope.get('path') != '/v1/chat/completions':
             return await self.app(scope, receive, send)
         started = time.monotonic()
+        self.inflight += 1
         peer = str((scope.get('client') or ('unknown',))[0])
         record = {'event': 'llm_request', 'id': uuid.uuid4().hex,
                   'started_at': time.time(),
                   'client': hashlib.sha256(peer.encode()).hexdigest()[:12]}
+        record.update(profile=self.profile, profile_sha256=self.profile_sha256,
+                      http_inflight_at_start=self.inflight)
         body, event_buffer = bytearray(), bytearray()
         body_overflow = False
         first_progress = None
@@ -89,6 +100,11 @@ class RequestTelemetry:
                     try:
                         value = json.loads(body)
                         if isinstance(value, dict):
+                            for key in ('temperature', 'top_p', 'top_k', 'min_p'):
+                                requested = number(value.get(key))
+                                # Missing defaults remain unknown, never silently zero.
+                                record['requested_' + key] = requested
+                                record['effective_' + key] = requested if requested is not None else number(self.defaults.get(key))
                             model = value.get('model')
                             if isinstance(model, str) and 0 < len(model) <= 256:
                                 record['model'] = model
@@ -133,6 +149,8 @@ class RequestTelemetry:
             record['interrupted'] = True
             raise
         finally:
+            self.inflight -= 1
+            record['http_inflight_at_finish'] = self.inflight
             record['elapsed_ms'] = round((time.monotonic() - started) * 1000, 2)
             record['first_progress_ms'] = round(first_progress * 1000, 2) if first_progress is not None else None
             record['finish_reasons'] = sorted(finishes)
@@ -144,6 +162,8 @@ class RequestTelemetry:
             itl = record.get('mean_itl_ms')
             record['decode_tokens_per_second'] = 1000 / itl if itl else None
             count = record.get('completion_tokens')
+            prompt, cached = record.get('prompt_tokens'), record.get('cached_tokens')
+            record['new_prompt_tokens'] = prompt - cached if prompt is not None and cached is not None and cached <= prompt else None
             elapsed = record['elapsed_ms']
             record['end_to_end_tokens_per_second'] = count * 1000 / elapsed if count is not None and elapsed else None
             emit('LLM_REQUEST', record)

@@ -15,7 +15,11 @@ FIELDS = {'model','deployment','event','id','started_at','client','status','max_
           'tokens_per_second','decode_tokens_per_second','end_to_end_tokens_per_second','elapsed_ms','first_progress_ms','finish_reasons',
           'tool_call','stream_error','interrupted','disconnected',
           'request_metadata_omitted','response_metadata_omitted'}
-RETENTION = 7 * 86400
+FIELDS.update({'profile', 'profile_sha256', 'new_prompt_tokens', 'prefill_time_ms',
+               'http_inflight_at_start', 'http_inflight_at_finish'})
+FIELDS.update(prefix + key for prefix in ('requested_', 'effective_')
+              for key in ('temperature', 'top_p', 'top_k', 'min_p'))
+RETENTION = 30 * 86400
 
 
 def ingest(db, text, now, deployment=None):
@@ -70,8 +74,8 @@ def main():
     args=parser.parse_args()
     db=connect(args.database)
     if args.report_hours is not None:
-        if not 0 < args.report_hours <= 168:
-            parser.error('report hours must be in (0, 168]')
+        if not 0 < args.report_hours <= 720:
+            parser.error('report hours must be in (0, 720]')
         cutoff=time.time()-args.report_hours*3600
         rows=[json.loads(row[0]) for row in db.execute("SELECT data FROM requests WHERE phase='finish'")]
         rows=[row for row in rows if row['started_at']+(row.get('elapsed_ms') or 0)/1000 >= cutoff]

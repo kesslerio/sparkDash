@@ -14,6 +14,22 @@ spec.loader.exec_module(m)
 
 
 class TelemetryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_sampling_cache_and_profile_metadata(self):
+        with patch.dict(m.os.environ, {'VLLM_QUALIFICATION_ID': 'kv24', 'VLLM_QUALIFICATION_SHA256': 'f'*64,
+                                     'VLLM_QUALIFICATION_DEFAULT_SAMPLING': '{"temperature":1,"top_k":20}'}):
+            _, row = await self.exercise(b'{"temperature":0}', [b'data: {"usage":{"prompt_tokens":50,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":40}}}\n\n'])
+        self.assertEqual(row['effective_temperature'], 0)
+        self.assertEqual(row['effective_top_k'], 20)
+        self.assertIsNone(row['effective_top_p'])
+        self.assertEqual(row['new_prompt_tokens'], 10)
+        self.assertEqual(row['profile'], 'kv24')
+        self.assertEqual(row['http_inflight_at_start'], 1)
+        self.assertEqual(row['http_inflight_at_finish'], 0)
+
+    async def test_missing_cache_is_unknown(self):
+        _, row = await self.exercise(b'{}', [b'data: {"usage":{"prompt_tokens":50,"completion_tokens":2}}\n\n'])
+        self.assertIsNone(row['new_prompt_tokens'])
+
     async def exercise(self, body, chunks, error=False):
         sent, logs = [], []
         async def app(scope, receive, send):

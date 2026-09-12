@@ -7,6 +7,19 @@ spec=importlib.util.spec_from_file_location('history',Path(__file__).resolve().p
 m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
 
 class HistoryTests(unittest.TestCase):
+    def test_retains_twenty_nine_days_and_excludes_thirty_one(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db=m.connect(Path(directory)/'history.sqlite3')
+            now=4000000
+            for index, days in enumerate((29,31)):
+                row={'id':str(index)*32,'started_at':now-days*86400,'profile':'kv24', 'effective_temperature':0,'prompt':'PRIVATE'}
+                with db:m.ingest(db,'LLM_REQUEST '+json.dumps(row),now,'deployment')
+            rows=[json.loads(r[0]) for r in db.execute('SELECT data FROM requests')]
+            self.assertEqual(len(rows),1)
+            self.assertEqual(rows[0]['profile'],'kv24')
+            self.assertNotIn('prompt',rows[0])
+            db.close()
+
     def test_model_and_deployment_survive_switch(self):
         with tempfile.TemporaryDirectory() as directory:
             db=m.connect(Path(directory)/'history.sqlite3')
