@@ -15,6 +15,11 @@ TIMINGS = ('time_to_first_token_ms', 'generation_time_ms', 'queue_time_ms',
 def number(value):
     return value if type(value) in (int, float) and 0 <= value < 1e15 else None
 
+def sampling_number(key, value):
+    if key == 'top_k' and type(value) is int and value == -1:
+        return value
+    return number(value)
+
 
 def emit(marker, record):
     # Server logging configuration can suppress unrelated named loggers.
@@ -31,6 +36,8 @@ class RequestTelemetry:
         try:
             self.defaults = json.loads(os.environ.get('VLLM_QUALIFICATION_DEFAULT_SAMPLING', '{}'))
         except ValueError:
+            self.defaults = {}
+        if not isinstance(self.defaults, dict):
             self.defaults = {}
 
     async def __call__(self, scope, receive, send):
@@ -101,10 +108,10 @@ class RequestTelemetry:
                         value = json.loads(body)
                         if isinstance(value, dict):
                             for key in ('temperature', 'top_p', 'top_k', 'min_p'):
-                                requested = number(value.get(key))
+                                requested = sampling_number(key, value.get(key))
                                 # Missing defaults remain unknown, never silently zero.
                                 record['requested_' + key] = requested
-                                record['effective_' + key] = requested if requested is not None else number(self.defaults.get(key))
+                                record['effective_' + key] = requested if requested is not None else sampling_number(key, self.defaults.get(key))
                             model = value.get('model')
                             if isinstance(model, str) and 0 < len(model) <= 256:
                                 record['model'] = model

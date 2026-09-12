@@ -30,6 +30,12 @@ class TelemetryTests(unittest.IsolatedAsyncioTestCase):
         _, row = await self.exercise(b'{}', [b'data: {"usage":{"prompt_tokens":50,"completion_tokens":2}}\n\n'])
         self.assertIsNone(row['new_prompt_tokens'])
 
+    async def test_disabled_top_k_and_invalid_defaults(self):
+        with patch.dict(m.os.environ, {'VLLM_QUALIFICATION_DEFAULT_SAMPLING': '[]'}):
+            _, row=await self.exercise(b'{"top_k":-1}', [])
+        self.assertEqual(row['effective_top_k'],-1)
+        self.assertIsNone(row['effective_temperature'])
+
     async def exercise(self, body, chunks, error=False):
         sent, logs = [], []
         async def app(scope, receive, send):
