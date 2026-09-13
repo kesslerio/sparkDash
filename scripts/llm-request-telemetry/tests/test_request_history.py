@@ -31,6 +31,11 @@ class HistoryTests(unittest.TestCase):
             self.assertEqual({r['deployment'] for r in rows},{'deployment-0','deployment-1'})
             db.close()
 
+    def test_explicit_disconnect_phase_overrides_legacy_finish_heuristic(self):
+        self.assertFalse(m.interrupted({'disconnected':True,'disconnect_before_terminal':False}))
+        self.assertTrue(m.interrupted({'disconnected':True,'disconnect_before_terminal':True,'finish_reasons':['stop']}))
+        self.assertTrue(m.interrupted({'interrupted':True,'disconnect_before_terminal':False}))
+
     def test_normal_stream_close_is_not_an_interruption(self):
         self.assertFalse(m.interrupted({'disconnected': True, 'finish_reasons': ['stop']}))
         self.assertFalse(m.interrupted({'disconnected': True, 'finish_reasons': ['tool_calls']}))

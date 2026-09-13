@@ -91,6 +91,25 @@ class TelemetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row['finish_reasons'], ['tool_calls'])
         self.assertEqual(row['completion_tokens'], 5)
 
+    async def test_disconnect_after_done_is_not_early_cancellation(self):
+        for done in (False, True):
+            logs = []
+            async def app(scope, receive, send):
+                await send({'type': 'http.response.start', 'status': 200})
+                if done:
+                    await send({'type': 'http.response.body', 'body': b'data: [DONE]\n\n', 'more_body': True})
+                await receive()
+            async def receive():
+                return {'type': 'http.disconnect'}
+            async def send(message):
+                pass
+            scope = {'type': 'http', 'path': '/v1/chat/completions'}
+            with patch.object(m, 'emit', side_effect=lambda marker, value: logs.append(dict(value))):
+                await m.RequestTelemetry(app)(scope, receive, send)
+            self.assertTrue(logs[-1]['disconnected'])
+            self.assertEqual(logs[-1]['disconnect_before_terminal'], not done)
+            self.assertEqual(logs[-1]['response_terminal_seen'], done)
+
     def test_emission_survives_disabled_named_loggers(self):
         output = io.StringIO()
         previous = logging.root.manager.disable

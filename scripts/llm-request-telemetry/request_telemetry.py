@@ -55,9 +55,14 @@ class RequestTelemetry:
         body_overflow = False
         first_progress = None
         finishes = set()
+        terminal_seen = False
+        response_completed = False
 
         def event(data):
-            nonlocal first_progress
+            nonlocal first_progress, terminal_seen
+            if data.strip() == b'[DONE]':
+                terminal_seen = True
+                return
             try:
                 value = json.loads(data)
             except (ValueError, UnicodeError):
@@ -95,6 +100,9 @@ class RequestTelemetry:
             message = await receive()
             if message['type'] == 'http.disconnect':
                 record['disconnected'] = True
+                # ASGI may report disconnect after a normally finished response.
+                # Preserve the raw event without treating that as cancellation.
+                record['disconnect_before_terminal'] = not (terminal_seen or response_completed)
             if message['type'] == 'http.request' and not body_overflow:
                 part = message.get('body', b'')
                 if len(body) + len(part) > BODY_LIMIT:
@@ -129,6 +137,7 @@ class RequestTelemetry:
             return message
 
         async def observed_send(message):
+            nonlocal response_completed
             if message['type'] == 'http.response.start':
                 record['status'] = message['status']
             elif message['type'] == 'http.response.body':
@@ -148,6 +157,8 @@ class RequestTelemetry:
                     event_buffer.clear()
                     record['response_metadata_omitted'] = True
             await send(message)
+            if message['type'] == 'http.response.body' and not message.get('more_body'):
+                response_completed = True
 
         emit('LLM_REQUEST_START', record)
         try:
@@ -161,6 +172,8 @@ class RequestTelemetry:
             record['elapsed_ms'] = round((time.monotonic() - started) * 1000, 2)
             record['first_progress_ms'] = round(first_progress * 1000, 2) if first_progress is not None else None
             record['finish_reasons'] = sorted(finishes)
+            record['response_terminal_seen'] = terminal_seen
+            record['response_completed'] = response_completed
             metadata = scope.get('state', {}).get('request_metadata')
             usage = getattr(metadata, 'final_usage_info', None)
             if usage is not None:
