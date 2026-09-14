@@ -1,6 +1,7 @@
 """ASGI request metadata only: never persist prompts, outputs, headers or keys."""
 import hashlib
 import json
+import os
 import sys
 import time
 import uuid
@@ -8,11 +9,16 @@ import uuid
 BODY_LIMIT = 8 * 1024 * 1024
 EVENT_LIMIT = 1024 * 1024
 TIMINGS = ('time_to_first_token_ms', 'generation_time_ms', 'queue_time_ms',
-           'mean_itl_ms', 'tokens_per_second')
+           'prefill_time_ms', 'mean_itl_ms', 'tokens_per_second')
 
 
 def number(value):
     return value if type(value) in (int, float) and 0 <= value < 1e15 else None
+
+def sampling_number(key, value):
+    if key == 'top_k' and type(value) is int and value == -1:
+        return value
+    return number(value)
 
 
 def emit(marker, record):
@@ -24,22 +30,39 @@ def emit(marker, record):
 class RequestTelemetry:
     def __init__(self, app):
         self.app = app
+        self.inflight = 0
+        self.profile = os.environ.get('VLLM_QUALIFICATION_ID')
+        self.profile_sha256 = os.environ.get('VLLM_QUALIFICATION_SHA256')
+        try:
+            self.defaults = json.loads(os.environ.get('VLLM_QUALIFICATION_DEFAULT_SAMPLING', '{}'))
+        except ValueError:
+            self.defaults = {}
+        if not isinstance(self.defaults, dict):
+            self.defaults = {}
 
     async def __call__(self, scope, receive, send):
         if scope['type'] != 'http' or scope.get('path') != '/v1/chat/completions':
             return await self.app(scope, receive, send)
         started = time.monotonic()
+        self.inflight += 1
         peer = str((scope.get('client') or ('unknown',))[0])
         record = {'event': 'llm_request', 'id': uuid.uuid4().hex,
                   'started_at': time.time(),
                   'client': hashlib.sha256(peer.encode()).hexdigest()[:12]}
+        record.update(profile=self.profile, profile_sha256=self.profile_sha256,
+                      http_inflight_at_start=self.inflight)
         body, event_buffer = bytearray(), bytearray()
         body_overflow = False
         first_progress = None
         finishes = set()
+        terminal_seen = False
+        response_completed = False
 
         def event(data):
-            nonlocal first_progress
+            nonlocal first_progress, terminal_seen
+            if data.strip() == b'[DONE]':
+                terminal_seen = True
+                return
             try:
                 value = json.loads(data)
             except (ValueError, UnicodeError):
@@ -77,6 +100,9 @@ class RequestTelemetry:
             message = await receive()
             if message['type'] == 'http.disconnect':
                 record['disconnected'] = True
+                # ASGI may report disconnect after a normally finished response.
+                # Preserve the raw event without treating that as cancellation.
+                record['disconnect_before_terminal'] = not (terminal_seen or response_completed)
             if message['type'] == 'http.request' and not body_overflow:
                 part = message.get('body', b'')
                 if len(body) + len(part) > BODY_LIMIT:
@@ -89,6 +115,11 @@ class RequestTelemetry:
                     try:
                         value = json.loads(body)
                         if isinstance(value, dict):
+                            for key in ('temperature', 'top_p', 'top_k', 'min_p'):
+                                requested = sampling_number(key, value.get(key))
+                                # Missing defaults remain unknown, never silently zero.
+                                record['requested_' + key] = requested
+                                record['effective_' + key] = requested if requested is not None else sampling_number(key, self.defaults.get(key))
                             model = value.get('model')
                             if isinstance(model, str) and 0 < len(model) <= 256:
                                 record['model'] = model
@@ -106,6 +137,7 @@ class RequestTelemetry:
             return message
 
         async def observed_send(message):
+            nonlocal response_completed
             if message['type'] == 'http.response.start':
                 record['status'] = message['status']
             elif message['type'] == 'http.response.body':
@@ -125,6 +157,8 @@ class RequestTelemetry:
                     event_buffer.clear()
                     record['response_metadata_omitted'] = True
             await send(message)
+            if message['type'] == 'http.response.body' and not message.get('more_body'):
+                response_completed = True
 
         emit('LLM_REQUEST_START', record)
         try:
@@ -133,9 +167,13 @@ class RequestTelemetry:
             record['interrupted'] = True
             raise
         finally:
+            self.inflight -= 1
+            record['http_inflight_at_finish'] = self.inflight
             record['elapsed_ms'] = round((time.monotonic() - started) * 1000, 2)
             record['first_progress_ms'] = round(first_progress * 1000, 2) if first_progress is not None else None
             record['finish_reasons'] = sorted(finishes)
+            record['response_terminal_seen'] = terminal_seen
+            record['response_completed'] = response_completed
             metadata = scope.get('state', {}).get('request_metadata')
             usage = getattr(metadata, 'final_usage_info', None)
             if usage is not None:
@@ -144,6 +182,8 @@ class RequestTelemetry:
             itl = record.get('mean_itl_ms')
             record['decode_tokens_per_second'] = 1000 / itl if itl else None
             count = record.get('completion_tokens')
+            prompt, cached = record.get('prompt_tokens'), record.get('cached_tokens')
+            record['new_prompt_tokens'] = prompt - cached if prompt is not None and cached is not None and cached <= prompt else None
             elapsed = record['elapsed_ms']
             record['end_to_end_tokens_per_second'] = count * 1000 / elapsed if count is not None and elapsed else None
             emit('LLM_REQUEST', record)

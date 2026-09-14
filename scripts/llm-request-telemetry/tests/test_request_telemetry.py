@@ -14,6 +14,28 @@ spec.loader.exec_module(m)
 
 
 class TelemetryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_sampling_cache_and_profile_metadata(self):
+        with patch.dict(m.os.environ, {'VLLM_QUALIFICATION_ID': 'kv24', 'VLLM_QUALIFICATION_SHA256': 'f'*64,
+                                     'VLLM_QUALIFICATION_DEFAULT_SAMPLING': '{"temperature":1,"top_k":20}'}):
+            _, row = await self.exercise(b'{"temperature":0}', [b'data: {"usage":{"prompt_tokens":50,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":40}}}\n\n'])
+        self.assertEqual(row['effective_temperature'], 0)
+        self.assertEqual(row['effective_top_k'], 20)
+        self.assertIsNone(row['effective_top_p'])
+        self.assertEqual(row['new_prompt_tokens'], 10)
+        self.assertEqual(row['profile'], 'kv24')
+        self.assertEqual(row['http_inflight_at_start'], 1)
+        self.assertEqual(row['http_inflight_at_finish'], 0)
+
+    async def test_missing_cache_is_unknown(self):
+        _, row = await self.exercise(b'{}', [b'data: {"usage":{"prompt_tokens":50,"completion_tokens":2}}\n\n'])
+        self.assertIsNone(row['new_prompt_tokens'])
+
+    async def test_disabled_top_k_and_invalid_defaults(self):
+        with patch.dict(m.os.environ, {'VLLM_QUALIFICATION_DEFAULT_SAMPLING': '[]'}):
+            _, row=await self.exercise(b'{"top_k":-1}', [])
+        self.assertEqual(row['effective_top_k'],-1)
+        self.assertIsNone(row['effective_temperature'])
+
     async def exercise(self, body, chunks, error=False):
         sent, logs = [], []
         async def app(scope, receive, send):
@@ -68,6 +90,25 @@ class TelemetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(row['tool_call'])
         self.assertEqual(row['finish_reasons'], ['tool_calls'])
         self.assertEqual(row['completion_tokens'], 5)
+
+    async def test_disconnect_after_done_is_not_early_cancellation(self):
+        for done in (False, True):
+            logs = []
+            async def app(scope, receive, send):
+                await send({'type': 'http.response.start', 'status': 200})
+                if done:
+                    await send({'type': 'http.response.body', 'body': b'data: [DONE]\n\n', 'more_body': True})
+                await receive()
+            async def receive():
+                return {'type': 'http.disconnect'}
+            async def send(message):
+                pass
+            scope = {'type': 'http', 'path': '/v1/chat/completions'}
+            with patch.object(m, 'emit', side_effect=lambda marker, value: logs.append(dict(value))):
+                await m.RequestTelemetry(app)(scope, receive, send)
+            self.assertTrue(logs[-1]['disconnected'])
+            self.assertEqual(logs[-1]['disconnect_before_terminal'], not done)
+            self.assertEqual(logs[-1]['response_terminal_seen'], done)
 
     def test_emission_survives_disabled_named_loggers(self):
         output = io.StringIO()
