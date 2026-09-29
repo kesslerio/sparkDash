@@ -12,6 +12,8 @@ interface GpuPanelProps {
   className?: string;
   llmPort?: number;
   conversations?: ConversationRow[];
+  /** Apple Silicon Mac: no GPU temperature or power limit; show thermal pressure instead. */
+  mac?: boolean;
 }
 
 function celsiusToFahrenheit(c: number): number {
@@ -45,7 +47,7 @@ function MetricRow({
   );
 }
 
-export function GpuPanel({ gpu, sparkId, temperatureUnit, className }: GpuPanelProps) {
+export function GpuPanel({ gpu, sparkId, temperatureUnit, className, mac = false }: GpuPanelProps) {
   const tempHistory = useMetricsHistoryTail(sparkId, "gpu.temp");
   const usageHistory = useMetricsHistoryTail(sparkId, "gpu.usage");
 
@@ -81,16 +83,27 @@ export function GpuPanel({ gpu, sparkId, temperatureUnit, className }: GpuPanelP
         spark={<Sparkline data={usageHistory} color="var(--color-accent)" width={180} />}
         value={<span className="text-text-strong">{usage}%</span>}
       />
-      <MetricRow
-        label="Temperature"
-        color={tempColor}
-        spark={<Sparkline data={tempHistory} color={tempColor} width={180} />}
-        value={<span className="text-text-strong">{tempLabel}</span>}
-      />
+      {mac ? (
+        <div className="flex justify-between text-sm">
+          <span className="text-muted">Thermal pressure</span>
+          <span className="font-tabular text-sm text-text">{gpu?.thermalPressure ?? "—"}</span>
+        </div>
+      ) : (
+        <MetricRow
+          label="Temperature"
+          color={tempColor}
+          spark={<Sparkline data={tempHistory} color={tempColor} width={180} />}
+          value={<span className="text-text-strong">{tempLabel}</span>}
+        />
+      )}
       <div className="flex justify-between text-sm">
         <span className="text-muted">GPU Power</span>
         <span className="font-tabular text-sm text-text">
-          {powerDraw}W / {powerLimit}W
+          {mac
+            ? gpu?.powermetricsAvailable === false
+              ? "n/a (needs sudo powermetrics)"
+              : `${powerDraw}W · system ${gpu?.power?.systemDraw ?? 0}W`
+            : `${powerDraw}W / ${powerLimit}W`}
         </span>
       </div>
 
@@ -120,7 +133,9 @@ export function GpuPanel({ gpu, sparkId, temperatureUnit, className }: GpuPanelP
               : "bg-accent";
         const pct = t?.smClockPct;
         const clockCaption =
-          t?.smClockMHz != null && t?.smClockMaxMHz != null
+          mac && t?.smClockMHz != null
+            ? `${t.smClockMHz} MHz`
+            : t?.smClockMHz != null && t?.smClockMaxMHz != null
             ? `${t.smClockMHz} / ${t.smClockMaxMHz} MHz`
             : pct != null
               ? `${pct}%`
@@ -136,7 +151,7 @@ export function GpuPanel({ gpu, sparkId, temperatureUnit, className }: GpuPanelP
               </span>
             </div>
             <div className="flex items-baseline justify-between gap-2">
-              <span className="text-[10px] uppercase tracking-wide text-muted">SM clock</span>
+              <span className="text-[10px] uppercase tracking-wide text-muted">{mac ? "GPU clock" : "SM clock"}</span>
               <span className="font-tabular text-xs text-text">{clockCaption}</span>
             </div>
             <div className="h-1.5 overflow-hidden rounded-full bg-border">
@@ -157,7 +172,7 @@ export function GpuPanel({ gpu, sparkId, temperatureUnit, className }: GpuPanelP
           {vramTotal > 0 ? (
             <>
               <MetricBar
-                label="VRAM"
+                label={mac ? "GPU-wired memory" : "VRAM"}
                 value={vramUsed}
                 max={vramTotal}
                 caption={vramTotal > 0 ? `${formatMb(vramUsed).replace(/ (GB|MB)$/, "")} / ${formatMb(vramTotal)}` : "—"}
@@ -171,7 +186,7 @@ export function GpuPanel({ gpu, sparkId, temperatureUnit, className }: GpuPanelP
             </>
           ) : (
             <div className="flex justify-between text-xs">
-              <span className="text-muted">VRAM</span>
+              <span className="text-muted">{mac ? "GPU-wired memory" : "VRAM"}</span>
               <span className="font-tabular text-text">
                 {vramUsed > 0 ? `${formatMb(vramUsed)} used` : "—"}
               </span>

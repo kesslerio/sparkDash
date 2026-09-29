@@ -15,6 +15,8 @@ sparkDash is a real-time web dashboard for one or more **NVIDIA DGX Spark (GB10)
 
 It also supports **non-Spark units**: any Linux machine with an NVIDIA GPU (e.g. a workstation with a dedicated RTX/L-series card) can be added as a **dedicated GPU host** and monitored the same way via SSH and `nvidia-smi`. For these units the dashboard correctly separates **RAM** (system memory) from **VRAM** (discrete GPU memory).
 
+**Apple Silicon Macs** (for example a Mac Studio serving models with [oMLX](https://github.com/jundot/omlx)) can be added as a **Mac** unit. They are read over SSH with stock macOS tools, and an oMLX server gets a live LLM card. See [Mac units](#mac-units).
+
 <img src="./assets/screenshot.jpg" alt="sparkDash Overview page with multiple DGX Spark units, GPU metrics, and LLM status">
 
 ### LLM Prompt Showcase
@@ -452,10 +454,62 @@ Copy `.env.example` to `.env` if needed:
 1. Open the **+** tab.
 2. Choose **Unit type**:
    - **NVIDIA DGX Spark** — the default; hardware summary shows DGX Spark specs and the CX7 IP field is available.
+   - **Apple Silicon Mac** — a Mac monitored over SSH with macOS tools; see [Mac units](#mac-units).
    - **Dedicated GPU host** — any Linux machine with an NVIDIA GPU. It is monitored exactly like a Spark (SSH + `nvidia-smi`) but is **not** reported as a DGX Spark: the header shows a detected hardware summary (GPU model, CPU, RAM) instead of fixed GB10 specs, and the page shows separate **RAM** and **VRAM** panels (VRAM from `nvidia-smi`, RAM from system memory). On the unit page, RAM → Network → Storage stack in the right column with GPU filling the left column.
 3. Set **Name**, **LAN IP** (required), optional **CX7 IP** (Sparks only), **SSH user**, and auth (key or password). LAN IP is probed from the sparkDash host. Key auth in Docker needs a key mounted into the container (see Quick start). Wake-on-LAN MAC is auto-read from **enP7s7** when online (optional override in Edit).
 4. **Test Connection** for SSH + LLM reachability.
 5. Save — a tab appears and metrics start streaming.
+
+### Mac units
+
+A unit with **Unit type → Apple Silicon Mac** (`kind: "mac"`) is always remote and is read over SSH with stock macOS tools:
+
+| Metric | Source |
+|---|---|
+| CPU usage | `top -l 1` |
+| Unified memory (used, GPU-wired share, free), swap | `hw.memsize`, `vm_stat`, `vm.swapusage` |
+| Disk | `df -k` on the data volume (`/System/Volumes/Data`) |
+| Network | `netstat -ib` on the default-route interface |
+| GPU busy %, GPU clock, GPU / CPU / combined power, thermal pressure | `sudo -n powermetrics` (one 0.5 s sample per poll) |
+| Uptime | `kern.boottime` |
+| Hardware header (model, chip, cores, memory) | `sysctl` |
+
+The non-privileged reads share one SSH call per poll. Metal allocations (MLX weights and KV cache) are wired memory, so the wired share is shown as the GPU part of the unified pool. There is no GPU temperature on Apple Silicon, so the GPU panel shows thermal pressure instead.
+
+**Requirements on the Mac**
+- Remote Login (SSH) enabled, and the sparkDash host's key in the account's `authorized_keys`.
+- For GPU activity and power, passwordless sudo for `powermetrics`, e.g. `/etc/sudoers.d/sparkdash`:
+  `youruser ALL=(root) NOPASSWD: /usr/bin/powermetrics`.
+  Without it the GPU fields read **n/a** and everything else still works.
+- For the LLM card, the model server port reachable from the sparkDash host.
+
+**oMLX backend.** An OpenAI-compatible server whose `/v1/models` entries are `owned_by: "omlx"` is detected as **oMLX**. oMLX has no Prometheus `/metrics`, so the card reads `GET /api/status`:
+- loaded model (oMLX lists every model on disk, so the loaded one is picked from `loaded_models`);
+- active and waiting requests;
+- prefill and decode tok/s while requests are active, from oMLX's own rolling averages (oMLX only updates its token counters when a request finishes, so per-poll deltas would read 0 mid-request and spike at the end), plus running token totals;
+- cache efficiency;
+- model memory used vs its limit.
+
+**Example unit** (`config/sparks.json`, or add it in the UI):
+
+```json
+{
+  "id": "mac-studio",
+  "name": "mac-studio",
+  "kind": "mac",
+  "lanIp": "100.64.0.10",
+  "ssh": { "host": "100.64.0.10", "user": "macuser", "auth": "key" },
+  "llmPorts": [8000],
+  "role": "standalone",
+  "llmMonitoring": true
+}
+```
+
+**Deploying to an existing sparkDash host (release directories).** Build a new release directory from the merged branch next to the current one, keeping the same `config/` bind mount. Then:
+1. Back up `config/sparks.json`.
+2. Point the boot unit (for example `sparkdash-boot.service`) at the new release's `docker-compose.live.yml`, and run `docker compose -f <new>/docker-compose.live.yml up -d --force-recreate`.
+
+**Rollback:** point the unit back at the previous release directory, recreate the container from it, and restore the `sparks.json` backup.
 
 ### Power controls (shutdown / Wake-on-LAN)
 
