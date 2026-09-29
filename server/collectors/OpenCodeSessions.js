@@ -35,6 +35,7 @@ const PROJECTOR_ROW_KEYS = [
   "contextUsed",
   "contextWindow",
   "contextApprox",
+  "gateway",
 ];
 const BUSY_RETRY_MS = 50;
 

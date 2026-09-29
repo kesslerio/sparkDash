@@ -73,6 +73,8 @@ export class LlmProbe {
     this.stepId = 0;
     this.modelId = null;
     this.modelPath = null;
+    this.benchmarkModel = null;
+    this.models = [];
     this.contextLength = null;
     this.gpuMemoryUtilization = null;
     this.slotsActive = 0;
@@ -252,6 +254,8 @@ export class LlmProbe {
     this.authOpen = null;
     this.modelId = null;
     this.modelPath = null;
+    this.benchmarkModel = null;
+    this.models = [];
     this.generationTps = 0;
     this.prefillTps = 0;
     this.cachedPrefillTps = null;
@@ -479,15 +483,30 @@ export class LlmProbe {
       if (auth === "ok") {
         modelsOk = true;
         const modelsData = await modelsRes.json();
-        const model = modelsData?.data?.[0];
-        servedModelId = normalizeModelId(model?.id || null);
-        this.modelId = servedModelId;
-        // Drop HF hub cache paths from modelPath if /v1/models id was a cache dir
-        if (isHfHubCachePath(model?.id)) this.modelPath = null;
-        // ds4-server uses context_length; vLLM uses max_model_len
-        this.contextLength =
-          model?.max_model_len ?? model?.context_length ?? this.contextLength;
-        owned = model?.owned_by;
+        const models = Array.isArray(modelsData?.data) ? modelsData.data : [];
+        if (models.length > 1) {
+          // Multi-model router (e.g. LiteLLM): show count, list IDs in modelPath.
+          // Store first model for benchmark/showcase requests. servedModelId stays
+          // null so the SGLang override below cannot clobber the "N models" label.
+          this.models = models.map((m) => m?.id).filter(Boolean);
+          this.modelId = `${this.models.length} models`;
+          this.modelPath = this.models.join(", ");
+          this.benchmarkModel = this.models[0] || null;
+          this.contextLength = null;
+          owned = models[0]?.owned_by;
+        } else {
+          const model = models[0];
+          servedModelId = normalizeModelId(model?.id || null);
+          this.modelId = servedModelId;
+          this.benchmarkModel = this.modelId;
+          this.models = this.modelId ? [this.modelId] : [];
+          // Drop HF hub cache paths from modelPath if /v1/models id was a cache dir
+          if (isHfHubCachePath(model?.id)) this.modelPath = null;
+          // ds4-server uses context_length; vLLM uses max_model_len
+          this.contextLength =
+            model?.max_model_len ?? model?.context_length ?? this.contextLength;
+          owned = model?.owned_by;
+        }
       }
     } catch {}
 
@@ -1688,6 +1707,8 @@ export class LlmProbe {
       backend: this.backendType,
       modelId: this.modelId || null,
       modelPath: this.modelPath || null,
+      benchmarkModel: this.benchmarkModel || null,
+      models: this.models,
       contextLength: this.contextLength,
       gpuMemoryUtilization: this.gpuMemoryUtilization,
       slotsActive: this.slotsActive,
@@ -1720,6 +1741,7 @@ export class LlmProbe {
       backend: this.backendType,
       modelId: null,
       modelPath: null,
+      models: [],
       contextLength: null,
       gpuMemoryUtilization: null,
       slotsActive: 0,

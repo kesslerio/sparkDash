@@ -1028,7 +1028,7 @@ export function LlmPanel({
           <LlmLaunchers
             sparkId={sparkId}
             llmPort={llmPort}
-            modelId={llm?.modelId}
+            modelId={llm?.benchmarkModel ?? llm?.modelId}
             onDecode={openLocalDecode}
             onPrefill={openLocalPrefill}
             onRemoteDecode={openRemoteDecode}
@@ -1043,7 +1043,8 @@ export function LlmPanel({
         onClose={() => setBenchOpen(false)}
         sparkId={sparkId}
         llmPort={llmPort}
-        modelId={remoteTarget ? null : llm?.modelId ?? null}
+        modelId={remoteTarget ? null : llm?.benchmarkModel ?? llm?.modelId ?? null}
+        models={llm?.models ?? undefined}
         remoteTarget={remoteTarget}
         shareImage={shareImage}
         sparkName={sparkName ?? null}
