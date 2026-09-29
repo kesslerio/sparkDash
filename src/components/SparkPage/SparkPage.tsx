@@ -20,6 +20,7 @@ interface SparkPageProps {
   /** Show "Copy image" in the benchmark dialogs (Settings, off by default). */
   benchShareImage?: boolean;
   onEdit?: () => void;
+  onOpenHarnessWizard?: () => void;
 }
 
 const EMPTY_CONVERSATIONS: ConversationRow[] = [];
@@ -86,6 +87,7 @@ export function SparkPage({
   temperatureUnit,
   benchShareImage = false,
   onEdit,
+  onOpenHarnessWizard,
 }: SparkPageProps) {
   const { metrics } = spark;
   const [disabledDevices, setDisabledDevices] = useState<string[]>(spark.disabledDevices || []);
@@ -229,6 +231,7 @@ export function SparkPage({
         hasApiKey={Boolean(spark.llmApiKeyPorts?.includes(port))}
         shareImage={benchShareImage}
         onRemovePort={canRemove ? handleRemovePort : undefined}
+        onOpenHarnessWizard={onOpenHarnessWizard}
         className={className}
       />
     );

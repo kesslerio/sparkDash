@@ -1,7 +1,7 @@
-import { useState, useCallback, useEffect, useMemo } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { useSnapshot } from "./hooks/useSnapshot";
 import { useAppRoute, useRoute } from "./hooks/useRoute";
-import { fetchSparks, reorderSparks, fetchSettings } from "./api/client";
+import { fetchSparks, reorderSparks, fetchSettings, fetchSessionSources } from "./api/client";
 import { SparkTabs } from "./components/SparkTabs";
 import { AddSparkDialog } from "./components/AddSparkDialog";
 import { EditSparkDialog } from "./components/EditSparkDialog";
@@ -11,7 +11,8 @@ import { OverviewPage } from "./components/OverviewPage/OverviewPage";
 import { ShowcasePage } from "./components/ShowcasePage/ShowcasePage";
 import { ThemeSwitch } from "./components/ThemeSwitch";
 import { SettingsDialog } from "./components/SettingsDialog";
-import { GearIcon, BoltIcon } from "./components/ui/icons";
+import { HarnessWizard } from "./components/HarnessWizard";
+import { GearIcon, BoltIcon, BotIcon } from "./components/ui/icons";
 import { ConnectionBanner } from "./components/ui/ConnectionBanner";
 import { ErrorBanner } from "./components/ui/ErrorBanner";
 import { OVERVIEW_ID } from "./constants";
@@ -139,6 +140,7 @@ function DashboardApp() {
   const [showAdd, setShowAdd] = useState(false);
   const [editId, setEditId] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [showHarnessWizard, setShowHarnessWizard] = useState(false);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   /** Used when WS is down so add/delete still updates the tab bar */
@@ -153,6 +155,8 @@ function DashboardApp() {
     const timer = window.setInterval(() => setTelemetryNow(Date.now()), 1_000);
     return () => window.clearInterval(timer);
   }, [lastValidSnapshotAt]);
+
+  const didFirstRunCheck = useRef(false);
 
   // Prefer live WS data; fall back to API-fetched list when empty
   const liveSparks = sparks.length > 0 ? sparks : fallbackSparks;
@@ -214,6 +218,25 @@ function DashboardApp() {
         )
       );
   }, []);
+
+  // First-run auto-open: open the harness wizard when zero harnesses are connected
+  // AND at least one Spark exists. Don't show harness onboarding to a user who
+  // hasn't added any Spark yet — they need a Spark before harnesses matter.
+  useEffect(() => {
+    if (didFirstRunCheck.current) return;
+    if (liveSparks.length === 0) return;
+    didFirstRunCheck.current = true;
+    fetchSessionSources()
+      .then((sources) => {
+        const hasEnabled = Object.values(sources).some((attaches) =>
+          attaches.some((a) => a.enabled)
+        );
+        if (!hasEnabled) setShowHarnessWizard(true);
+      })
+      .catch(() => {
+        // If we can't load sources, don't auto-open — user can open manually
+      });
+  }, [liveSparks]);
 
   const handleSettingsSaved = useCallback((s: Settings) => {
     setSettings(s);
@@ -327,6 +350,15 @@ function DashboardApp() {
           <div className="ml-auto flex items-center gap-2.5">
             <button
               type="button"
+              onClick={() => setShowHarnessWizard(true)}
+              className="icon-circle"
+              title="Harnesses"
+              aria-label="Manage harnesses"
+            >
+              <BotIcon className="h-4 w-4" />
+            </button>
+            <button
+              type="button"
               onClick={() => setShowSettings(true)}
               className="icon-circle"
               title="Settings"
@@ -364,6 +396,7 @@ function DashboardApp() {
               temperatureUnit={settings?.temperatureUnit ?? "celsius"}
               benchShareImage={settings?.benchShareImage ?? false}
               onEdit={() => setEditId(displayActive.id)}
+              onOpenHarnessWizard={() => setShowHarnessWizard(true)}
             />
           ) : (
             <div className="panel mx-auto mt-16 max-w-md p-8 text-center">
@@ -408,6 +441,13 @@ function DashboardApp() {
         open={showSettings}
         onClose={() => setShowSettings(false)}
         onSaved={handleSettingsSaved}
+      />
+      <HarnessWizard
+        open={showHarnessWizard}
+        onClose={() => setShowHarnessWizard(false)}
+        onSaved={() => {
+          void refreshFromApi();
+        }}
       />
     </div>
   );

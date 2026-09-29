@@ -43,7 +43,7 @@ function timingEqual(left, right) {
 export function createOccupancyHelper(opts = {}) {
   const token = opts.token ?? process.env.OMP_OCCUPANCY_TOKEN ?? "";
   const occupancyPath = opts.path ?? process.env.OMP_OCCUPANCY_PATH ?? "/occupancy";
-  const ttlMs = opts.ttlMs ?? 2000;
+  const ttlMs = opts.ttlMs ?? Number(process.env.OMP_OCCUPANCY_TTL_MS ?? 30_000);
   const load = opts.load ?? loadOccupancy;
   const host = opts.host ?? process.env.OMP_OCCUPANCY_BIND ?? "127.0.0.1";
   const port = Number(opts.port ?? process.env.OMP_OCCUPANCY_PORT ?? 8789);

@@ -12,7 +12,6 @@ import {
 import { BenchmarkDialog } from "./BenchmarkDialog";
 import { PrefillBenchDialog } from "./PrefillBenchDialog";
 import { ConversationList } from "./ConversationList";
-import { SessionSourcesSettings } from "../SessionSourcesSettings";
 import { LlmDailyChart } from "./LlmDailyChart";
 import { LlmTokenTotals } from "./LlmTokenTotals";
 import { parseLlmTargetInput } from "../../shared/llmTarget.js";
@@ -30,6 +29,7 @@ interface LlmPanelProps {
   /** Show "Copy image" in the benchmark dialogs (Settings, off by default). */
   shareImage?: boolean;
   onRemovePort?: (port: number) => void;
+  onOpenHarnessWizard?: () => void;
   className?: string;
 }
 
@@ -412,6 +412,7 @@ export function LlmPanel({
   hasApiKey = false,
   shareImage = false,
   onRemovePort,
+  onOpenHarnessWizard,
   className,
 }: LlmPanelProps) {
   // Tail keyed by port so multi-port LLM sparklines stay distinct (8b).
@@ -430,8 +431,6 @@ export function LlmPanel({
   const cachedPrefillAvg = useMemo(() => avgPositive(cachedFull), [cachedFull]);
   const uncachedPrefillAvg = useMemo(() => avgPositive(uncachedFull), [uncachedFull]);
   const [showSettings, setShowSettings] = useState(false);
-  const [focusOccupancy, setFocusOccupancy] = useState(false);
-  const occupancySettingsRef = useRef<HTMLDivElement>(null);
   const [portDraft, setPortDraft] = useState(String(llmPort));
   const [apiKeyDraft, setApiKeyDraft] = useState("");
   const [clearApiKey, setClearApiKey] = useState(false);
@@ -501,15 +500,8 @@ export function LlmPanel({
   const settingsDirty = portDirty || apiKeyDirty;
 
   const openHarnessSettings = useCallback(() => {
-    setFocusOccupancy(true);
-    setShowSettings(true);
-  }, []);
-
-  useEffect(() => {
-    if (!showSettings || !focusOccupancy) return;
-    occupancySettingsRef.current?.scrollIntoView({ block: "nearest" });
-    setFocusOccupancy(false);
-  }, [showSettings, focusOccupancy]);
+    onOpenHarnessWizard?.();
+  }, [onOpenHarnessWizard]);
 
   const handleSaveSettings = async () => {
     if (parsedPort === null) {
@@ -600,8 +592,8 @@ export function LlmPanel({
       {showSettings ? (
         <div className="max-h-[70vh] space-y-3 overflow-y-auto pr-1">
           <p className="text-[10px] text-muted">
-            HTTP port of the LLM server on this Spark (vLLM / llama.cpp / sglang / ds4 / EXL3 / OpenAI-compatible gateway). Occupancy
-            sources below are dashboard-wide and save separately.
+            HTTP port of the LLM server on this Spark (vLLM / llama.cpp / sglang / ds4 / EXL3 / OpenAI-compatible gateway). Harness
+            connections are dashboard-wide and managed via the Add harness button.
           </p>
           <label className="block space-y-1">
             <span className="text-xs text-muted">Port</span>
@@ -689,9 +681,6 @@ export function LlmPanel({
             >
               {saving ? "Saving…" : "Save port"}
             </button>
-          </div>
-          <div ref={occupancySettingsRef}>
-            <SessionSourcesSettings />
           </div>
         </div>
       ) : !available ? (

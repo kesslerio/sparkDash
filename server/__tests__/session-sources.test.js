@@ -63,11 +63,12 @@ test.after(() => {
 
 test("U1 registry: OpenClaw, Hermes, and OpenCode; config iterates registry kinds", async () => {
   const registry = await import("../sessionSourceRegistry.js");
-  assert.deepEqual(registry.sessionSourceIds(), ["openclaw", "hermes", "opencode", "omp"]);
+  assert.deepEqual(registry.sessionSourceIds(), ["openclaw", "hermes", "opencode", "omp", "dsh"]);
   assert.equal(registry.kindById("openclaw")?.label, "OpenClaw");
   assert.equal(registry.kindById("hermes")?.label, "Hermes Agent");
   assert.equal(registry.kindById("opencode")?.label, "OpenCode");
   assert.equal(registry.kindById("omp")?.label, "oh-my-pi");
+  assert.equal(registry.kindById("dsh")?.label, "DeepSeek Harness");
   assert.deepEqual([...SOURCE_IDS], registry.sessionSourceIds());
   assert.equal(conventionalStateDir, registry.conventionalStateDir);
 
@@ -110,12 +111,12 @@ test("public GET and save only emit registry kinds; kindLabel is not persisted",
     })
   );
   const pub = getPublicSessionSources();
-  assert.deepEqual(Object.keys(pub).sort(), ["hermes", "omp", "openclaw", "opencode"]);
+  assert.deepEqual(Object.keys(pub).sort(), ["dsh", "hermes", "omp", "openclaw", "opencode"]);
   assert.equal("leftover" in pub, false);
   const next = updateSessionSources({ opencode: { id: "opencode", enabled: false } });
   assert.equal(first(next.opencode).kindLabel, "OpenCode");
   const disk = JSON.parse(fs.readFileSync(sourcesPath, "utf8"));
-  assert.deepEqual(Object.keys(disk).sort(), ["hermes", "omp", "openclaw", "opencode"]);
+  assert.deepEqual(Object.keys(disk).sort(), ["dsh", "hermes", "omp", "openclaw", "opencode"]);
   assert.equal("kindLabel" in first(disk.opencode), false);
 });
 
@@ -415,4 +416,81 @@ test("two OpenClaw attaches persist distinct urls, labels, and tokens", () => {
   assert.equal(pub.openclaw[1].hasToken, true);
   assert.equal(JSON.stringify(pub).includes("token-a"), false);
   assert.equal(JSON.stringify(pub).includes("token-b"), false);
+});
+
+test("wizard metadata: every kind has a non-empty description", () => {
+  const pub = getPublicSessionSources();
+  for (const kind of SOURCE_IDS) {
+    const attaches = pub[kind];
+    assert.ok(attaches.length > 0, `${kind} should have at least one attach`);
+    const meta = attaches[0];
+    assert.ok(
+      typeof meta.description === "string" && meta.description.length > 0,
+      `${kind} should have a non-empty description, got: ${meta.description}`
+    );
+  }
+});
+
+test("wizard metadata: dsh is remote-only, others are not", () => {
+  const pub = getPublicSessionSources();
+  assert.equal(pub.dsh[0].remoteOnly, true);
+  for (const kind of ["openclaw", "hermes", "opencode", "omp"]) {
+    assert.ok(
+      !pub[kind][0].remoteOnly,
+      `${kind} should not be remote-only`
+    );
+  }
+});
+
+test("wizard metadata: helper snippets present only for helper-backed kinds", () => {
+  const pub = getPublicSessionSources();
+  for (const kind of ["opencode", "omp", "dsh"]) {
+    const meta = pub[kind][0];
+    assert.ok(
+      typeof meta.helperHuman === "string" && meta.helperHuman.length > 0,
+      `${kind} should have helperHuman`
+    );
+    assert.ok(
+      typeof meta.helperAgent === "string" && meta.helperAgent.length > 0,
+      `${kind} should have helperAgent`
+    );
+  }
+  for (const kind of ["openclaw", "hermes"]) {
+    assert.ok(
+      !pub[kind][0].helperHuman,
+      `${kind} should not have helperHuman`
+    );
+    assert.ok(
+      !pub[kind][0].helperAgent,
+      `${kind} should not have helperAgent`
+    );
+  }
+});
+
+test("wizard metadata: helper snippets contain correct port and env prefix", () => {
+  const pub = getPublicSessionSources();
+  const expectations = {
+    opencode: { port: "8788", prefix: "OPENCODE_OCCUPANCY_" },
+    omp: { port: "8789", prefix: "OMP_OCCUPANCY_" },
+    dsh: { port: "8791", prefix: "DSH_OCCUPANCY_" },
+  };
+  for (const [kind, { port, prefix }] of Object.entries(expectations)) {
+    const meta = pub[kind][0];
+    assert.ok(
+      meta.helperHuman.includes(port),
+      `${kind} helperHuman should contain port ${port}`
+    );
+    assert.ok(
+      meta.helperHuman.includes(prefix),
+      `${kind} helperHuman should contain env prefix ${prefix}`
+    );
+    assert.ok(
+      meta.helperAgent.includes(port),
+      `${kind} helperAgent should contain port ${port}`
+    );
+    assert.ok(
+      meta.helperAgent.includes(prefix),
+      `${kind} helperAgent should contain env prefix ${prefix}`
+    );
+  }
 });

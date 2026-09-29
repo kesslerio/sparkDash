@@ -7,6 +7,7 @@ import { collectOpenClawSessions, diagnoseOpenClawSessions } from "./OpenClawSes
 import { collectHermesSessions, diagnoseHermesSessions } from "./HermesSessions.js";
 import { collectOpenCodeSessions, diagnoseOpenCodeSessions } from "./OpenCodeSessions.js";
 import { collectOmpSessions, diagnoseOmpSessions } from "./OmpSessions.js";
+import { collectDshSessions, diagnoseDshSessions } from "./DshSessions.js";
 import { sessionSourceIds } from "../sessionSourceRegistry.js";
 
 const ADAPTERS = {
@@ -14,6 +15,7 @@ const ADAPTERS = {
   hermes: { collect: collectHermesSessions, diagnose: diagnoseHermesSessions },
   opencode: { collect: collectOpenCodeSessions, diagnose: diagnoseOpenCodeSessions },
   omp: { collect: collectOmpSessions, diagnose: diagnoseOmpSessions },
+  dsh: { collect: collectDshSessions, diagnose: diagnoseDshSessions },
 };
 
 function byKind(field) {
