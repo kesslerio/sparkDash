@@ -455,6 +455,27 @@ export class LlmProbe {
     this._rateBaselineReady = false;
   }
 
+  /** Clear all counter-delta state after a model swap or source change. */
+  _resetRateBaselines() {
+    this.generationTps = 0;
+    this.prefillTps = 0;
+    this.cachedPrefillTps = null;
+    this.uncachedPrefillTps = null;
+    this.slotState.clear();
+    this.lastTokenCounts = { input: 0, output: 0 };
+    this.lastPrefillKinds = null;
+    this.lastTtftSum = null;
+    this.lastIterSum = null;
+    this._sglangStickyTps = null;
+    this.totalPromptTokens = null;
+    this.totalOutputTokens = 0;
+    this.completedRequestsTotal = null;
+    this._promptCounterObserved = false;
+    this._outputCounterObserved = false;
+    this._completedCounterObserved = false;
+    this._rateBaselineReady = false;
+  }
+
   /** Apply the model catalog and select exactly one resident/usable model. */
   _acceptModelCatalog(models) {
     const selection = selectActiveModel(models);
@@ -804,6 +825,7 @@ export class LlmProbe {
         if (healthRes.ok) {
           const health = await healthRes.json().catch(() => null);
           this._applyTensorFoldHealth(health, dtSec);
+          this._noteFreshTelemetry(now);
         } else {
           this._applyTensorFoldHealth(null, dtSec);
         }
@@ -822,6 +844,7 @@ export class LlmProbe {
           if (LlmProbe._healthLooksLikeExl3(health)) {
             this.backendType = "exl3";
             this._applyExl3Health(health, dtSec);
+            this._noteFreshTelemetry(now);
             return this._getSnapshot();
           }
         }
@@ -1257,6 +1280,7 @@ export class LlmProbe {
       if (computed != null) this.lastTokenCounts.input = computed;
       this.lastTokenCounts.output = decoded;
       this.totalOutputTokens = decoded;
+      this._outputCounterObserved = true;
       // q27's prefill counter is computed-only; the token ledger wants the
       // full prompt (computed + cached).
       const cachedTok =
@@ -1264,6 +1288,7 @@ export class LlmProbe {
         this._getPromMetric(txt, "q27_prefill_cached_tokens_total");
       if (computed != null) {
         this.totalPromptTokens = cachedTok != null ? computed + cachedTok : computed;
+        this._promptCounterObserved = true;
       }
       if (cachedTok != null) this.totalCachedTokens = cachedTok;
     }
@@ -1376,7 +1401,11 @@ export class LlmProbe {
     if (Number.isFinite(prompt)) this.lastTokenCounts.input = prompt;
     this.lastTokenCounts.output = completion;
     this.totalOutputTokens = completion;
-    if (Number.isFinite(prompt)) this.totalPromptTokens = prompt;
+    this._outputCounterObserved = true;
+    if (Number.isFinite(prompt)) {
+      this.totalPromptTokens = prompt;
+      this._promptCounterObserved = true;
+    }
   }
 
   /**
@@ -1820,12 +1849,20 @@ export class LlmProbe {
     // Difference only against our own baseline; after a server-info hand-off
     // the first sample seeds instead of reporting the gap between two series.
     const ownsBaseline = this._sglangTokenSource !== "server_info";
+    const baselineReady =
+      this._rateBaselineReady ||
+      this.lastTokenCounts.input !== 0 ||
+      this.lastTokenCounts.output !== 0;
     const canDiff = ownsBaseline && dtSec > 0 && dtSec < 10;
     if (canDiff) {
       const deltaOut = gen - this.lastTokenCounts.output;
+      const deltaIn = prompt != null ? prompt - this.lastTokenCounts.input : null;
+      const counterReset = deltaOut < 0 || (deltaIn != null && deltaIn < 0);
       const gauge = this._sglangGenGauge(txt);
       const busy = (running != null && running > 0) || this._sglangInflight();
-      if (gauge != null && busy) {
+      if (!baselineReady || counterReset) {
+        this.generationTps = 0;
+      } else if (gauge != null && busy) {
         this.generationTps = Math.max(0, Math.round(gauge * 100) / 100);
       } else if (gauge != null) {
         // Idle, or the completion just landed in the counter. The gauge already
@@ -1835,8 +1872,10 @@ export class LlmProbe {
         this.generationTps = Math.max(0, Math.round((deltaOut / dtSec) * 100) / 100);
       }
       if (prompt != null) {
-        const deltaIn = prompt - this.lastTokenCounts.input;
-        this._setPrefillTps(deltaIn / dtSec, deltaOut > 0);
+        this._setPrefillTps(
+          !baselineReady || counterReset ? 0 : deltaIn / dtSec,
+          deltaOut > 0
+        );
       } else if (deltaOut <= 0) {
         this.prefillTps = 0;
       }
@@ -1899,7 +1938,7 @@ export class LlmProbe {
         const data = await res.json();
         const raw = data?.model_path || data?.tokenizer_path;
         if (!raw) continue;
-        if (!this.modelId) applyModelRef(this, raw);
+        applyModelRef(this, raw);
         return;
       } catch {
         /* try next */

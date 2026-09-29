@@ -453,7 +453,9 @@ test("probe: reachable SGLang without sleep metric is Active, not Sleeping", asy
   assert.equal(snap.available, true);
   assert.equal(snap.backend, "sglang");
   assert.equal(snap.gpuMemoryUtilization, 1);
-  assert.equal(snap.totalOutputTokens, 0);
+  // No counters exposed by this server: the truthful-telemetry rule reports
+  // null (unavailable), not a fabricated zero.
+  assert.equal(snap.totalOutputTokens, null);
 });
 
 test("probe: /v1/loads inflight keeps last_gen on the first sample", async () => {

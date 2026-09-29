@@ -258,6 +258,9 @@ test("probe: q27 path does not mislabel as vllm", async () => {
   const snap = await probe.probe();
   assert.equal(snap.backend, "q27");
   assert.equal(snap.available, true);
-  assert.equal(snap.generationTps, 0); // no delta vs seeded baseline
+  // No delta vs the seeded baseline while the server is busy: the truthful-
+  // telemetry rule reports null (not a fake zero) for an active sample with
+  // no measured rate yet.
+  assert.equal(snap.generationTps, null);
   assert.equal(snap.contextLength, 262144); // from /v1/models max_model_len
 });

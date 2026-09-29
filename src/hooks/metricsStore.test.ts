@@ -63,6 +63,7 @@ function llm(overrides: Partial<LlmMetrics> = {}): LlmMetrics {
     generationTps: null,
     prefillTps: null,
     totalOutputTokens: null,
+    error: null,
     ...overrides,
   };
 }
