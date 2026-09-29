@@ -486,7 +486,7 @@ The non-privileged reads share one SSH call per poll. Metal allocations (MLX wei
 **oMLX backend.** An OpenAI-compatible server whose `/v1/models` entries are `owned_by: "omlx"` is detected as **oMLX**. oMLX has no Prometheus `/metrics`, so the card reads `GET /api/status`:
 - loaded model (oMLX lists every model on disk, so the loaded one is picked from `loaded_models`);
 - active and waiting requests;
-- computed prefill and decode tok/s from token-counter deltas, with cached vs uncached prefill;
+- prefill and decode tok/s while requests are active, from oMLX's own rolling averages (oMLX only updates its token counters when a request finishes, so per-poll deltas would read 0 mid-request and spike at the end), plus running token totals;
 - cache efficiency;
 - model memory used vs its limit.
 

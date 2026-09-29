@@ -133,7 +133,9 @@ export function GpuPanel({ gpu, sparkId, temperatureUnit, className, mac = false
               : "bg-accent";
         const pct = t?.smClockPct;
         const clockCaption =
-          t?.smClockMHz != null && t?.smClockMaxMHz != null
+          mac && t?.smClockMHz != null
+            ? `${t.smClockMHz} MHz`
+            : t?.smClockMHz != null && t?.smClockMaxMHz != null
             ? `${t.smClockMHz} / ${t.smClockMaxMHz} MHz`
             : pct != null
               ? `${pct}%`
@@ -149,7 +151,7 @@ export function GpuPanel({ gpu, sparkId, temperatureUnit, className, mac = false
               </span>
             </div>
             <div className="flex items-baseline justify-between gap-2">
-              <span className="text-[10px] uppercase tracking-wide text-muted">SM clock</span>
+              <span className="text-[10px] uppercase tracking-wide text-muted">{mac ? "GPU clock" : "SM clock"}</span>
               <span className="font-tabular text-xs text-text">{clockCaption}</span>
             </div>
             <div className="h-1.5 overflow-hidden rounded-full bg-border">
@@ -170,7 +172,7 @@ export function GpuPanel({ gpu, sparkId, temperatureUnit, className, mac = false
           {vramTotal > 0 ? (
             <>
               <MetricBar
-                label="VRAM"
+                label={mac ? "GPU-wired memory" : "VRAM"}
                 value={vramUsed}
                 max={vramTotal}
                 caption={vramTotal > 0 ? `${formatMb(vramUsed).replace(/ (GB|MB)$/, "")} / ${formatMb(vramTotal)}` : "—"}
@@ -184,7 +186,7 @@ export function GpuPanel({ gpu, sparkId, temperatureUnit, className, mac = false
             </>
           ) : (
             <div className="flex justify-between text-xs">
-              <span className="text-muted">VRAM</span>
+              <span className="text-muted">{mac ? "GPU-wired memory" : "VRAM"}</span>
               <span className="font-tabular text-text">
                 {vramUsed > 0 ? `${formatMb(vramUsed)} used` : "—"}
               </span>

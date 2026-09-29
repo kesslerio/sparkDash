@@ -28,8 +28,6 @@ const SNAPSHOT_CMD = [
   "top -l 1 -n 0 -s 0 2>/dev/null | grep -E '^CPU usage'",
   `echo ${SECTION}df`,
   "df -k / /System/Volumes/Data 2>/dev/null",
-  `echo ${SECTION}iface`,
-  "route -n get default 2>/dev/null | awk '/interface:/{print $2}'",
   `echo ${SECTION}netstat`,
   "IF=$(route -n get default 2>/dev/null | awk '/interface:/{print $2}'); [ -n \"$IF\" ] && netstat -ib -I \"$IF\" 2>/dev/null; [ -n \"$IF\" ] && echo \"ip $(ipconfig getifaddr \"$IF\" 2>/dev/null)\"",
 ].join("; ");
@@ -125,7 +123,7 @@ export function parseTopCpu(text) {
   return Math.max(0, Math.min(100, Math.round(100 - parseFloat(m[1]))));
 }
 
-/** Disks from `df -k`; the sealed system volume is skipped in favour of the data volume. */
+/** Disks (MB, like SystemCollector) from `df -k`; the sealed system volume is skipped in favour of the data volume. */
 export function parseDf(text, disabledDevices = []) {
   const disks = [];
   for (const line of String(text || "").split("\n").slice(1)) {
@@ -139,9 +137,9 @@ export function parseDf(text, disabledDevices = []) {
     disks.push({
       device,
       label: mount,
-      used: Math.round(parseInt(used, 10) / 1024 / 1024),
-      total: Math.round(parseInt(size, 10) / 1024 / 1024),
-      available: Math.round(parseInt(avail, 10) / 1024 / 1024),
+      used: Math.round(parseInt(used, 10) / 1024),
+      total: Math.round(parseInt(size, 10) / 1024),
+      available: Math.round(parseInt(avail, 10) / 1024),
       percentage: parseInt(pct, 10) || 0,
       readSpeed: 0,
       writeSpeed: 0,
@@ -239,8 +237,8 @@ export class MacSystemCollector extends SystemCollector {
     }
   }
 
-  async _unified() {
-    const snap = await this._snapshot();
+  async _unified(snap) {
+    snap = snap ?? (await this._snapshot());
     const sys = parseSysctl(snap.sysctl);
     return unifiedMemoryFromVmStat(parseVmStat(snap.vm_stat), sys["hw.memsize"]);
   }
@@ -289,8 +287,8 @@ export class MacSystemCollector extends SystemCollector {
 
   async collectRam() {
     try {
-      const mem = await this._unified();
       const snap = await this._snapshot();
+      const mem = await this._unified(snap);
       const swap = parseSwapUsage(parseSysctl(snap.sysctl)["vm.swapusage"]);
       return { used: mem.used, total: mem.total, percentage: mem.percentage, swap };
     } catch (err) {

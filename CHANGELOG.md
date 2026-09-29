@@ -14,7 +14,7 @@ Format: version sections are listed newest first.
   - CPU, unified memory with its GPU-wired share, swap, disk and network;
   - GPU busy %, clock, power and thermal pressure through `sudo -n powermetrics`, showing n/a when it isn't permitted;
   - real hardware header, and uptime from `kern.boottime`.
-- **oMLX LLM backend** — detected from `owned_by: "omlx"`. The card reads `/api/status`: loaded model, active and waiting requests, computed prefill and decode tok/s with the cached split, cache efficiency, and model memory.
+- **oMLX LLM backend** — detected from `owned_by: "omlx"`. The card reads `/api/status`: loaded model, active and waiting requests, prefill and decode tok/s from oMLX's rolling averages while busy, cache efficiency, and model memory.
 - **Tailnet monitoring** — opt-in per unit (`tailscaleMonitoring`, default **off**); `tailscale status --json` on the host and a Tailnet card under Resources. Flags a unit that is healthy on the LAN but off its tailnet. ([#43](https://github.com/MiaAI-Lab/sparkDash/pull/43))
 
 ### Security

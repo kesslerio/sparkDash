@@ -698,7 +698,7 @@ export class LlmProbe {
       const st = omlxStatus === undefined ? await this._fetchOmlxStatus() : omlxStatus;
       if (st) {
         this._metricsModelMatched = true;
-        this._applyOmlxStatus(st, dtSec);
+        this._applyOmlxStatus(st);
         this._noteFreshTelemetry(Date.now());
       } else {
         this.status = "unavailable";
@@ -802,39 +802,34 @@ export class LlmProbe {
   }
 
   /**
-   * Apply oMLX `GET /api/status`. Live tok/s come from cumulative counter
-   * deltas (first sample seeds the baseline; a restart resets to 0).
-   * `total_prompt_tokens` includes cache hits, so prefill counts only computed
-   * tokens and the cached share feeds the cached/uncached split.
+   * Apply oMLX `GET /api/status`. oMLX bumps its token counters only when a
+   * request finishes, so per-poll counter deltas are 0 mid-request and spike at
+   * completion. While requests are active the live tiles therefore use oMLX's
+   * own rolling `avg_generation_tps` / `avg_prefill_tps`; idle reads 0.
+   * Counters still feed the running totals.
    * @param {Record<string, unknown>} st
-   * @param {number} dtSec
    */
-  _applyOmlxStatus(st, dtSec) {
+  _applyOmlxStatus(st) {
     const n = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
     const prompt = n(st?.total_prompt_tokens);
-    const cached = n(st?.total_cached_tokens) ?? 0;
     const decoded = n(st?.total_completion_tokens);
-    const computed = prompt != null ? Math.max(0, prompt - cached) : null;
     const active = n(st?.active_requests);
     const waiting = n(st?.waiting_requests);
+    const busy = (active ?? 0) > 0;
 
-    this.generationTps = 0;
-    this.prefillTps = 0;
-    if (decoded != null && computed != null) {
-      const counterReset = computed < this.lastTokenCounts.input || decoded < this.lastTokenCounts.output;
-      if (this._rateBaselineReady && !counterReset && dtSec > 0 && dtSec < 10) {
-        this.generationTps = Math.max(0, Math.round(((decoded - this.lastTokenCounts.output) / dtSec) * 100) / 100);
-        this.prefillTps = Math.max(0, Math.round(((computed - this.lastTokenCounts.input) / dtSec) * 100) / 100);
-      }
-      if (counterReset) this.lastPrefillKinds = null;
-      this.lastTokenCounts.input = computed;
-      this.lastTokenCounts.output = decoded;
-      this._rateBaselineReady = true;
+    const avg = (v) => Math.max(0, Math.round((n(v) ?? 0) * 100) / 100);
+    this.generationTps = busy ? avg(st?.avg_generation_tps) : 0;
+    this.prefillTps = busy ? avg(st?.avg_prefill_tps) : 0;
+    this.cachedPrefillTps = null;
+    this.uncachedPrefillTps = null;
+    this.lastPrefillKinds = null;
+    if (decoded != null) {
       this.totalOutputTokens = decoded;
-      this.totalPromptTokens = prompt;
       this._outputCounterObserved = true;
+    }
+    if (prompt != null) {
+      this.totalPromptTokens = prompt;
       this._promptCounterObserved = true;
-      this._setPrefillSplitRates(cached, computed, dtSec);
     }
     const efficiency = n(st?.cache_efficiency);
     if (efficiency != null) this.prefixCacheHitRate = Math.round(efficiency * 100) / 10000;

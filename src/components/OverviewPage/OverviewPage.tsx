@@ -6,6 +6,14 @@ import { ConfirmShutdownDialog } from "../ConfirmShutdownDialog";
 import { MetricBar } from "../ui/MetricBar";
 import { ActivityIcon, PowerOffIcon, PowerOnIcon, RotateIcon } from "../ui/icons";
 
+/** Short backend names for the Overview LLM stat; unknown backends show their raw id. */
+const OVERVIEW_BACKEND_LABELS: Record<string, string> = {
+  vllm: "vLLM",
+  ds4: "ds4",
+  omlx: "oMLX",
+  sglang: "sgLang",
+};
+
 interface OverviewPageProps {
   sparks: SparkSnapshot[];
   hideOffline?: boolean;
@@ -239,19 +247,14 @@ function SparkCard({
                 />
               );
             })()}
-            {spark.kind === "mac" ? (
-              <MetricBar
-                label="GPU"
-                value={usage}
-                max={100}
-                color={usageBarColor}
-                caption={
-                  spark.metrics.gpu?.powermetricsAvailable === false
-                    ? "n/a"
-                    : `${usage}% · ${spark.metrics.gpu?.power?.draw ?? 0} W`
-                }
-              />
-            ) : (
+            {spark.kind === "mac" ? (() => {
+              // Macs have no GPU temperature; show CPU load in that slot.
+              const cpuUsage = spark.metrics.cpu?.usage ?? 0;
+              const cpuBarColor = cpuUsage > 85 ? "bg-danger" : cpuUsage > 60 ? "bg-warning" : "bg-accent";
+              return (
+                <MetricBar label="CPU" value={cpuUsage} max={100} color={cpuBarColor} caption={`${cpuUsage}%`} />
+              );
+            })() : (
               <MetricBar
                 label={spark.kind === "host" ? "GPU" : "Temperature"}
                 value={displayTemp}
@@ -287,11 +290,13 @@ function SparkCard({
               </div>
             )}
             <MetricBar
-              label="Usage"
+              label={spark.kind === "mac" ? "GPU usage" : "Usage"}
               value={usage}
               max={100}
               color={usageBarColor}
-              caption={`${usage}%`}
+              caption={
+                spark.kind === "mac" && gpu?.powermetricsAvailable === false ? "n/a" : `${usage}%`
+              }
             />
           </div>
 
@@ -299,7 +304,13 @@ function SparkCard({
           <div className="mt-4 grid grid-cols-2 gap-x-4 gap-y-2.5 border-t border-border pt-3.5">
             <MiniStat
               label="GPU Power"
-              value={`${gpu?.power?.draw ?? 0}W / ${gpu?.power?.limit ?? 0}W`}
+              value={
+                spark.kind === "mac"
+                  ? gpu?.powermetricsAvailable === false
+                    ? "n/a"
+                    : `${gpu?.power?.draw ?? 0}W · sys ${gpu?.power?.systemDraw ?? 0}W`
+                  : `${gpu?.power?.draw ?? 0}W / ${gpu?.power?.limit ?? 0}W`
+              }
             />
             {vramAvail > 0 && (
               <MiniStat
@@ -354,15 +365,7 @@ function SparkCard({
               return (
                 <MiniStat
                   label={`${
-                    llm.backend === "vllm"
-                      ? "vLLM"
-                      : llm.backend === "ds4"
-                        ? "ds4"
-                        : llm.backend === "omlx"
-                          ? "oMLX"
-                          : llm.backend === "sglang"
-                            ? "sgLang"
-                            : llm.backend ?? "LLM"
+                    (llm.backend && OVERVIEW_BACKEND_LABELS[llm.backend]) ?? llm.backend ?? "LLM"
                   } · ${llm.status ?? (llm.available ? "active" : "unavailable")}`}
                   value={llm.modelId ?? "unknown"}
                   tone="accent"

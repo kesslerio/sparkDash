@@ -66,43 +66,37 @@ test("other owned_by values keep their classification", async () => {
   assert.equal(await probe._classifyOpenAIBackend(undefined), "vllm");
 });
 
-test("two /api/status samples give live rates, cache split and workload state", async () => {
-  let sample = status();
-  const { probe, requested } = omlxProbe(() => sample);
+test("while busy the live tiles use oMLX rolling averages; totals and cache come from counters", async () => {
+  const { probe, requested } = omlxProbe(() => status());
   await probe._detectServerType();
   requested.length = 0;
-  const first = await probe.probe();
-  assert.equal(first.backend, "omlx");
-  assert.equal(probe.generationTps, 0, "first sample only seeds the baseline");
+  const snap = await probe.probe();
+  assert.equal(snap.backend, "omlx");
+  assert.equal(probe.generationTps, 57.3);
+  assert.equal(probe.prefillTps, 697.8);
+  assert.equal(probe.cachedPrefillTps, null);
+  assert.equal(probe.totalOutputTokens, 44_711);
+  assert.equal(probe.totalPromptTokens, 51_216_751);
   assert.equal(probe.requestsRunning, 1);
   assert.equal(probe.requestsWaiting, 0);
   assert.equal(probe.status, "active");
   assert.equal(probe.prefixCacheHitRate, 0.993);
   assert.equal(probe.gpuMemoryUtilization, 0.7831);
-
-  probe.lastProbeTime = Date.now() - 2000;
-  sample = status({
-    total_prompt_tokens: 51_216_751 + 20_000,
-    total_cached_tokens: 50_845_521 + 18_000,
-    total_completion_tokens: 44_711 + 120,
-  });
-  await probe.probe();
-  assert.ok(probe.generationTps >= 55 && probe.generationTps <= 65, `decode ${probe.generationTps}`);
-  assert.ok(probe.prefillTps >= 900 && probe.prefillTps <= 1100, `prefill ${probe.prefillTps}`);
-  assert.ok(probe.cachedPrefillTps >= 8000 && probe.cachedPrefillTps <= 10000);
+  assert.equal(snap.generationTps, 57.3);
   assert.equal(requested.some((u) => u.endsWith("/metrics") || u.endsWith("/slots")), false);
 });
 
-test("a counter reset after a server restart never yields negative rates", async () => {
+test("counters that only move at request completion never produce spikes", async () => {
   let sample = status();
   const { probe } = omlxProbe(() => sample);
   await probe._detectServerType();
   await probe.probe();
   probe.lastProbeTime = Date.now() - 2000;
-  sample = status({ total_prompt_tokens: 10, total_cached_tokens: 0, total_completion_tokens: 5 });
+  sample = status({ active_requests: 0, total_completion_tokens: 44_711 + 5000 });
   await probe.probe();
   assert.equal(probe.generationTps, 0);
   assert.equal(probe.prefillTps, 0);
+  assert.equal(probe.totalOutputTokens, 49_711);
 });
 
 test("idle server reads as idle", async () => {

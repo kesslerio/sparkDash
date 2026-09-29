@@ -31,8 +31,6 @@ const snapshotOutput = ({ netstat = fx("netstat.txt") } = {}) =>
     fx("top.txt"),
     `${SECTION}df`,
     fx("df.txt"),
-    `${SECTION}iface`,
-    "en1",
     `${SECTION}netstat`,
     netstat,
     "ip 192.168.4.154",
@@ -83,9 +81,9 @@ test("df picks the data volume over the sealed system volume", () => {
   assert.equal(disks.length, 1);
   assert.equal(disks[0].label, "/System/Volumes/Data");
   assert.equal(disks[0].device, "disk3s5");
-  assert.equal(disks[0].total, 926);
-  assert.equal(disks[0].used, 446);
-  assert.equal(disks[0].available, 440);
+  assert.equal(disks[0].total, 948534);
+  assert.equal(disks[0].used, 456405);
+  assert.equal(disks[0].available, 450651);
   assert.equal(disks[0].percentage, 51);
 });
 
@@ -116,7 +114,7 @@ test("powermetrics text parses busy and idle samples", () => {
 
 test("section splitting keeps each command's output", () => {
   const sections = splitSections(snapshotOutput());
-  assert.deepEqual(Object.keys(sections), ["sysctl", "vm_stat", "top", "df", "iface", "netstat"]);
+  assert.deepEqual(Object.keys(sections), ["sysctl", "vm_stat", "top", "df", "netstat"]);
   assert.match(sections.netstat, /^ip 192\.168\.4\.154$/m);
 });
 
