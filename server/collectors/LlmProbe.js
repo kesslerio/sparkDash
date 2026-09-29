@@ -166,7 +166,7 @@ export class LlmProbe {
     this.baseUrl = `http://${llmProbeHost(spark)}:${this.telemetryPort}`;
 
     // State
-    this.backendType = null; // 'vllm' | 'llama.cpp' | 'sglang' | 'ds4' | null
+    this.backendType = null; // 'vllm' | 'llama.cpp' | 'sglang' | 'ds4' | 'omlx' | null
     this.serverIsOpenAI = null; // true = OpenAI-compatible
     /** Whether /v1/models (or /slots) answered without credentials. null = unknown. */
     this.authOpen = null;
@@ -541,7 +541,8 @@ export class LlmProbe {
     if (
       this.backendType !== "vllm" &&
       this.backendType !== "sglang" &&
-      this.backendType !== "ds4"
+      this.backendType !== "ds4" &&
+      this.backendType !== "omlx"
     ) {
       const slotUrl = `${this.baseUrl}/slots`;
       try {
@@ -588,12 +589,13 @@ export class LlmProbe {
   }
 
   /**
-   * Classify an OpenAI-compatible server: ds4-server, SGLang, or vLLM (default).
+   * Classify an OpenAI-compatible server: oMLX, ds4-server, SGLang, or vLLM (default).
    * @param {unknown} ownedBy
-   * @returns {Promise<"ds4" | "sglang" | "vllm">}
+   * @returns {Promise<"omlx" | "ds4" | "sglang" | "vllm">}
    */
   async _classifyOpenAIBackend(ownedBy) {
     if (typeof ownedBy === "string") {
+      if (/^omlx$/i.test(ownedBy)) return "omlx";
       if (/ds4/i.test(ownedBy)) return "ds4";
       if (/sglang/i.test(ownedBy)) return "sglang";
     }
@@ -646,6 +648,8 @@ export class LlmProbe {
     // Model info from /v1/models — 401/403 means protected; other failure = down
     let modelsOk = false;
     let owned = null;
+    /** oMLX /api/status body for this poll (undefined when not fetched, null when unavailable). */
+    let omlxStatus;
     try {
       const modelsRes = await this._fetch(`${this.baseUrl}/v1/models`);
       const auth = this._noteAuthStatus(modelsRes.status);
@@ -660,7 +664,13 @@ export class LlmProbe {
       if (auth === "ok") {
         modelsOk = true;
         const modelsData = await modelsRes.json();
-        const models = Array.isArray(modelsData?.data) ? modelsData.data : [];
+        let models = Array.isArray(modelsData?.data) ? modelsData.data : [];
+        // oMLX lists every model on disk; only the loaded ones are serving.
+        if (models.length > 0 && models.every((m) => /^omlx$/i.test(String(m?.owned_by ?? "")))) {
+          this.backendType = "omlx";
+          omlxStatus = await this._fetchOmlxStatus();
+          if (omlxStatus) models = LlmProbe._omlxLoadedModels(models, omlxStatus);
+        }
         const selection = this._acceptModelCatalog(models);
         if (selection.model) owned = selection.model.owned_by;
         if (selection.reason) return this._getSnapshot();
@@ -675,10 +685,26 @@ export class LlmProbe {
 
     // Self-heal backend from owned_by before branching (cheap, no extra HTTP)
     if (typeof owned === "string") {
-      if (/ds4/i.test(owned)) this.backendType = "ds4";
+      if (/^omlx$/i.test(owned)) this.backendType = "omlx";
+      else if (/ds4/i.test(owned)) this.backendType = "ds4";
       else if (/sglang/i.test(owned) && this.backendType !== "ds4") {
         this.backendType = "sglang";
       }
+    }
+
+    // oMLX (Apple Silicon MLX server): no Prometheus exposition; its JSON
+    // /api/status carries request, token and cache counters.
+    if (this.backendType === "omlx") {
+      const st = omlxStatus === undefined ? await this._fetchOmlxStatus() : omlxStatus;
+      if (st) {
+        this._metricsModelMatched = true;
+        this._applyOmlxStatus(st, dtSec);
+        this._noteFreshTelemetry(Date.now());
+      } else {
+        this.status = "unavailable";
+        this.statusReason = "metrics_unavailable";
+      }
+      return this._getSnapshot();
     }
 
     // SGLang: native info endpoints. Skip on known vLLM/ds4 to avoid 404 spam.
@@ -750,6 +776,89 @@ export class LlmProbe {
     }
 
     return this._getSnapshot();
+  }
+
+  /** oMLX `GET /api/status` body, or null when it is unavailable. */
+  async _fetchOmlxStatus() {
+    try {
+      const res = await this._fetch(`${this.baseUrl}/api/status`);
+      if (!res.ok) return null;
+      const body = await res.json();
+      return body && typeof body === "object" ? body : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Narrow an oMLX model catalog to the models /api/status reports as loaded
+   * (falling back to its default model). Returns the input when neither matches.
+   */
+  static _omlxLoadedModels(models, st) {
+    const loaded = Array.isArray(st?.loaded_models) ? st.loaded_models.map(String) : [];
+    const wanted = loaded.length > 0 ? loaded : st?.default_model ? [String(st.default_model)] : [];
+    const picked = models.filter((m) => wanted.includes(String(m?.id)));
+    return picked.length > 0 ? picked : models;
+  }
+
+  /**
+   * Apply oMLX `GET /api/status`. Live tok/s come from cumulative counter
+   * deltas (first sample seeds the baseline; a restart resets to 0).
+   * `total_prompt_tokens` includes cache hits, so prefill counts only computed
+   * tokens and the cached share feeds the cached/uncached split.
+   * @param {Record<string, unknown>} st
+   * @param {number} dtSec
+   */
+  _applyOmlxStatus(st, dtSec) {
+    const n = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+    const prompt = n(st?.total_prompt_tokens);
+    const cached = n(st?.total_cached_tokens) ?? 0;
+    const decoded = n(st?.total_completion_tokens);
+    const computed = prompt != null ? Math.max(0, prompt - cached) : null;
+    const active = n(st?.active_requests);
+    const waiting = n(st?.waiting_requests);
+
+    this.generationTps = 0;
+    this.prefillTps = 0;
+    if (decoded != null && computed != null) {
+      const counterReset = computed < this.lastTokenCounts.input || decoded < this.lastTokenCounts.output;
+      if (this._rateBaselineReady && !counterReset && dtSec > 0 && dtSec < 10) {
+        this.generationTps = Math.max(0, Math.round(((decoded - this.lastTokenCounts.output) / dtSec) * 100) / 100);
+        this.prefillTps = Math.max(0, Math.round(((computed - this.lastTokenCounts.input) / dtSec) * 100) / 100);
+      }
+      if (counterReset) this.lastPrefillKinds = null;
+      this.lastTokenCounts.input = computed;
+      this.lastTokenCounts.output = decoded;
+      this._rateBaselineReady = true;
+      this.totalOutputTokens = decoded;
+      this.totalPromptTokens = prompt;
+      this._outputCounterObserved = true;
+      this._promptCounterObserved = true;
+      this._setPrefillSplitRates(cached, computed, dtSec);
+    }
+    const efficiency = n(st?.cache_efficiency);
+    if (efficiency != null) this.prefixCacheHitRate = Math.round(efficiency * 100) / 10000;
+
+    this.requestsRunning = active;
+    this.requestsWaiting = waiting;
+    this.slotsActive = active != null ? Math.round(active) : 0;
+    const total = n(st?.total_requests);
+    this.completedRequestsTotal = total != null ? Math.max(0, total - (active ?? 0)) : null;
+    this._completedCounterObserved = this.completedRequestsTotal != null;
+
+    const used = n(st?.model_memory_used);
+    const max = n(st?.model_memory_max);
+    this.gpuMemoryUtilization = used != null && max ? Math.round((used / max) * 10000) / 10000 : null;
+
+    // No oMLX equivalents for the vLLM histogram / KV tiles.
+    this.kvCacheUsage = null;
+    this.kvCacheCapacityTokens = null;
+    this.kvCacheMaxConcurrency = null;
+    this.ttftP95Seconds = null;
+    this.preemptionsTotal = null;
+    this.e2eP95Seconds = null;
+    this.itlP95Seconds = null;
+    this.mtpAcceptanceRate = null;
   }
 
   /**

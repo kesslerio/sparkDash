@@ -289,7 +289,7 @@ export interface LlmMetrics {
   lastObservedAt?: number | null;
   /** Human-readable reason for unknown/stale/unavailable/ambiguous telemetry. */
   statusReason?: string | null;
-  backend: "vllm" | "llama.cpp" | "sglang" | "ds4" | null;
+  backend: "vllm" | "llama.cpp" | "sglang" | "ds4" | "omlx" | null;
   modelId: string | null;
   modelPath: string | null;
   /** Model ID to use for benchmark/showcase requests. Falls back to modelId for single-model backends. */
