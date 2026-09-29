@@ -91,7 +91,8 @@ export function ingestSnapshots(sparks: SparkSnapshot[]): void {
     const m = s.metrics;
     if (m.gpu) {
       pushHistory(`${s.id}:gpu.usage`, m.gpu.usage);
-      pushHistory(`${s.id}:gpu.temp`, m.gpu.temperature);
+      // Macs expose no GPU temperature; a 0 would chart as a real reading.
+      if (s.kind !== "mac") pushHistory(`${s.id}:gpu.temp`, m.gpu.temperature);
     }
     if (m.cpu) {
       pushHistory(`${s.id}:cpu.usage`, m.cpu.usage);

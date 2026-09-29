@@ -12,6 +12,8 @@ interface GpuPanelProps {
   className?: string;
   llmPort?: number;
   conversations?: ConversationRow[];
+  /** Apple Silicon Mac: no GPU temperature or power limit; show thermal pressure instead. */
+  mac?: boolean;
 }
 
 function celsiusToFahrenheit(c: number): number {
@@ -45,7 +47,7 @@ function MetricRow({
   );
 }
 
-export function GpuPanel({ gpu, sparkId, temperatureUnit, className }: GpuPanelProps) {
+export function GpuPanel({ gpu, sparkId, temperatureUnit, className, mac = false }: GpuPanelProps) {
   const tempHistory = useMetricsHistoryTail(sparkId, "gpu.temp");
   const usageHistory = useMetricsHistoryTail(sparkId, "gpu.usage");
 
@@ -81,16 +83,27 @@ export function GpuPanel({ gpu, sparkId, temperatureUnit, className }: GpuPanelP
         spark={<Sparkline data={usageHistory} color="var(--color-accent)" width={180} />}
         value={<span className="text-text-strong">{usage}%</span>}
       />
-      <MetricRow
-        label="Temperature"
-        color={tempColor}
-        spark={<Sparkline data={tempHistory} color={tempColor} width={180} />}
-        value={<span className="text-text-strong">{tempLabel}</span>}
-      />
+      {mac ? (
+        <div className="flex justify-between text-sm">
+          <span className="text-muted">Thermal pressure</span>
+          <span className="font-tabular text-sm text-text">{gpu?.thermalPressure ?? "—"}</span>
+        </div>
+      ) : (
+        <MetricRow
+          label="Temperature"
+          color={tempColor}
+          spark={<Sparkline data={tempHistory} color={tempColor} width={180} />}
+          value={<span className="text-text-strong">{tempLabel}</span>}
+        />
+      )}
       <div className="flex justify-between text-sm">
         <span className="text-muted">GPU Power</span>
         <span className="font-tabular text-sm text-text">
-          {powerDraw}W / {powerLimit}W
+          {mac
+            ? gpu?.powermetricsAvailable === false
+              ? "n/a (needs sudo powermetrics)"
+              : `${powerDraw}W · system ${gpu?.power?.systemDraw ?? 0}W`
+            : `${powerDraw}W / ${powerLimit}W`}
         </span>
       </div>
 

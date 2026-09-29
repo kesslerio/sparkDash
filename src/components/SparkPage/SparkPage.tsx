@@ -244,10 +244,11 @@ export function SparkPage({ spark, temperatureUnit, onEdit, onOpenHarnessWizard 
         />
         {resourcesOpen && (
           <>
-            {spark.kind === "host" ? (
-              /* Hosts: GPU spans the full left column; RAM → Network → Storage [→ Tailnet] stack in the right column */
+            {spark.kind === "host" || spark.kind === "mac" ? (
+              /* Hosts and Macs: GPU spans the full left column; RAM → Network → Storage [→ Tailnet] stack in the right column */
               <>
                 <GpuPanel
+                  mac={spark.kind === "mac"}
                   gpu={metrics.gpu}
                   sparkId={spark.id}
                   llmPort={primaryPort}

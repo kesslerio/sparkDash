@@ -196,6 +196,10 @@ export interface GpuThrottle {
 export interface GpuMetrics {
   temperature: number;
   usage: number;
+  /** macOS thermal pressure level from powermetrics (Nominal, Moderate, Heavy, …). Mac units only. */
+  thermalPressure?: string | null;
+  /** Mac units: false when `sudo -n powermetrics` is not permitted, so GPU activity and power are unknown. */
+  powermetricsAvailable?: boolean;
   power: {
     draw: number;
     limit: number;

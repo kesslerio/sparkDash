@@ -216,7 +216,7 @@ function SparkCard({
           {/* Three headline bars: GPU alloc, Temp, Usage */}
           <div className="flex flex-col gap-3.5">
             <MetricBar
-              label="VRAM"
+              label={spark.kind === "mac" ? "Unified memory" : "VRAM"}
               value={vramUsed}
               max={vramTotal}
               color={vramBarColor}
@@ -239,13 +239,27 @@ function SparkCard({
                 />
               );
             })()}
-            <MetricBar
-              label={spark.kind === "host" ? "GPU" : "Temperature"}
-              value={displayTemp}
-              max={temperatureUnit === "fahrenheit" ? 212 : 100}
-              color={tempBarColor}
-              caption={tempLabel}
-            />
+            {spark.kind === "mac" ? (
+              <MetricBar
+                label="GPU"
+                value={usage}
+                max={100}
+                color={usageBarColor}
+                caption={
+                  spark.metrics.gpu?.powermetricsAvailable === false
+                    ? "n/a"
+                    : `${usage}% · ${spark.metrics.gpu?.power?.draw ?? 0} W`
+                }
+              />
+            ) : (
+              <MetricBar
+                label={spark.kind === "host" ? "GPU" : "Temperature"}
+                value={displayTemp}
+                max={temperatureUnit === "fahrenheit" ? 212 : 100}
+                color={tempBarColor}
+                caption={tempLabel}
+              />
+            )}
             {spark.kind === "host" && (spark.metrics.cpu?.temperature ?? 0) > 0 && (() => {
               const cpuRaw = spark.metrics.cpu?.temperature ?? 0;
               const cpuDisplay =
@@ -344,9 +358,11 @@ function SparkCard({
                       ? "vLLM"
                       : llm.backend === "ds4"
                         ? "ds4"
-                        : llm.backend === "sglang"
-                          ? "sgLang"
-                          : llm.backend ?? "LLM"
+                        : llm.backend === "omlx"
+                          ? "oMLX"
+                          : llm.backend === "sglang"
+                            ? "sgLang"
+                            : llm.backend ?? "LLM"
                   } · ${llm.status ?? (llm.available ? "active" : "unavailable")}`}
                   value={llm.modelId ?? "unknown"}
                   tone="accent"

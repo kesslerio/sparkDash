@@ -82,3 +82,43 @@ describe("metricsStore LLM rate ingestion", () => {
     expect(result.current.prefill).toEqual([20, 0]);
   });
 });
+
+describe("metricsStore Mac units", () => {
+  beforeEach(() => {
+    _resetStore();
+  });
+
+  function macSnapshot(): SparkSnapshot {
+    const base = snapshot(llm({ backend: "omlx" }));
+    return {
+      ...base,
+      id: "mac-1",
+      kind: "mac",
+      metrics: {
+        ...base.metrics,
+        gpu: {
+          temperature: 0,
+          usage: 97,
+          power: { draw: 84.9, limit: 0, systemDraw: 90 },
+          vram: { used: 185502, total: 262144, percentage: 75, available: 64552 },
+          processes: [],
+        } as unknown as SparkSnapshot["metrics"]["gpu"],
+        cpu: { usage: 4, temperature: 0, draw: 5.1, tdp: 0 } as unknown as SparkSnapshot["metrics"]["cpu"],
+      },
+    };
+  }
+
+  it("records GPU usage but no fake 0° temperature samples for Macs", () => {
+    const { result } = renderHook(() => ({
+      usage: useMetricsHistory("mac-1", "gpu.usage"),
+      temp: useMetricsHistory("mac-1", "gpu.temp"),
+      cpuTemp: useMetricsHistory("mac-1", "cpu.temp"),
+    }));
+    act(() => {
+      ingestSnapshots([macSnapshot()]);
+    });
+    expect(result.current.usage.at(-1)).toBe(97);
+    expect(result.current.temp).toHaveLength(0);
+    expect(result.current.cpuTemp).toHaveLength(0);
+  });
+});

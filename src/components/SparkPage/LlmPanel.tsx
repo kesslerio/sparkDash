@@ -71,6 +71,7 @@ function BackendBadge({ backend }: { backend: string | null }) {
     "llama.cpp": "llama.cpp",
     sglang: "sgLang",
     ds4: "ds4",
+    omlx: "oMLX",
   };
 
   return (
