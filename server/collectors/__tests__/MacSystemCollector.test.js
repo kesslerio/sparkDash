@@ -53,14 +53,34 @@ test("vm_stat and memsize give unified memory in MB", () => {
   assert.equal(vm.wired, 11872134);
   assert.equal(vm.active, 676036);
   assert.equal(vm.compressed, 97740);
+  assert.equal(vm.anonymous, 533845);
   const mem = unifiedMemoryFromVmStat(vm, parseSysctl(fx("sysctl.txt"))["hw.memsize"]);
   assert.equal(mem.total, 262144);
   assert.equal(mem.gpuUsed, 185502);
-  assert.equal(mem.cpuUsed, 12090);
-  assert.equal(mem.used, 197592);
-  assert.equal(mem.available, 64552);
+  assert.equal(mem.cpuUsed, 9802);
+  assert.equal(mem.used, 195304);
+  assert.equal(mem.available, 66840);
   assert.equal(mem.percentage, 75);
   assert.equal(mem.oomRisk, "medium");
+});
+
+test("an idle MLX model that macOS un-wired still counts as memory in use", () => {
+  // Same loaded model, captured after the server went idle: the pages moved
+  // from wired to anonymous app memory; nothing was freed.
+  const vm = parseVmStat(fx("vm_stat-unwired.txt"));
+  const mem = unifiedMemoryFromVmStat(vm, parseSysctl(fx("sysctl.txt"))["hw.memsize"]);
+  assert.equal(mem.gpuUsed, 4585);
+  assert.equal(mem.cpuUsed, 192794);
+  assert.equal(mem.used, 197379);
+  assert.equal(mem.available, 64765);
+  assert.equal(mem.percentage, 75);
+});
+
+test("vm_stat without an Anonymous pages line falls back to active pages", () => {
+  const vm = parseVmStat(fx("vm_stat.txt").replace(/^Anonymous pages:.*$/m, ""));
+  assert.equal(vm.anonymous, 0);
+  const mem = unifiedMemoryFromVmStat(vm, parseSysctl(fx("sysctl.txt"))["hw.memsize"]);
+  assert.equal(mem.cpuUsed, 12090);
 });
 
 test("sysctl, boot time and swap parse", () => {
@@ -140,6 +160,7 @@ test("collector batches non-sudo reads into one SSH call and maps shapes", async
   assert.equal(gpu.power.draw, 84.9);
   assert.equal(gpu.power.systemDraw, 90);
   assert.equal(gpu.vram.total, 262144);
+  assert.equal(gpu.vram.used, um.used, "the GPU card shows all unified memory in use");
   assert.equal(gpu.throttle.smClockMHz, 1620);
   assert.equal(gpu.powermetricsAvailable, true);
   assert.equal((await collector.collectCpu()).draw, 5.1);

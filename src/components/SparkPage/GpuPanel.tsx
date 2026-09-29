@@ -172,7 +172,7 @@ export function GpuPanel({ gpu, sparkId, temperatureUnit, className, mac = false
           {vramTotal > 0 ? (
             <>
               <MetricBar
-                label={mac ? "GPU-wired memory" : "VRAM"}
+                label={mac ? "Unified memory in use" : "VRAM"}
                 value={vramUsed}
                 max={vramTotal}
                 caption={vramTotal > 0 ? `${formatMb(vramUsed).replace(/ (GB|MB)$/, "")} / ${formatMb(vramTotal)}` : "—"}
@@ -186,7 +186,7 @@ export function GpuPanel({ gpu, sparkId, temperatureUnit, className, mac = false
             </>
           ) : (
             <div className="flex justify-between text-xs">
-              <span className="text-muted">{mac ? "GPU-wired memory" : "VRAM"}</span>
+              <span className="text-muted">{mac ? "Unified memory in use" : "VRAM"}</span>
               <span className="font-tabular text-text">
                 {vramUsed > 0 ? `${formatMb(vramUsed)} used` : "—"}
               </span>

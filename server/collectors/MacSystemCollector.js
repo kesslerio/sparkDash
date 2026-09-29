@@ -96,19 +96,26 @@ export function parseVmStat(text) {
     wired: pages("Pages wired down"),
     compressed: pages("Pages occupied by compressor"),
     purgeable: pages("Pages purgeable"),
+    anonymous: pages("Anonymous pages"),
+    fileBacked: pages("File-backed pages"),
   };
 }
 
 /**
- * Unified memory in MB. Used = active + wired + compressor pages (what Activity
- * Monitor counts as memory used). GPU allocations made through Metal (MLX model
- * weights and KV cache) are wired, so wired is the GPU-side share.
+ * Unified memory in MB, counted like Activity Monitor's "Memory Used":
+ * app memory (anonymous pages minus purgeable) + wired + compressor pages.
+ * File-backed cache counts as available. Metal wires GPU allocations (MLX
+ * weights, KV cache) while they are in use, but an idle MLX server's model can
+ * be un-wired back into ordinary anonymous memory without being freed, so
+ * wired alone is not "memory in use". `gpuUsed` is the currently wired share.
  */
 export function unifiedMemoryFromVmStat(vm, memsizeBytes) {
   const toMB = (count) => Math.round((count * vm.pageSize) / MB);
   const total = Math.round((Number(memsizeBytes) || 0) / MB);
+  // Older vm_stat builds without an "Anonymous pages" line: fall back to active.
+  const appPages = vm.anonymous > 0 ? Math.max(0, vm.anonymous - vm.purgeable) : vm.active;
   const gpuUsed = toMB(vm.wired);
-  const cpuUsed = toMB(vm.active + vm.compressed);
+  const cpuUsed = toMB(appPages + vm.compressed);
   const used = Math.min(total || Infinity, gpuUsed + cpuUsed);
   const available = Math.max(0, total - used);
   const percentage = total > 0 ? Math.round((used / total) * 100) : 0;
@@ -251,7 +258,7 @@ export class MacSystemCollector extends SystemCollector {
         return {
           ...base,
           power: { draw: 0, limit: 0, systemDraw: 0 },
-          vram: { used: mem.gpuUsed, total: mem.total, percentage: mem.percentage, available: mem.available },
+          vram: { used: mem.used, total: mem.total, percentage: mem.percentage, available: mem.available },
           powermetricsAvailable: false,
         };
       }
@@ -261,7 +268,7 @@ export class MacSystemCollector extends SystemCollector {
         temperature: 0,
         usage: Math.round(power.gpuActivePct ?? 0),
         power: { draw: power.gpuW ?? 0, limit: 0, systemDraw: power.combinedW ?? 0 },
-        vram: { used: mem.gpuUsed, total: mem.total, percentage: mem.percentage, available: mem.available },
+        vram: { used: mem.used, total: mem.total, percentage: mem.percentage, available: mem.available },
         processes: [],
         throttle: this._buildThrottle({ swThermal: thermal, smClockMHz: power.gpuFreqMHz }),
         thermalPressure: power.thermalPressure,
