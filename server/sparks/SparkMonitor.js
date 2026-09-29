@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { SystemCollector } from "../collectors/SystemCollector.js";
+import { MacSystemCollector } from "../collectors/MacSystemCollector.js";
 import { LlmProbe } from "../collectors/LlmProbe.js";
 import { ComfyProbe } from "../collectors/ComfyProbe.js";
 import { HermesProbe } from "../collectors/HermesProbe.js";
@@ -65,7 +66,7 @@ export class SparkMonitor {
     this._onWolMac = typeof options.onWolMac === "function" ? options.onWolMac : null;
     this._onHermesChange =
       typeof options.onHermesChange === "function" ? options.onHermesChange : null;
-    this.collector = new SystemCollector(spark);
+    this.collector = createCollector(spark);
 
     // One LlmProbe per port — none when LLM monitoring is off
     this.llmProbes = new Map();
@@ -129,20 +130,13 @@ export class SparkMonitor {
     };
     this._lastUpdate = {};
 
-    // Hardware summary: kind "spark" uses the static DGX Spark specs; kind
-    // "host" (dedicated GPU Linux box) detects real hardware once in the
-    // background so the header doesn't mislabel the machine as a Spark.
+    // Hardware summary: kind "spark" uses the static DGX Spark specs; kinds
+    // "host" (dedicated GPU Linux box) and "mac" (Apple Silicon) detect real
+    // hardware once in the background so the header doesn't mislabel the
+    // machine as a Spark.
     this._hardwareSummary = this._staticHardwareSummary(spark);
     this._stopped = false;
-    if (spark?.kind === "host") {
-      void this.collector
-        .detectHardware()
-        .then((detected) => {
-          if (this._stopped || !detected) return;
-          this._hardwareSummary = { ...this._hardwareSummary, ...detected };
-        })
-        .catch(() => {});
-    }
+    this._detectHardwareInBackground();
 
     // Timers
     this._intervals = [];
@@ -169,8 +163,15 @@ export class SparkMonitor {
     const prevComfyPort = this._comfyPort(this.spark);
     const wasHermes = this._hermesMonitoringEnabled(this.spark);
     const wasTailscale = this._tailscaleMonitoringEnabled(this.spark);
+    const kindChanged = (this.spark?.kind === "mac") !== (spark?.kind === "mac");
     this.spark = spark;
-    this.collector.spark = spark;
+    if (kindChanged) {
+      this.collector = createCollector(spark);
+      this._hardwareSummary = this._staticHardwareSummary(spark);
+      this._detectHardwareInBackground();
+    } else {
+      this.collector.spark = spark;
+    }
 
     // Rebuild LLM probe map — add new ports, remove stale ones, update existing
     const ports = this._llmMonitoringEnabled() ? this._llmPorts() : [];
@@ -502,6 +503,10 @@ export class SparkMonitor {
   // ─── Uptime helper ─────────────────────────────────────────
   /** Read system uptime from /proc/uptime (local or via SSH). */
   async _readUptime() {
+    if (this.spark.kind === "mac") {
+      const boot = await this.collector.readBootTime();
+      return boot ? Math.max(0, Math.floor(Date.now() / 1000 - boot)) : null;
+    }
     let content;
     if (this.spark.isLocal) {
       const mapped = path.join(HOST_PATHS.PROC, "uptime");
@@ -820,9 +825,33 @@ export class SparkMonitor {
   /**
    * Static summary used for kind "spark" (DGX Spark specs) and as the
    * pre-detection fallback for kind "host". kind "host" is then enriched
-   * with real hardware from `detectHardware()` once available.
+   * with real hardware from `detectHardware()` once available; kind "mac"
+   * likewise starts from a generic Apple Silicon summary.
    */
+  _detectHardwareInBackground() {
+    if (this.spark?.kind !== "host" && this.spark?.kind !== "mac") return;
+    const collector = this.collector;
+    void collector
+      .detectHardware()
+      .then((detected) => {
+        if (this._stopped || !detected || collector !== this.collector) return;
+        this._hardwareSummary = { ...this._hardwareSummary, ...detected };
+      })
+      .catch(() => {});
+  }
+
   _staticHardwareSummary(spark) {
+    if (spark?.kind === "mac") {
+      return {
+        device: "Apple Silicon Mac",
+        cpuModel: null,
+        cpuCores: null,
+        totalMemoryGB: null,
+        gpuChip: null,
+        cudaDriver: null,
+        storageModel: null,
+      };
+    }
     if (spark?.kind === "host") {
       return {
         device: "Linux GPU host",
@@ -844,4 +873,13 @@ export class SparkMonitor {
       storageModel: null,
     };
   }
+}
+
+/**
+ * Metrics collector for a unit: Apple Silicon Macs are read with macOS tools
+ * over SSH; every other kind uses the Linux/NVIDIA collector.
+ * @param {object} spark
+ */
+export function createCollector(spark) {
+  return spark?.kind === "mac" ? new MacSystemCollector(spark) : new SystemCollector(spark);
 }
