@@ -7,8 +7,10 @@ export interface SparkConfig {
    * - spark: NVIDIA DGX Spark (default) — DGX Spark specs shown in the header.
    * - host: any Linux box with an NVIDIA GPU (still monitored via nvidia-smi,
    *   just not a Spark). Real hardware is auto-detected once online.
+   * - mac: an Apple Silicon Mac monitored over SSH with macOS tools
+   *   (sysctl, vm_stat, powermetrics). Always remote.
    */
-  kind?: "spark" | "host";
+  kind?: "spark" | "host" | "mac";
   lanIp: string;
   cx7Ip?: string | null;
   /**
@@ -196,6 +198,10 @@ export interface GpuThrottle {
 export interface GpuMetrics {
   temperature: number;
   usage: number;
+  /** macOS thermal pressure level from powermetrics (Nominal, Moderate, Heavy, …). Mac units only. */
+  thermalPressure?: string | null;
+  /** Mac units: false when `sudo -n powermetrics` is not permitted, so GPU activity and power are unknown. */
+  powermetricsAvailable?: boolean;
   power: {
     draw: number;
     limit: number;
@@ -311,7 +317,7 @@ export interface LlmMetrics {
   lastObservedAt?: number | null;
   /** Human-readable reason for unknown/stale/unavailable/ambiguous telemetry. */
   statusReason?: string | null;
-  backend: "vllm" | "llama.cpp" | "sglang" | "ds4" | "exl3" | "q27" | "tensorfold" | null;
+  backend: "vllm" | "llama.cpp" | "sglang" | "ds4" | "exl3" | "q27" | "tensorfold" | "omlx" | null;
   modelId: string | null;
   modelPath: string | null;
   /** Model ID to use for benchmark/showcase requests. Falls back to modelId for single-model backends. */
@@ -576,8 +582,8 @@ export interface ConversationRow {
 export interface SparkSnapshot {
   id: string;
   name: string;
-  /** Unit type: spark (DGX Spark) or host (dedicated GPU Linux box). */
-  kind?: "spark" | "host";
+  /** Unit type: spark (DGX Spark), host (dedicated GPU Linux box), or mac (Apple Silicon). */
+  kind?: "spark" | "host" | "mac";
   online: boolean;
   /** Uptime in seconds, or null when offline */
   uptime: number | null;

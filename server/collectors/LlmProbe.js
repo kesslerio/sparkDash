@@ -30,6 +30,8 @@ const INACTIVE_MODEL_STATUSES = new Set([
  * expire back to 0 if it stops changing.
  */
 const SGLANG_STICKY_TPS_LIVE_MS = 6_000;
+/** Back-off after an oMLX admin login or activity read fails. */
+const OMLX_ADMIN_RETRY_MS = 60_000;
 
 /**
  * Prefer a short model id when the server returns a Hugging Face hub cache path.
@@ -169,7 +171,11 @@ export class LlmProbe {
     this.baseUrl = `http://${llmProbeHost(spark)}:${this.telemetryPort}`;
 
     // State
-    this.backendType = null; // 'vllm' | 'llama.cpp' | 'sglang' | 'ds4' | 'exl3' | 'q27' | 'tensorfold' | null
+    this.backendType = null; // 'vllm' | 'llama.cpp' | 'sglang' | 'ds4' | 'exl3' | 'q27' | 'tensorfold' | 'omlx' | null
+    /** oMLX admin session cookie, the time before which login is not retried, and the last per-request decode sample. */
+    this._omlxAdminCookie = null;
+    this._omlxAdminRetryAt = 0;
+    this._omlxPrevGen = new Map();
     this.serverIsOpenAI = null; // true = OpenAI-compatible
     /** Whether /v1/models (or /slots) answered without credentials. null = unknown. */
     this.authOpen = null;
@@ -557,7 +563,8 @@ export class LlmProbe {
       this.backendType !== "ds4" &&
       this.backendType !== "exl3" &&
       this.backendType !== "q27" &&
-      this.backendType !== "tensorfold"
+      this.backendType !== "tensorfold" &&
+      this.backendType !== "omlx"
     ) {
       const slotUrl = `${this.baseUrl}/slots`;
       try {
@@ -604,12 +611,13 @@ export class LlmProbe {
   }
 
   /**
-   * Classify an OpenAI-compatible server: ds4, SGLang, EXL3, q27, TensorFold, or vLLM (default).
+   * Classify an OpenAI-compatible server: oMLX, ds4, SGLang, EXL3, q27, TensorFold, or vLLM (default).
    * @param {unknown} ownedBy
-   * @returns {Promise<"ds4" | "sglang" | "exl3" | "q27" | "tensorfold" | "vllm">}
+   * @returns {Promise<"omlx" | "ds4" | "sglang" | "exl3" | "q27" | "tensorfold" | "vllm">}
    */
   async _classifyOpenAIBackend(ownedBy) {
     if (typeof ownedBy === "string") {
+      if (/^omlx$/i.test(ownedBy)) return "omlx";
       if (/ds4/i.test(ownedBy)) return "ds4";
       if (/sglang/i.test(ownedBy)) return "sglang";
       if (/exl3/i.test(ownedBy)) return "exl3";
@@ -721,6 +729,8 @@ export class LlmProbe {
     let modelsOk = false;
     let owned = null;
     let servedModelId = null;
+    /** oMLX /api/status body for this poll (undefined when not fetched, null when unavailable). */
+    let omlxStatus;
     try {
       const modelsRes = await this._fetch(`${this.baseUrl}/v1/models`);
       const auth = this._noteAuthStatus(modelsRes.status);
@@ -735,7 +745,13 @@ export class LlmProbe {
       if (auth === "ok") {
         modelsOk = true;
         const modelsData = await modelsRes.json();
-        const models = Array.isArray(modelsData?.data) ? modelsData.data : [];
+        let models = Array.isArray(modelsData?.data) ? modelsData.data : [];
+        // oMLX lists every model on disk; only the loaded ones are serving.
+        if (models.length > 0 && models.every((m) => /^omlx$/i.test(String(m?.owned_by ?? "")))) {
+          this.backendType = "omlx";
+          omlxStatus = await this._fetchOmlxStatus();
+          if (omlxStatus) models = LlmProbe._omlxLoadedModels(models, omlxStatus);
+        }
         const selection = this._acceptModelCatalog(models);
         if (selection.model) owned = selection.model.owned_by;
         if (selection.modelId) servedModelId = selection.modelId;
@@ -751,7 +767,8 @@ export class LlmProbe {
 
     // Self-heal backend from owned_by before branching (cheap, no extra HTTP)
     if (typeof owned === "string") {
-      if (/ds4/i.test(owned)) this.backendType = "ds4";
+      if (/^omlx$/i.test(owned)) this.backendType = "omlx";
+      else if (/ds4/i.test(owned)) this.backendType = "ds4";
       else if (/sglang/i.test(owned) && this.backendType !== "ds4") {
         this.backendType = "sglang";
       } else if (/exl3/i.test(owned) && this.backendType !== "ds4") {
@@ -759,6 +776,24 @@ export class LlmProbe {
       } else if (/tensorfold/i.test(owned) && this.backendType !== "ds4") {
         this.backendType = "tensorfold";
       }
+    }
+
+    // oMLX (Apple Silicon MLX server): no Prometheus exposition; its JSON
+    // /api/status carries request, token and cache counters.
+    if (this.backendType === "omlx") {
+      const st = omlxStatus === undefined ? await this._fetchOmlxStatus() : omlxStatus;
+      if (st) {
+        this._metricsModelMatched = true;
+        this._applyOmlxStatus(st);
+        const activity = (this.requestsRunning ?? 0) > 0 ? await this._fetchOmlxActivity() : null;
+        if (activity) this._applyOmlxActivity(activity);
+        else this._omlxPrevGen = new Map();
+        this._noteFreshTelemetry(Date.now());
+      } else {
+        this.status = "unavailable";
+        this.statusReason = "metrics_unavailable";
+      }
+      return this._getSnapshot();
     }
 
     // TensorFold: no Prometheus. /health carries cumulative token totals when the
@@ -885,6 +920,168 @@ export class LlmProbe {
     }
 
     return this._getSnapshot();
+  }
+
+  /** oMLX `GET /api/status` body, or null when it is unavailable. */
+  async _fetchOmlxStatus() {
+    try {
+      const res = await this._fetch(`${this.baseUrl}/api/status`);
+      if (!res.ok) return null;
+      const body = await res.json();
+      return body && typeof body === "object" ? body : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * oMLX `GET /admin/api/activity` (`active_models`), or null when no API key
+   * is configured or the admin API refuses it. The admin API takes a session
+   * cookie from `POST /admin/api/login`, so log in once, reuse the cookie, and
+   * log in again when it expires.
+   */
+  async _fetchOmlxActivity() {
+    const apiKey = this._apiKey();
+    if (!apiKey || Date.now() < this._omlxAdminRetryAt) return null;
+    try {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        if (!this._omlxAdminCookie) this._omlxAdminCookie = await this._omlxAdminLogin(apiKey);
+        if (!this._omlxAdminCookie) break;
+        const res = await this._fetch(`${this.baseUrl}/admin/api/activity`, {
+          headers: { Cookie: this._omlxAdminCookie },
+        });
+        if (res.ok) {
+          const body = await res.json();
+          const active = body?.active_models;
+          return active && typeof active === "object" ? active : null;
+        }
+        this._omlxAdminCookie = null;
+        if (res.status !== 401 && res.status !== 403) break;
+      }
+    } catch {
+      this._omlxAdminCookie = null;
+    }
+    this._omlxAdminRetryAt = Date.now() + OMLX_ADMIN_RETRY_MS;
+    return null;
+  }
+
+  /** Log in to the oMLX admin API; returns the `omlx_admin_session` cookie pair or null. */
+  async _omlxAdminLogin(apiKey) {
+    const res = await this._fetch(`${this.baseUrl}/admin/api/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ api_key: apiKey, remember: true }),
+    });
+    if (!res.ok) return null;
+    const headers = res.headers;
+    const setCookie =
+      typeof headers?.getSetCookie === "function"
+        ? headers.getSetCookie().join("; ")
+        : String(headers?.get?.("set-cookie") ?? "");
+    const match = /(?:^|[;,]\s*)omlx_admin_session=([^;,\s]+)/.exec(setCookie);
+    return match ? `omlx_admin_session=${match[1]}` : null;
+  }
+
+  /**
+   * Live rates from oMLX's admin activity feed, summed over loaded models.
+   * Decode is each generating request's token delta since the previous poll
+   * (its own running average on first sight); prefill is the tracker's
+   * current speed for each prefilling request.
+   * @param {{ models?: unknown[] }} activity
+   */
+  _applyOmlxActivity(activity) {
+    const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+    const list = (v) => (Array.isArray(v) ? v : []);
+    const prev = this._omlxPrevGen;
+    const next = new Map();
+    let decode = 0;
+    let prefill = 0;
+    for (const model of list(activity?.models)) {
+      for (const req of list(model?.generating)) {
+        const id = String(req?.request_id ?? "");
+        const tokens = num(req?.generated_tokens);
+        const elapsed = num(req?.elapsed_seconds);
+        const before = id ? prev.get(id) : undefined;
+        const dt = before ? elapsed - before.elapsed : 0;
+        decode +=
+          before && dt > 0 && tokens >= before.tokens
+            ? (tokens - before.tokens) / dt
+            : num(req?.tokens_per_second);
+        if (id) next.set(id, { tokens, elapsed });
+      }
+      for (const req of list(model?.prefilling)) prefill += num(req?.speed);
+    }
+    this._omlxPrevGen = next;
+    this.generationTps = Math.max(0, Math.round(decode * 100) / 100);
+    this.prefillTps = Math.max(0, Math.round(prefill * 100) / 100);
+  }
+
+  /**
+   * Narrow an oMLX model catalog to the models /api/status reports as loaded
+   * (falling back to its default model). Returns the input when neither matches.
+   */
+  static _omlxLoadedModels(models, st) {
+    const loaded = Array.isArray(st?.loaded_models) ? st.loaded_models.map(String) : [];
+    const wanted = loaded.length > 0 ? loaded : st?.default_model ? [String(st.default_model)] : [];
+    const picked = models.filter((m) => wanted.includes(String(m?.id)));
+    return picked.length > 0 ? picked : models;
+  }
+
+  /**
+   * Apply oMLX `GET /api/status`. oMLX bumps its token counters only when a
+   * request finishes, so per-poll counter deltas are 0 mid-request and spike at
+   * completion. While requests are active the live tiles therefore use oMLX's
+   * own rolling `avg_generation_tps` / `avg_prefill_tps`; idle reads 0.
+   * With an API key the admin activity feed then replaces those averages with
+   * live per-request rates (`_applyOmlxActivity`). Counters still feed the
+   * running totals.
+   * @param {Record<string, unknown>} st
+   */
+  _applyOmlxStatus(st) {
+    const n = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+    const prompt = n(st?.total_prompt_tokens);
+    const decoded = n(st?.total_completion_tokens);
+    const active = n(st?.active_requests);
+    const waiting = n(st?.waiting_requests);
+    const busy = (active ?? 0) > 0;
+
+    const avg = (v) => Math.max(0, Math.round((n(v) ?? 0) * 100) / 100);
+    this.generationTps = busy ? avg(st?.avg_generation_tps) : 0;
+    this.prefillTps = busy ? avg(st?.avg_prefill_tps) : 0;
+    this.cachedPrefillTps = null;
+    this.uncachedPrefillTps = null;
+    this.lastPrefillKinds = null;
+    if (decoded != null) {
+      this.totalOutputTokens = decoded;
+      this._outputCounterObserved = true;
+    }
+    if (prompt != null) {
+      this.totalPromptTokens = prompt;
+      this._promptCounterObserved = true;
+    }
+    const efficiency = n(st?.cache_efficiency);
+    if (efficiency != null) this.prefixCacheHitRate = Math.round(efficiency * 100) / 10000;
+
+    this.requestsRunning = active;
+    this.requestsWaiting = waiting;
+    this.slotsActive = active != null ? Math.round(active) : 0;
+    const total = n(st?.total_requests);
+    this.completedRequestsTotal = total != null ? Math.max(0, total - (active ?? 0)) : null;
+    this._completedCounterObserved = this.completedRequestsTotal != null;
+
+    const used = n(st?.model_memory_used);
+    const max = n(st?.model_memory_max);
+    this.gpuMemoryUtilization = used != null && max ? Math.round((used / max) * 10000) / 10000 : null;
+
+    // No oMLX equivalents for the vLLM histogram / KV tiles.
+    this.kvCacheUsage = null;
+    this.kvCacheCapacityTokens = null;
+    this.kvCacheMaxConcurrency = null;
+    this.ttftP95Seconds = null;
+    this.preemptionsTotal = null;
+    this.e2eP95Seconds = null;
+    this.itlP95Seconds = null;
+    this.mtpAcceptanceRate = null;
   }
 
   /**
@@ -2165,10 +2362,10 @@ export class LlmProbe {
     return key || null;
   }
 
-  async _fetch(url) {
-    const headers = {};
+  async _fetch(url, { method = "GET", headers = {}, body } = {}) {
+    const merged = { ...headers };
     const apiKey = this._apiKey();
-    if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
-    return fetch(url, { signal: AbortSignal.timeout(LLM_PROBE_TIMEOUT_MS), headers });
+    if (apiKey) merged.Authorization = `Bearer ${apiKey}`;
+    return fetch(url, { method, body, signal: AbortSignal.timeout(LLM_PROBE_TIMEOUT_MS), headers: merged });
   }
 }

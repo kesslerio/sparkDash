@@ -268,6 +268,7 @@ export function SparkPage({
                 llmPort={primaryPort}
                 conversations={conversationsByPort.get(primaryPort) ?? EMPTY_CONVERSATIONS}
                 temperatureUnit={temperatureUnit}
+                mac={spark.kind === "mac"}
               />
               {/* grow: fill the gap so the left column's bottom aligns with the right */}
               <CpuPanel
@@ -279,7 +280,9 @@ export function SparkPage({
               />
             </div>
             <div className="flex flex-col" style={{ gap: "var(--density-page-gap)" }}>
-              {spark.kind === "host" && <RamPanel ram={metrics.ram} sparkId={spark.id} />}
+              {(spark.kind === "host" || spark.kind === "mac") && (
+                <RamPanel ram={metrics.ram} sparkId={spark.id} />
+              )}
               <StoragePanel
                 storage={metrics.storage}
                 sparkId={spark.id}

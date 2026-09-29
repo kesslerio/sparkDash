@@ -307,6 +307,7 @@ function BackendBadge({ backend }: { backend: string | null }) {
     exl3: "EXL3",
     q27: "q27",
     tensorfold: "TensorFold",
+    omlx: "oMLX",
   };
 
   return (
