@@ -33,7 +33,7 @@ const status = (overrides = {}) => ({
 });
 
 function omlxProbe(getStatus, models = MODELS) {
-  const probe = new LlmProbe({ lanIp: "100.96.225.114" }, 8000);
+  const probe = new LlmProbe({ lanIp: "100.64.0.10" }, 8000);
   const requested = [];
   probe._fetch = async (url) => {
     const u = String(url);

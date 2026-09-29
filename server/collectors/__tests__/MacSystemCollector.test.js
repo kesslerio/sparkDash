@@ -33,10 +33,10 @@ const snapshotOutput = ({ netstat = fx("netstat.txt") } = {}) =>
     fx("df.txt"),
     `${SECTION}netstat`,
     netstat,
-    "ip 192.168.4.154",
+    "ip 192.168.1.50",
   ].join("\n");
 
-const spark = { id: "qualitycorp", kind: "mac", isLocal: false, ssh: { user: "qualitycorp", host: "100.96.225.114" } };
+const spark = { id: "mac-studio", kind: "mac", isLocal: false, ssh: { user: "macuser", host: "100.64.0.10" } };
 
 function collectorWith(handler) {
   const calls = [];
@@ -115,7 +115,7 @@ test("powermetrics text parses busy and idle samples", () => {
 test("section splitting keeps each command's output", () => {
   const sections = splitSections(snapshotOutput());
   assert.deepEqual(Object.keys(sections), ["sysctl", "vm_stat", "top", "df", "netstat"]);
-  assert.match(sections.netstat, /^ip 192\.168\.4\.154$/m);
+  assert.match(sections.netstat, /^ip 192\.168\.1\.50$/m);
 });
 
 test("collector batches non-sudo reads into one SSH call and maps shapes", async () => {
@@ -155,7 +155,7 @@ test("network speeds come from counter deltas between samples", async () => {
   const first = await collector.collectNetwork();
   assert.equal(first.primaryInterface, "en1");
   assert.equal(first.interfaces[0].rxSpeed, 0);
-  assert.equal(first.interfaces[0].ip, "192.168.4.154");
+  assert.equal(first.interfaces[0].ip, "192.168.1.50");
   collector._snapshotCache = null;
   collector._lastNet.time -= 2000;
   rx = 5000;

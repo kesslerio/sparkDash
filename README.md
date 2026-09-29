@@ -494,11 +494,11 @@ The non-privileged reads share one SSH call per poll. Metal allocations (MLX wei
 
 ```json
 {
-  "id": "qualitycorp",
-  "name": "qualitycorp",
+  "id": "mac-studio",
+  "name": "mac-studio",
   "kind": "mac",
-  "lanIp": "100.96.225.114",
-  "ssh": { "host": "100.96.225.114", "user": "qualitycorp", "auth": "key" },
+  "lanIp": "100.64.0.10",
+  "ssh": { "host": "100.64.0.10", "user": "macuser", "auth": "key" },
   "llmPorts": [8000],
   "role": "standalone",
   "llmMonitoring": true

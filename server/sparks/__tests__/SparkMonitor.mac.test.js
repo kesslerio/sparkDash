@@ -7,13 +7,18 @@ import { SparkMonitor, createCollector } from "../SparkMonitor.js";
 import { SystemCollector } from "../../collectors/SystemCollector.js";
 import { MacSystemCollector } from "../../collectors/MacSystemCollector.js";
 
+// Constructing a mac/host monitor starts background hardware detection over
+// SSH; keep these unit tests off the network.
+MacSystemCollector.prototype.detectHardware = async () => null;
+SystemCollector.prototype.detectHardware = async () => null;
+
 function unit(overrides = {}) {
   return {
-    id: "qualitycorp",
-    name: "qualitycorp",
-    lanIp: "100.96.225.114",
+    id: "mac-studio",
+    name: "mac-studio",
+    lanIp: "100.64.0.10",
     isLocal: false,
-    ssh: { host: "100.96.225.114", user: "qualitycorp", auth: "key" },
+    ssh: { host: "100.64.0.10", user: "macuser", auth: "key" },
     llmPorts: [8000],
     role: "standalone",
     llmMonitoring: true,
