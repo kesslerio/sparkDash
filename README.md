@@ -490,6 +490,8 @@ The non-privileged reads share one SSH call per poll. Metal wires MLX weights an
 - cache efficiency;
 - model memory used vs its limit.
 
+**Live oMLX rates (optional).** Those rolling averages cover the whole server session, so they barely move. For live per-request rates, give oMLX an admin API key and store it as the port's LLM API key in sparkDash (LLM settings). sparkDash then logs in to oMLX's admin API and reads `/admin/api/activity` while requests run: decode is each generating request's token delta since the last poll, prefill is oMLX's current prefill speed, both summed across requests. Without a key, or if oMLX refuses it, the card keeps the rolling averages. Setting a key also protects oMLX's `/api/status` and admin pages; to keep model calls key-free for other clients, also set `auth.allow_unauthenticated_inference: true` in `~/.omlx/settings.json`.
+
 **Example unit** (`config/sparks.json`, or add it in the UI):
 
 ```json

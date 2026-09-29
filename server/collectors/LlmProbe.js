@@ -27,6 +27,8 @@ const INACTIVE_MODEL_STATUSES = new Set([
  * expire back to 0 if it stops changing.
  */
 const SGLANG_STICKY_TPS_LIVE_MS = 6_000;
+/** Back-off after an oMLX admin login or activity read fails. */
+const OMLX_ADMIN_RETRY_MS = 60_000;
 
 /**
  * Prefer a short model id when the server returns a Hugging Face hub cache path.
@@ -167,6 +169,10 @@ export class LlmProbe {
 
     // State
     this.backendType = null; // 'vllm' | 'llama.cpp' | 'sglang' | 'ds4' | 'omlx' | null
+    /** oMLX admin session cookie, the time before which login is not retried, and the last per-request decode sample. */
+    this._omlxAdminCookie = null;
+    this._omlxAdminRetryAt = 0;
+    this._omlxPrevGen = new Map();
     this.serverIsOpenAI = null; // true = OpenAI-compatible
     /** Whether /v1/models (or /slots) answered without credentials. null = unknown. */
     this.authOpen = null;
@@ -699,6 +705,9 @@ export class LlmProbe {
       if (st) {
         this._metricsModelMatched = true;
         this._applyOmlxStatus(st);
+        const activity = (this.requestsRunning ?? 0) > 0 ? await this._fetchOmlxActivity() : null;
+        if (activity) this._applyOmlxActivity(activity);
+        else this._omlxPrevGen = new Map();
         this._noteFreshTelemetry(Date.now());
       } else {
         this.status = "unavailable";
@@ -791,6 +800,88 @@ export class LlmProbe {
   }
 
   /**
+   * oMLX `GET /admin/api/activity` (`active_models`), or null when no API key
+   * is configured or the admin API refuses it. The admin API takes a session
+   * cookie from `POST /admin/api/login`, so log in once, reuse the cookie, and
+   * log in again when it expires.
+   */
+  async _fetchOmlxActivity() {
+    const apiKey = this._apiKey();
+    if (!apiKey || Date.now() < this._omlxAdminRetryAt) return null;
+    try {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        if (!this._omlxAdminCookie) this._omlxAdminCookie = await this._omlxAdminLogin(apiKey);
+        if (!this._omlxAdminCookie) break;
+        const res = await this._fetch(`${this.baseUrl}/admin/api/activity`, {
+          headers: { Cookie: this._omlxAdminCookie },
+        });
+        if (res.ok) {
+          const body = await res.json();
+          const active = body?.active_models;
+          return active && typeof active === "object" ? active : null;
+        }
+        this._omlxAdminCookie = null;
+        if (res.status !== 401 && res.status !== 403) break;
+      }
+    } catch {
+      this._omlxAdminCookie = null;
+    }
+    this._omlxAdminRetryAt = Date.now() + OMLX_ADMIN_RETRY_MS;
+    return null;
+  }
+
+  /** Log in to the oMLX admin API; returns the `omlx_admin_session` cookie pair or null. */
+  async _omlxAdminLogin(apiKey) {
+    const res = await this._fetch(`${this.baseUrl}/admin/api/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ api_key: apiKey, remember: true }),
+    });
+    if (!res.ok) return null;
+    const headers = res.headers;
+    const setCookie =
+      typeof headers?.getSetCookie === "function"
+        ? headers.getSetCookie().join("; ")
+        : String(headers?.get?.("set-cookie") ?? "");
+    const match = /(?:^|[;,]\s*)omlx_admin_session=([^;,\s]+)/.exec(setCookie);
+    return match ? `omlx_admin_session=${match[1]}` : null;
+  }
+
+  /**
+   * Live rates from oMLX's admin activity feed, summed over loaded models.
+   * Decode is each generating request's token delta since the previous poll
+   * (its own running average on first sight); prefill is the tracker's
+   * current speed for each prefilling request.
+   * @param {{ models?: unknown[] }} activity
+   */
+  _applyOmlxActivity(activity) {
+    const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+    const list = (v) => (Array.isArray(v) ? v : []);
+    const prev = this._omlxPrevGen;
+    const next = new Map();
+    let decode = 0;
+    let prefill = 0;
+    for (const model of list(activity?.models)) {
+      for (const req of list(model?.generating)) {
+        const id = String(req?.request_id ?? "");
+        const tokens = num(req?.generated_tokens);
+        const elapsed = num(req?.elapsed_seconds);
+        const before = id ? prev.get(id) : undefined;
+        const dt = before ? elapsed - before.elapsed : 0;
+        decode +=
+          before && dt > 0 && tokens >= before.tokens
+            ? (tokens - before.tokens) / dt
+            : num(req?.tokens_per_second);
+        if (id) next.set(id, { tokens, elapsed });
+      }
+      for (const req of list(model?.prefilling)) prefill += num(req?.speed);
+    }
+    this._omlxPrevGen = next;
+    this.generationTps = Math.max(0, Math.round(decode * 100) / 100);
+    this.prefillTps = Math.max(0, Math.round(prefill * 100) / 100);
+  }
+
+  /**
    * Narrow an oMLX model catalog to the models /api/status reports as loaded
    * (falling back to its default model). Returns the input when neither matches.
    */
@@ -806,7 +897,9 @@ export class LlmProbe {
    * request finishes, so per-poll counter deltas are 0 mid-request and spike at
    * completion. While requests are active the live tiles therefore use oMLX's
    * own rolling `avg_generation_tps` / `avg_prefill_tps`; idle reads 0.
-   * Counters still feed the running totals.
+   * With an API key the admin activity feed then replaces those averages with
+   * live per-request rates (`_applyOmlxActivity`). Counters still feed the
+   * running totals.
    * @param {Record<string, unknown>} st
    */
   _applyOmlxStatus(st) {
@@ -1866,10 +1959,10 @@ export class LlmProbe {
     return key || null;
   }
 
-  async _fetch(url) {
-    const headers = {};
+  async _fetch(url, { method = "GET", headers = {}, body } = {}) {
+    const merged = { ...headers };
     const apiKey = this._apiKey();
-    if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
-    return fetch(url, { signal: AbortSignal.timeout(LLM_PROBE_TIMEOUT_MS), headers });
+    if (apiKey) merged.Authorization = `Bearer ${apiKey}`;
+    return fetch(url, { method, body, signal: AbortSignal.timeout(LLM_PROBE_TIMEOUT_MS), headers: merged });
   }
 }
