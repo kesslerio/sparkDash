@@ -909,13 +909,15 @@ input[type="checkbox"] {
 .occupancy-row.is-generating .occupancy-dot {
   background: var(--color-success);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-success) 22%, transparent);
-  animation: occupancy-live 1.8s ease-out infinite;
+  animation: occupancy-pulse 1.4s ease-in-out infinite;
 }
 .occupancy-row.is-recent .occupancy-dot {
   background: var(--color-success);
+  animation: occupancy-pulse-subtle 2.4s ease-in-out infinite;
 }
 .occupancy-row.is-warm .occupancy-dot {
   background: var(--color-accent);
+  animation: occupancy-pulse-dim 4s ease-in-out infinite;
 }
 .occupancy-row.is-idle .occupancy-dot {
   background: var(--color-muted);
@@ -958,18 +960,42 @@ input[type="checkbox"] {
   color: var(--color-muted);
 }
 
-@keyframes occupancy-live {
+@keyframes occupancy-pulse {
   0%,
   100% {
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-success) 22%, transparent);
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-success) 40%, transparent);
+    transform: scale(1);
   }
   50% {
-    box-shadow: 0 0 0 5px color-mix(in srgb, var(--color-success) 8%, transparent);
+    box-shadow: 0 0 0 5px color-mix(in srgb, var(--color-success) 6%, transparent);
+    transform: scale(1.25);
+  }
+}
+
+@keyframes occupancy-pulse-subtle {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+@keyframes occupancy-pulse-dim {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.7;
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .occupancy-row.is-generating .occupancy-dot {
+  .occupancy-row.is-generating .occupancy-dot,
+  .occupancy-row.is-recent .occupancy-dot,
+  .occupancy-row.is-warm .occupancy-dot {
     animation: none;
   }
 }
