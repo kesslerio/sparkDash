@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback, type CSSProperties } from "react";
-import type { SparkSnapshot } from "../../api/types";
+import { useState, useEffect, useCallback, useMemo, type CSSProperties } from "react";
+import type { ConversationRow, SparkSnapshot } from "../../api/types";
 import { isLlmMonitoringEnabled } from "../../api/sparkRole";
 import { updateSpark, refreshSparkMetric, addLlmPort, removeLlmPort } from "../../api/client";
 import { SparkHeader } from "./SparkHeader";
@@ -21,6 +21,8 @@ interface SparkPageProps {
   benchShareImage?: boolean;
   onEdit?: () => void;
 }
+
+const EMPTY_CONVERSATIONS: ConversationRow[] = [];
 
 const SECTION_OPEN_KEYS = {
   resources: "sparkdash.ui.section.resources",
@@ -119,6 +121,16 @@ export function SparkPage({
     });
   }, []);
 
+  const conversationsByPort = useMemo(() => {
+    const byPort = new Map<number, ConversationRow[]>();
+    for (const row of spark.conversations ?? []) {
+      const list = byPort.get(row.port);
+      if (list) list.push(row);
+      else byPort.set(row.port, [row]);
+    }
+    return byPort;
+  }, [spark.conversations]);
+
   // Sync when spark data changes (WS push)
   useEffect(() => {
     setDisabledDevices(spark.disabledDevices || []);
@@ -212,6 +224,7 @@ export function SparkPage({
         sparkId={spark.id}
         sparkName={spark.name}
         llmPort={port}
+        conversations={conversationsByPort.get(port) ?? EMPTY_CONVERSATIONS}
         llmPorts={llmPorts}
         hasApiKey={Boolean(spark.llmApiKeyPorts?.includes(port))}
         shareImage={benchShareImage}
@@ -249,6 +262,8 @@ export function SparkPage({
               <GpuPanel
                 gpu={metrics.gpu}
                 sparkId={spark.id}
+                llmPort={primaryPort}
+                conversations={conversationsByPort.get(primaryPort) ?? EMPTY_CONVERSATIONS}
                 temperatureUnit={temperatureUnit}
               />
               {/* grow: fill the gap so the left column's bottom aligns with the right */}

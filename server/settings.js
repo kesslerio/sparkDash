@@ -35,6 +35,8 @@ const DEFAULTS = Object.freeze({
    * does not want it can turn it off here (see the README's settings table).
    */
   benchShareImage: true,
+  /** Hide occupancy sessions older than this many hours. 0 = show all. */
+  occupancyMaxAgeHours: 12,
 });
 
 /** @type {typeof DEFAULTS} */
@@ -66,6 +68,10 @@ function _clampSettings(settings) {
   // Ensure density is valid
   if (s.density !== "comfortable" && s.density !== "compact") {
     s.density = DEFAULTS.density;
+  }
+  // Ensure occupancyMaxAgeHours is a non-negative number
+  if (typeof s.occupancyMaxAgeHours !== "number" || s.occupancyMaxAgeHours < 0) {
+    s.occupancyMaxAgeHours = DEFAULTS.occupancyMaxAgeHours;
   }
   return s;
 }

@@ -1,5 +1,5 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from "react";
-import type { LlmMetrics, LlmBenchTarget } from "../../api/types";
+import { useState, useEffect, useRef, useCallback, useMemo, type ReactNode } from "react";
+import type { ConversationRow, LlmBenchTarget, LlmMetrics } from "../../api/types";
 import { setLlmApiKey, updateLlmPort, updateLlmPorts } from "../../api/client";
 import { Sparkline } from "../ui/Sparkline";
 import { Panel } from "../ui/Panel";
@@ -11,6 +11,8 @@ import {
 } from "../../hooks/metricsStore";
 import { BenchmarkDialog } from "./BenchmarkDialog";
 import { PrefillBenchDialog } from "./PrefillBenchDialog";
+import { ConversationList } from "./ConversationList";
+import { SessionSourcesSettings } from "../SessionSourcesSettings";
 import { LlmDailyChart } from "./LlmDailyChart";
 import { LlmTokenTotals } from "./LlmTokenTotals";
 import { parseLlmTargetInput } from "../../shared/llmTarget.js";
@@ -22,6 +24,7 @@ interface LlmPanelProps {
   /** Unit display name — lands on the benchmark share card. */
   sparkName?: string;
   llmPort: number;
+  conversations?: ConversationRow[];
   llmPorts?: number[];
   hasApiKey?: boolean;
   /** Show "Copy image" in the benchmark dialogs (Settings, off by default). */
@@ -292,6 +295,23 @@ function BackendBadge({ backend }: { backend: string | null }) {
   );
 }
 
+function LlmOperate({
+  conversations,
+  onAddHarness,
+  children,
+}: {
+  conversations: ConversationRow[];
+  onAddHarness?: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <div className="llm-operate">
+      <div className="llm-operate-metrics space-y-3">{children}</div>
+      <ConversationList conversations={conversations} onAddHarness={onAddHarness} />
+    </div>
+  );
+}
+
 /** Exposure / auth posture from the unauthenticated probe (issue #17). */
 function PostureBadge({
   posture,
@@ -387,6 +407,7 @@ export function LlmPanel({
   sparkId,
   sparkName,
   llmPort,
+  conversations = [],
   llmPorts,
   hasApiKey = false,
   shareImage = false,
@@ -409,6 +430,8 @@ export function LlmPanel({
   const cachedPrefillAvg = useMemo(() => avgPositive(cachedFull), [cachedFull]);
   const uncachedPrefillAvg = useMemo(() => avgPositive(uncachedFull), [uncachedFull]);
   const [showSettings, setShowSettings] = useState(false);
+  const [focusOccupancy, setFocusOccupancy] = useState(false);
+  const occupancySettingsRef = useRef<HTMLDivElement>(null);
   const [portDraft, setPortDraft] = useState(String(llmPort));
   const [apiKeyDraft, setApiKeyDraft] = useState("");
   const [clearApiKey, setClearApiKey] = useState(false);
@@ -476,6 +499,17 @@ export function LlmPanel({
   const portInvalid = portDraft.trim() !== "" && parsedPort === null;
   const apiKeyDirty = apiKeyDraft.trim() !== "" || clearApiKey;
   const settingsDirty = portDirty || apiKeyDirty;
+
+  const openHarnessSettings = useCallback(() => {
+    setFocusOccupancy(true);
+    setShowSettings(true);
+  }, []);
+
+  useEffect(() => {
+    if (!showSettings || !focusOccupancy) return;
+    occupancySettingsRef.current?.scrollIntoView({ block: "nearest" });
+    setFocusOccupancy(false);
+  }, [showSettings, focusOccupancy]);
 
   const handleSaveSettings = async () => {
     if (parsedPort === null) {
@@ -564,9 +598,10 @@ export function LlmPanel({
       }
     >
       {showSettings ? (
-        <div className="space-y-3">
+        <div className="max-h-[70vh] space-y-3 overflow-y-auto pr-1">
           <p className="text-[10px] text-muted">
-            HTTP port of the LLM server on this Spark (vLLM / llama.cpp / sglang / ds4 / EXL3 / OpenAI-compatible gateway).
+            HTTP port of the LLM server on this Spark (vLLM / llama.cpp / sglang / ds4 / EXL3 / OpenAI-compatible gateway). Occupancy
+            sources below are dashboard-wide and save separately.
           </p>
           <label className="block space-y-1">
             <span className="text-xs text-muted">Port</span>
@@ -652,38 +687,43 @@ export function LlmPanel({
               disabled={saving || portInvalid || !settingsDirty}
               className="rounded bg-accent px-2 py-1 text-[10px] font-medium text-white hover:bg-accent-hover disabled:opacity-50"
             >
-              {saving ? "Saving…" : "Save"}
+              {saving ? "Saving…" : "Save port"}
             </button>
+          </div>
+          <div ref={occupancySettingsRef}>
+            <SessionSourcesSettings />
           </div>
         </div>
       ) : !available ? (
-        <div className="space-y-3">
-          <div className="flex flex-wrap items-center gap-2 py-1">
-            {llm?.posture ? (
-              <PostureBadge posture={llm.posture} />
-            ) : (
-              <span className="h-1.5 w-1.5 rounded-full bg-muted" />
-            )}
-            <p className="text-xs text-muted">
-              {llm?.posture?.auth === "protected"
-                ? `${llm.posture.label} on :${llmPort}`
-                : `No model loaded on :${llmPort}`}
-            </p>
+        <LlmOperate conversations={conversations} onAddHarness={openHarnessSettings}>
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center gap-2 py-1">
+              {llm?.posture ? (
+                <PostureBadge posture={llm.posture} />
+              ) : (
+                <span className="h-1.5 w-1.5 rounded-full bg-muted" />
+              )}
+              <p className="text-xs text-muted">
+                {llm?.posture?.auth === "protected"
+                  ? `${llm.posture.label} on :${llmPort}`
+                  : `No model loaded on :${llmPort}`}
+              </p>
+            </div>
+            <LlmLaunchers
+              sparkId={sparkId}
+              llmPort={llmPort}
+              modelId={llm?.modelId}
+              onDecode={openLocalDecode}
+              onPrefill={openLocalPrefill}
+              onRemoteDecode={openRemoteDecode}
+              onRemotePrefill={openRemotePrefill}
+            />
+            <LlmDailyChart sparkId={sparkId} llmPort={llmPort} />
+            <LlmTokenTotals sparkId={sparkId} llmPort={llmPort} />
           </div>
-          <LlmLaunchers
-            sparkId={sparkId}
-            llmPort={llmPort}
-            modelId={llm?.modelId}
-            onDecode={openLocalDecode}
-            onPrefill={openLocalPrefill}
-            onRemoteDecode={openRemoteDecode}
-            onRemotePrefill={openRemotePrefill}
-          />
-          <LlmDailyChart sparkId={sparkId} llmPort={llmPort} />
-          <LlmTokenTotals sparkId={sparkId} llmPort={llmPort} />
-        </div>
+        </LlmOperate>
       ) : (
-        <div className="space-y-3">
+        <LlmOperate conversations={conversations} onAddHarness={openHarnessSettings}>
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
             <BackendBadge backend={llm?.backend ?? null} />
             {llm?.posture && <PostureBadge posture={llm.posture} />}
@@ -1006,7 +1046,7 @@ export function LlmPanel({
             onRemotePrefill={openRemotePrefill}
           />
           <LlmTokenTotals sparkId={sparkId} llmPort={llmPort} />
-        </div>
+        </LlmOperate>
       )}
 
       <BenchmarkDialog
