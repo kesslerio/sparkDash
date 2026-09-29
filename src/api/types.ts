@@ -305,6 +305,12 @@ export interface UnifiedMemoryMetrics {
 // ─── LLM metrics ─────────────────────────────────────────
 export interface LlmMetrics {
   available: boolean;
+  /** Truthful current telemetry state; unavailable is not the same as idle. */
+  status?: "active" | "idle" | "unknown" | "stale" | "unavailable" | "ambiguous_model";
+  /** Epoch milliseconds for the last fresh observation, or null when never observed. */
+  lastObservedAt?: number | null;
+  /** Human-readable reason for unknown/stale/unavailable/ambiguous telemetry. */
+  statusReason?: string | null;
   backend: "vllm" | "llama.cpp" | "sglang" | "ds4" | "exl3" | "q27" | "tensorfold" | null;
   modelId: string | null;
   modelPath: string | null;
@@ -317,20 +323,28 @@ export interface LlmMetrics {
   gpuMemoryUtilization: number | null;
   slotsActive: number;
   slotsTotal: number;
-  generationTps: number;
-  prefillTps: number;
+  generationTps: number | null;
+  prefillTps: number | null;
   /** Live cached-prefill tok/s when the backend splits kinds (ds4, llama.cpp, sglang). */
   cachedPrefillTps?: number | null;
   /** Live uncached/computed prefill tok/s when split is available. */
   uncachedPrefillTps?: number | null;
   /** Cumulative total output (generation) tokens as reported by the LLM server */
-  totalOutputTokens: number;
+  totalOutputTokens: number | null;
   /** Cumulative cached (prefix-cache served) prompt tokens. null when the backend does not expose the split. */
-  totalCachedTokens: number | null;
+  totalCachedTokens?: number | null;
   /** Cumulative total prompt (prefill) tokens as reported by the LLM server. null when the backend does not expose it. */
-  totalPromptTokens: number | null;
+  totalPromptTokens?: number | null;
+  /** Cumulative completed requests reported by the engine, when available. */
+  completedRequestsTotal?: number | null;
+  /** Direct endpoint or Mama telemetry relay. */
+  telemetrySource?: "direct" | "relay" | null;
   /** vLLM KV cache usage fraction (0–1). null when backend !== vllm or unreachable. */
   kvCacheUsage?: number | null;
+  /** vLLM engine-reported total KV cache token pool. */
+  kvCacheCapacityTokens?: number | null;
+  /** vLLM engine-reported theoretical max concurrency at configured model length. */
+  kvCacheMaxConcurrency?: number | null;
   /** vLLM running request count. null when unavailable. */
   requestsRunning?: number | null;
   /** vLLM waiting request count. null when unavailable. */
@@ -375,6 +389,42 @@ export interface LlmDailyResponse {
   sparkId: string;
   port: number;
   days: LlmDailyDay[];
+}
+
+export interface LlmTelemetryPoint {
+  /** Start of the ten-second bucket, milliseconds since epoch. */
+  t: number;
+  available: boolean;
+  status?: "active" | "idle" | "unknown" | "stale" | "unavailable" | "ambiguous_model";
+  lastObservedAt?: number | null;
+  statusReason?: string | null;
+  modelId?: string | null;
+  telemetrySource?: "direct" | "relay" | null;
+  backend: string | null;
+  generationTps: number | null;
+  prefillTps: number | null;
+  totalPromptTokens?: number | null;
+  totalOutputTokens?: number | null;
+  completedRequestsTotal?: number | null;
+  requestsRunning: number | null;
+  requestsWaiting: number | null;
+  kvCacheUsage: number | null;
+  ttftP95Seconds: number | null;
+  e2eP95Seconds: number | null;
+  itlP95Seconds: number | null;
+  preemptionsTotal: number | null;
+  prefixCacheHitRate: number | null;
+  mtpAcceptanceRate: number | null;
+  kvCacheCapacityTokens: number | null;
+  kvCacheMaxConcurrency: number | null;
+}
+
+export interface LlmTelemetryResponse {
+  sparkId: string;
+  port: number;
+  bucketSeconds: number;
+  retentionHours: number;
+  points: LlmTelemetryPoint[];
 }
 
 /** Security posture badge payload from LlmProbe. */

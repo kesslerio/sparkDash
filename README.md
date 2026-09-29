@@ -56,6 +56,7 @@ It also supports **non-Spark units**: any Linux machine with an NVIDIA GPU (e.g.
 - **TensorFold** ([ashhart/TensorFold](https://github.com/ashhart/TensorFold)) is detected from `/v1/models` (`owned_by: tensorfold`) and labeled on the LLM card and Overview. Live tok/s reads cumulative token totals from `/health` when the server publishes them; stock TensorFold does not yet, so it shows 0 tok/s until it does. Benches and the showcase work as on any OpenAI-compatible server.
 - **q27 backend**, **custom prefill size**, **remote-Spark benches** over an SSH tunnel, an on-demand **Remote** bench host, **hide worker nodes**, and a **share-as-image** card for bench results.
 - Fixes for the decode-bench request quota and 24×/32× budget, long prefills dying at ~5 min, SGLang prefill latching, `SPARKDASH_TOKEN` in compose, Tailscale address classification, and remote SSH session churn.
+- **Forensic LLM telemetry** — restart-safe 10-second availability, queue, KV, latency, cache, speculation, and throughput samples retained for seven days in `config/llm-telemetry.json`, with a small recovery journal compacted hourly.
 
 Full history: [CHANGELOG.md](./CHANGELOG.md)
 
@@ -262,6 +263,10 @@ ssh -N -L 5555:127.0.0.1:5555 user@sparkdash-host
 
 Then open `http://127.0.0.1:5555` on that computer. For shared access, use an authenticated TLS reverse proxy, Tailscale Serve, or set `BIND_HOST=0.0.0.0` **and** `SPARKDASH_TOKEN`. Direct LAN bind without a token fails closed. Previous `http://<host-ip>:5555` installs must migrate.
 
+The current John deployment is published at
+**http://100.120.26.16:5556** on the tailnet. The container still listens on its
+internal default port `5555`; `:5556` is the host-facing mapping.
+
 For development with Docker (source-mounted, HMR):
 ```bash
 docker compose -f docker-compose.dev.yml up --build
@@ -370,6 +375,7 @@ sparkDash/
 | GET | `/api/sparks/:id/llm/daily` | Daily busy decode/prefill tok/s (`port`, `days`) |
 | POST | `/api/sparks/:id/llm/bench` | Start decode benchmark (202); poll/cancel/clear on the same path |
 | POST | `/api/sparks/:id/llm/prefill-bench` | Start prefill + TTFT context sweep (202); poll/cancel/clear on the same path |
+| GET | `/api/sparks/:id/llm/telemetry` | Ten-second forensic LLM telemetry (`port`, `hours`, up to 168) |
 | GET | `/api/settings` | Global settings |
 | PUT | `/api/settings` | Update global settings |
 | GET | `/api/session-sources` | Occupancy attaches (tokens redacted) |
@@ -404,6 +410,32 @@ Gear icon in the header, or `GET`/`PUT` `/api/settings`:
 | Hide worker nodes | false | Hide Worker-role Sparks from Overview and the tab bar |
 | Temperature unit | Celsius | Display GPU temperature in °C or °F |
 | Benchmark share image | true | Decode/prefill **Copy results** becomes a split button: the label copies the text summary, the caret offers **Copy as text** / **Copy as image** on hover or click. Turn it off to keep the plain button. The image copies where the page has an image clipboard (HTTPS or localhost); over plain http on a LAN IP the card downloads instead |
+
+### Separate request and telemetry ports
+
+An LLM may expose user requests through one port while a private relay exposes
+model residency and Prometheus telemetry through another. Add an optional
+server-side mapping to that Spark's `config/sparks.json` entry:
+
+```json
+{
+  "id": "mama",
+  "llmPorts": [4000],
+  "llmTelemetryPorts": { "4000": 9341 }
+}
+```
+
+The request port remains the source for benchmark/showcase completions and its
+configured API key. The mapped port is used only for `/v1/models` and
+`/metrics`; the active model is the one explicitly marked loaded by that
+telemetry source. If a router advertises several models without identifying a
+loaded one, sparkDash shows the catalog as ambiguous and does not guess a
+benchmark target. Older entries without `llmTelemetryPorts` continue to use
+the request port for both paths.
+
+For the current Mama setup, port `4000` is the user-facing Kalliope route and
+port `9341` is the Tailscale-only, bearer-protected telemetry relay. The relay
+returns no cached metrics after its backend disappears.
 
 ### Environment variables
 
@@ -591,7 +623,7 @@ Each configured LLM port gets its own `LlmProbe` instance running in parallel. P
 - **TensorFold** (ashhart/TensorFold) — `/v1/models` (`owned_by: tensorfold`). It has no `/metrics`, and the CUDA server's `/health` is just `{ok: true}`, so live tok/s appears only when `/health` publishes cumulative `prompt_tokens_total` / `completion_tokens_total` (same contract as EXL3); otherwise the card shows the model and 0 tok/s. Decode/prefill benches and the showcase work regardless.
 - **vLLM / sglang** — `/v1/models`; sglang via `/server_info` (`last_gen_throughput` when metrics off; `/get_server_info` fallback), vLLM via Prometheus `/metrics` counters (scientific notation supported)
 
-Rates are derived from per-probe cumulative counter diffs (or SGLang sticky throughput while it moves). Multiple ports can be added or removed at runtime without restarting the monitor.
+Rates are derived from per-probe cumulative counter diffs (or SGLang sticky throughput while it moves). A rate of `0` means fresh telemetry proved the engine idle; stale, unavailable, ambiguous, and model-mismatched telemetry remains nullable and is shown as `—` with a reason. The dashboard also retains seven days of ten-second forensic points, including model and status fields, and reads older point files without migration downtime. Multiple ports can be added or removed at runtime without restarting the monitor.
 
 Live probes still use the LAN IP on remote units. **Decode and prefill benches** try that same HTTP target first; if it is closed they open an SSH local-forward onto the remote’s `127.0.0.1` so loopback-bound servers (ds4 `start.sh` default) can still be measured. The tunnel is torn down when the job finishes or is cancelled.
 

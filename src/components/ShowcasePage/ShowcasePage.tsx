@@ -11,6 +11,7 @@ import {
 import type {
   ShowcaseHistorySummary,
   ShowcaseSessionState,
+  LlmMetrics,
   SparkConfig,
 } from "../../api/types";
 import { isLlmMonitoringEnabled } from "../../api/sparkRole";
@@ -338,11 +339,23 @@ export function ShowcasePage({ sparkId }: ShowcasePageProps) {
         if (cancelled) return;
         const llmList = Array.isArray(snap?.metrics?.llm) ? snap.metrics.llm : [];
         const portIndex = ports.indexOf(port);
+        const activeModel = (metrics: LlmMetrics | null | undefined) => {
+          if (!metrics) return null;
+          const status = metrics.status;
+          const legacySingle =
+            status == null &&
+            metrics.available === true &&
+            (!Array.isArray(metrics.models) || metrics.models.length <= 1);
+          if (status !== "active" && status !== "idle" && !legacySingle) return null;
+          const id = metrics.benchmarkModel ?? metrics.modelId;
+          return typeof id === "string" && id.trim() && !/^\d+ models$/.test(id.trim())
+            ? id.trim()
+            : null;
+        };
         const llm =
           (portIndex >= 0 ? llmList[portIndex] : null) ||
-          llmList.find((m) => m?.available && m?.modelId) ||
-          llmList[0];
-        const id = llm?.modelId?.trim() || null;
+          (portIndex < 0 ? llmList[0] : null);
+        const id = activeModel(llm);
         if (id) setModelId(id);
       })
       .catch(() => {

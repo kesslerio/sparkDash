@@ -15,6 +15,8 @@ config/llm-token-totals.json
 config/llm-token-totals.json.*
 config/fleet-energy.json
 config/.fleet-energy.json.*.tmp
+config/llm-telemetry.json
+config/llm-telemetry.json.journal
 config/gpu-memory.json
 config/gpu-memory.json.*
 config/bench-exports/
@@ -32,3 +34,4 @@ HANDOFF-HERMES.md
 handoff.md
 test/
 .context/compound-engineering/
+.worktrees/

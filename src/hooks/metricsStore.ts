@@ -144,8 +144,14 @@ export function ingestSnapshots(sparks: SparkSnapshot[], at = Date.now()): void 
         const llm = m.llm[i];
         const port = ports[i];
         const portKey = port != null ? `:${port}` : `:${i}`;
-        pushHistory(`${s.id}:llm${portKey}.tps`, llm.generationTps, at);
-        pushHistory(`${s.id}:llm${portKey}.prefill`, llm.prefillTps, at);
+        // Null means the source is stale/unavailable/ambiguous. Never turn it
+        // into a fake zero in the chart; zero is reserved for fresh idle data.
+        if (llm.generationTps != null && Number.isFinite(llm.generationTps)) {
+          pushHistory(`${s.id}:llm${portKey}.tps`, llm.generationTps, at);
+        }
+        if (llm.prefillTps != null && Number.isFinite(llm.prefillTps)) {
+          pushHistory(`${s.id}:llm${portKey}.prefill`, llm.prefillTps, at);
+        }
         // TTFT is sparse: vLLM reports live TTFT only while serving. It is NOT
         // index-aligned with the tick-dense series above — that is fine because
         // the ttft series feeds only the busy-sample average badge, never the

@@ -9,6 +9,7 @@ import { ComfyProbe } from "../collectors/ComfyProbe.js";
 import { HermesProbe } from "../collectors/HermesProbe.js";
 import { TailscaleProbe } from "../collectors/TailscaleProbe.js";
 import { llmDaily } from "../collectors/LlmDaily.js";
+import { llmTelemetry } from "../collectors/LlmTelemetry.js";
 import { sshExec } from "../collectors/ssh.js";
 import {
   POLL_INTERVAL_GPU,
@@ -78,7 +79,10 @@ export class SparkMonitor {
     this.llmProbes = new Map();
     if (this._llmMonitoringEnabled(spark)) {
       for (const port of this._llmPorts()) {
-        this.llmProbes.set(port, new LlmProbe(spark, port));
+        this.llmProbes.set(
+          port,
+          new LlmProbe(spark, port, { telemetryPort: this._llmTelemetryPort(port, spark) })
+        );
       }
     }
 
@@ -190,9 +194,13 @@ export class SparkMonitor {
       const existing = prevProbes.get(port);
       if (existing) {
         existing.spark = spark;
+        existing.setTelemetryPort(this._llmTelemetryPort(port, spark));
         this.llmProbes.set(port, existing);
       } else {
-        this.llmProbes.set(port, new LlmProbe(spark, port));
+        this.llmProbes.set(
+          port,
+          new LlmProbe(spark, port, { telemetryPort: this._llmTelemetryPort(port, spark) })
+        );
       }
     }
     if (!this._llmMonitoringEnabled()) {
@@ -422,6 +430,19 @@ export class SparkMonitor {
     const n = Number(this.spark?.llmPort);
     if (Number.isInteger(n) && n >= 1 && n <= 65535) return [n];
     return [LLM_PORT];
+  }
+
+  /**
+   * Return the optional server-side telemetry source for a request port.
+   * Invalid mappings fail closed to the request/API port.
+   */
+  _llmTelemetryPort(requestPort, spark = this.spark) {
+    const raw = spark?.llmTelemetryPorts;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return requestPort;
+    const telemetry = Number(raw[String(requestPort)] ?? raw[requestPort]);
+    return Number.isInteger(telemetry) && telemetry >= 1 && telemetry <= 65535
+      ? telemetry
+      : requestPort;
   }
 
   /** Start background polling. */
@@ -712,7 +733,10 @@ export class SparkMonitor {
             const probes = Array.from(this.llmProbes.values());
             for (let i = 0; i < result.length; i++) {
               const probe = probes[i];
-              if (probe) llmDaily.record(this.spark.id, probe.port, result[i]);
+              if (probe) {
+                llmDaily.record(this.spark.id, probe.port, result[i]);
+                llmTelemetry.record(this.spark.id, probe.port, result[i]);
+              }
             }
           }
           break;

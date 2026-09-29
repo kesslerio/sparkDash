@@ -47,6 +47,7 @@ import {
   llmTokenLedger,
 } from "./llmtokens/LlmTokenRuntime.js";
 import { closeLlmStreamAgent } from "./collectors/LlmStreaming.js";
+import { llmTelemetry } from "./collectors/LlmTelemetry.js";
 import { compareSemver, getLatestRelease } from "./collectors/HermesReleases.js";
 import { FLEET_ENERGY_JSON_PATH } from "./config.js";
 import { FleetEnergyTracker } from "./energy/FleetEnergyTracker.js";
@@ -223,6 +224,21 @@ function rejectLimited(res, message) {
   return res.status(429).json({ error: message });
 }
 
+/** Return only an explicitly active/idle model; never guess from a router catalog. */
+function activeLlmModel(metrics) {
+  if (!metrics || typeof metrics !== "object") return null;
+  const status = metrics.status;
+  const trustworthyStatus = status === "active" || status === "idle";
+  const legacySingleModel =
+    status == null && metrics.available === true && (!Array.isArray(metrics.models) || metrics.models.length <= 1);
+  if (!trustworthyStatus && !legacySingleModel) return null;
+  const model = metrics.benchmarkModel ?? metrics.modelId;
+  return typeof model === "string" && model.trim() && !/^\d+ models$/.test(model.trim())
+    ? model.trim()
+    : null;
+}
+
+// Rate-limit ephemeral + registered connectivity tests (per client IP)
 const allowTest = createRateLimiter(20, 60_000);
 const allowDestructive = createRateLimiter(10, 60_000);
 /** Decode + prefill starts per principal (retries that 400/409 do not count). */
@@ -1019,6 +1035,23 @@ app.get("/api/sparks/:id/llm/daily", (req, res) => {
   res.json(llmDaily.getSeries(spark.id, port, { days }));
 });
 
+/** Ten-second LLM telemetry buckets. Query: port, hours (1–168). */
+app.get("/api/sparks/:id/llm/telemetry", (req, res) => {
+  const spark = registry.getSpark(req.params.id);
+  if (!spark) return res.status(404).json({ error: "Spark not found" });
+  const ports =
+    Array.isArray(spark.llmPorts) && spark.llmPorts.length
+      ? spark.llmPorts
+      : [resolveLlmPort(spark)];
+  const port = req.query.port != null ? Number(req.query.port) : ports[0];
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    return res.status(400).json({ error: "Invalid port" });
+  }
+  let hours = req.query.hours != null ? Number(req.query.hours) : 24;
+  if (!Number.isFinite(hours)) hours = 24;
+  res.json(llmTelemetry.getSeries(spark.id, port, { hours }));
+});
+
 /**
  * Decode throughput benchmark (streaming, post-first-token tok/s).
  *
@@ -1071,9 +1104,8 @@ app.post("/api/sparks/:id/llm/bench", async (req, res) => {
     const portIndex = ports.indexOf(port);
     const llm =
       (portIndex >= 0 ? llmList[portIndex] : null) ||
-      llmList.find((m) => m?.available) ||
-      llmList[0];
-    modelId = llm?.modelId || null;
+      (portIndex < 0 ? llmList[0] : null);
+    modelId = activeLlmModel(llm);
   }
 
   try {
@@ -1366,9 +1398,8 @@ app.post("/api/sparks/:id/llm/showcase", (req, res) => {
     const portIndex = ports.indexOf(port);
     const llm =
       (portIndex >= 0 ? llmList[portIndex] : null) ||
-      llmList.find((m) => m?.available) ||
-      llmList[0];
-    modelId = llm?.modelId || null;
+      (portIndex < 0 ? llmList[0] : null);
+    modelId = activeLlmModel(llm);
   }
 
   try {
@@ -1797,6 +1828,11 @@ async function shutdown(signal) {
   const streamAgentClosedGracefully = await closeLlmStreamAgent();
   if (!streamAgentClosedGracefully) {
     console.warn("[sparkDash] LLM dispatcher close timed out; destroyed open sockets");
+  }
+  try {
+    llmTelemetry.flush();
+  } catch (err) {
+    console.error("[sparkDash] failed to flush LLM telemetry:", err.message);
   }
   try {
     if (broadcastTimer) {
