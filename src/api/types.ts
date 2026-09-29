@@ -7,8 +7,10 @@ export interface SparkConfig {
    * - spark: NVIDIA DGX Spark (default) — DGX Spark specs shown in the header.
    * - host: any Linux box with an NVIDIA GPU (still monitored via nvidia-smi,
    *   just not a Spark). Real hardware is auto-detected once online.
+   * - mac: an Apple Silicon Mac monitored over SSH with macOS tools
+   *   (sysctl, vm_stat, powermetrics). Always remote.
    */
-  kind?: "spark" | "host";
+  kind?: "spark" | "host" | "mac";
   lanIp: string;
   cx7Ip?: string | null;
   /**
@@ -548,8 +550,8 @@ export interface ConversationRow {
 export interface SparkSnapshot {
   id: string;
   name: string;
-  /** Unit type: spark (DGX Spark) or host (dedicated GPU Linux box). */
-  kind?: "spark" | "host";
+  /** Unit type: spark (DGX Spark), host (dedicated GPU Linux box), or mac (Apple Silicon). */
+  kind?: "spark" | "host" | "mac";
   online: boolean;
   /** Uptime in seconds, or null when offline */
   uptime: number | null;

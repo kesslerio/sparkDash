@@ -312,11 +312,12 @@ export function EditSparkDialog({
                 <label className="mb-1 block text-xs text-muted">Unit type</label>
                 <select
                   value={config.kind ?? "spark"}
-                  onChange={(e) => update({ kind: e.target.value as "spark" | "host" })}
+                  onChange={(e) => update({ kind: e.target.value as "spark" | "host" | "mac" })}
                   className="w-full rounded border border-border bg-surface-elevated px-3 py-1.5 text-xs text-text outline-none focus:border-accent"
                 >
                   <option value="spark">NVIDIA DGX Spark</option>
                   <option value="host">Dedicated GPU host (Linux, nvidia-smi, not a Spark)</option>
+                  <option value="mac">Apple Silicon Mac (macOS over SSH)</option>
                 </select>
               </div>
 
@@ -340,7 +341,7 @@ export function EditSparkDialog({
                 />
               </div>
 
-              {config.kind !== "host" && (
+              {config.kind !== "host" && config.kind !== "mac" && (
                 <div>
                   <label className="mb-1 block text-xs text-muted">CX7 IP (optional)</label>
                   <input
