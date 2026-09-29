@@ -467,14 +467,14 @@ A unit with **Unit type → Apple Silicon Mac** (`kind: "mac"`) is always remote
 | Metric | Source |
 |---|---|
 | CPU usage | `top -l 1` |
-| Unified memory (used, GPU-wired share, free), swap | `hw.memsize`, `vm_stat`, `vm.swapusage` |
+| Unified memory in use (like Activity Monitor: app + wired + compressed), GPU-wired share, free, swap | `hw.memsize`, `vm_stat`, `vm.swapusage` |
 | Disk | `df -k` on the data volume (`/System/Volumes/Data`) |
 | Network | `netstat -ib` on the default-route interface |
 | GPU busy %, GPU clock, GPU / CPU / combined power, thermal pressure | `sudo -n powermetrics` (one 0.5 s sample per poll) |
 | Uptime | `kern.boottime` |
 | Hardware header (model, chip, cores, memory) | `sysctl` |
 
-The non-privileged reads share one SSH call per poll. Metal allocations (MLX weights and KV cache) are wired memory, so the wired share is shown as the GPU part of the unified pool. There is no GPU temperature on Apple Silicon, so the GPU panel shows thermal pressure instead.
+The non-privileged reads share one SSH call per poll. Metal wires MLX weights and KV cache while a model is working, but macOS can un-wire an idle model back into ordinary app memory without freeing it, so memory in use counts app memory as well as wired pages; the wired share is reported separately. There is no GPU temperature on Apple Silicon, so the GPU panel shows thermal pressure instead.
 
 **Requirements on the Mac**
 - Remote Login (SSH) enabled, and the sparkDash host's key in the account's `authorized_keys`.
