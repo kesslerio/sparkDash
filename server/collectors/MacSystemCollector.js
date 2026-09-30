@@ -196,8 +196,7 @@ export class MacSystemCollector extends SystemCollector {
    * @param {{ exec?: typeof sshExec }} [options] exec is the SSH runner (a test seam).
    */
   constructor(spark, { exec = sshExec } = {}) {
-    super(spark);
-    this._sshExec = exec;
+    super(spark, { exec });
     /** @type {{ at: number, data: Record<string, string> } | null} */
     this._snapshotCache = null;
     /** @type {Promise<Record<string, string>> | null} */
@@ -214,7 +213,9 @@ export class MacSystemCollector extends SystemCollector {
       return this._snapshotCache.data;
     }
     if (this._snapshotInflight) return this._snapshotInflight;
-    this._snapshotInflight = this._sshExec(this.spark, SNAPSHOT_CMD)
+    // A Mac with no default route makes the trailing `[ -n "$IF" ] && ...`
+    // guard exit nonzero even though every section printed. Keep the output.
+    this._snapshotInflight = this._sshExec(this.spark, SNAPSHOT_CMD, { allowNonZeroExit: true })
       .then((out) => {
         const data = splitSections(out);
         this._snapshotCache = { at: Date.now(), data };

@@ -40,8 +40,9 @@ function tagCollectionResult(result, successful) {
  * Remote path added in Phase 3.
  */
 export class SystemCollector {
-  constructor(spark) {
+  constructor(spark, { exec = sshExec } = {}) {
     this.spark = spark;
+    this._sshExec = exec;
     this._nvidiaSmiPath = this._resolveNvidiaSmiPath();
 
     // Rate-tracking baselines
@@ -1151,7 +1152,7 @@ export class SystemCollector {
         "grep -E 'MemTotal|MemAvailable' /proc/meminfo 2>/dev/null",
       ].join("; ");
 
-      const output = await sshExec(this.spark, cmd);
+      const output = await this._sshExec(this.spark, cmd);
       const sections = output.split("---");
       const gpuOut = sections[0]?.trim() || "";
       const memFields = sections[1]?.trim() || "";
@@ -1312,7 +1313,7 @@ export class SystemCollector {
   async _getRemoteRam() {
     try {
       const cmd = "grep -E 'MemTotal|MemAvailable' /proc/meminfo 2>/dev/null";
-      const output = await sshExec(this.spark, cmd);
+      const output = await this._sshExec(this.spark, cmd);
       const totalMatch = output.match(/MemTotal:\s+(\d+)\s+kB/);
       const availMatch = output.match(/MemAvailable:\s+(\d+)\s+kB/);
       const totalKB = totalMatch ? parseInt(totalMatch[1]) : 0;
@@ -1334,7 +1335,9 @@ export class SystemCollector {
       // Include root (/); exclude pseudo filesystems via -x and type filter
       const cmd =
         "df -l -B1 -T -x tmpfs -x devtmpfs -x squashfs -x overlay -x efivarfs -x proc -x sysfs -x devpts -x cgroup -x cgroup2 2>/dev/null";
-      const output = await sshExec(this.spark, cmd);
+      // df exits nonzero when any single mount fails but still prints every
+      // healthy filesystem. Keep that table instead of dropping the panel.
+      const output = await this._sshExec(this.spark, cmd, { allowNonZeroExit: true });
       const lines = output.trim().split("\n").slice(1); // Skip header
       const disks = [];
       const disabledDevices = this.spark.disabledDevices || [];
@@ -1405,7 +1408,7 @@ export class SystemCollector {
         "for d in /sys/class/net/*/speed; do echo \"$(basename $(dirname $d)):$(cat $d 2>/dev/null)\"; done 2>/dev/null || true",
       ].join("; ");
 
-      const output = await sshExec(this.spark, cmd);
+      const output = await this._sshExec(this.spark, cmd);
       const sections = output.split("---");
       const devOut = sections[0]?.trim() || "";
       const routeOut = sections[1]?.trim() || "";
@@ -1508,7 +1511,7 @@ export class SystemCollector {
         "nvidia-smi --query-compute-apps=pid,process_name,used_gpu_memory --format=csv,noheader,nounits 2>/dev/null",
       ].join("; ");
 
-      const output = await sshExec(this.spark, cmd);
+      const output = await this._sshExec(this.spark, cmd);
       const sections = output.split("---");
       const memOut = sections[0]?.trim() || "";
       const computeOut = sections[1]?.trim() || "";
@@ -1619,7 +1622,7 @@ export class SystemCollector {
         meminfo = results[2];
         coresParsed = (cpuinfo.match(/processor\s*:/g) || []).length;
       } else {
-        const out = await sshExec(this.spark, [
+        const out = await this._sshExec(this.spark, [
           "nvidia-smi --query-gpu=name,driver_version --format=csv,noheader,nounits 2>/dev/null",
           "echo '---'",
           "grep -E '^model name' /proc/cpuinfo | head -1",
@@ -1777,7 +1780,7 @@ export class SystemCollector {
           ? await this._execOnHost(NVERR_JOURNAL_CMD)
           : await this._exec(NVERR_JOURNAL_CMD);
       } else {
-        out = await sshExec(this.spark, NVERR_JOURNAL_CMD, { timeoutMs: 8000 });
+        out = await this._sshExec(this.spark, NVERR_JOURNAL_CMD, { timeoutMs: 8000 });
       }
       const count = parseNvErrNoMemoryCount(out);
       this._nvErrCache = { count, at: now };
