@@ -520,17 +520,106 @@ test("_applySglangMetrics: cached_tokens_total vs prompt_tokens_total", () => {
     [
       "sglang:generation_tokens_total 30",
       "sglang:prompt_tokens_total 140",
-      'sglang:cached_tokens_total{cache_source="device"} 80',
-      'sglang:cached_tokens_total{cache_source="host"} 80',
+      'sglang:cached_tokens_total{cache_source="device"} 70',
+      'sglang:cached_tokens_total{cache_source="host"} 70',
       "sglang:num_running_reqs 1",
     ].join("\n") + "\n",
     2
   );
   assert.equal(probe.generationTps, 10); // (30-10)/2
-  assert.equal(probe.prefillTps, 20); // (140-100)/2
-  assert.equal(probe.uncachedPrefillTps, 20);
+  // SGLang's prompt counter includes cache-served tokens: computed is
+  // prompt − cached, so (140-70) − (100-40) = 10 over 2s.
+  assert.equal(probe.prefillTps, 5);
+  assert.equal(probe.uncachedPrefillTps, 5);
   // device L1 only — do not sum HiCache host/storage layers
-  assert.equal(probe.cachedPrefillTps, 20); // (80-40)/2
+  assert.equal(probe.cachedPrefillTps, 15); // (70-40)/2
+  assert.equal(probe.prefixCacheHitRate, 0.5); // 70 / (70 + 70)
+});
+
+test("_applySglangMetrics: realtime_tokens_total drives live decode and computed prefill", () => {
+  const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 30000);
+  const body = (c) =>
+    [
+      `sglang:generation_tokens_total ${c.gen}`,
+      `sglang:prompt_tokens_total ${c.prompt}`,
+      `sglang:cached_tokens_total{cache_source="device"} ${c.cached}`,
+      `sglang:realtime_tokens_total{mode="decode"} ${c.rtDecode}`,
+      `sglang:realtime_tokens_total{mode="prefill_compute"} ${c.rtCompute}`,
+      `sglang:realtime_tokens_total{mode="prefill_cache"} ${c.rtCache}`,
+      `sglang:num_running_reqs ${c.running}`,
+      // The log-interval gauge lags the live counters; it must not win.
+      "sglang:gen_throughput 5.5",
+    ].join("\n") + "\n";
+
+  // First sample seeds every baseline (no rate yet).
+  probe._applySglangMetrics(
+    body({ gen: 100, prompt: 1000, cached: 400, rtDecode: 10_000, rtCompute: 500, rtCache: 4000, running: 1 }),
+    2
+  );
+  assert.equal(probe.generationTps, 0);
+  assert.equal(probe.prefillTps, 0);
+
+  // Live window: 160 decoded, 40 computed prefill, 400 cache-served in 2s.
+  // generation_tokens_total stays flat — SGLang only credits it at completion.
+  probe._applySglangMetrics(
+    body({ gen: 100, prompt: 1440, cached: 800, rtDecode: 10_160, rtCompute: 540, rtCache: 4400, running: 1 }),
+    2
+  );
+  assert.equal(probe.generationTps, 80); // (10160-10000)/2, not the 5.5 gauge
+  assert.equal(probe.prefillTps, 20); // (540-500)/2 computed only
+  assert.equal(probe.uncachedPrefillTps, 20);
+  assert.equal(probe.cachedPrefillTps, 200); // (4400-4000)/2
+  assert.equal(probe.prefixCacheHitRate, 0.8907); // 4400 / (4400 + 540)
+
+  // Idle: counters frozen, nothing running → every rate clears.
+  probe._applySglangMetrics(
+    body({ gen: 260, prompt: 1440, cached: 800, rtDecode: 10_160, rtCompute: 540, rtCache: 4400, running: 0 }),
+    2
+  );
+  assert.equal(probe.generationTps, 0);
+  assert.equal(probe.prefillTps, 0);
+  assert.equal(probe.cachedPrefillTps, 0);
+  assert.equal(probe.uncachedPrefillTps, 0);
+});
+
+test("_setPrefillSplitRates: switching split source re-seeds instead of differencing", () => {
+  const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 30000);
+  probe._setPrefillSplitRates(400, 100, 2, "realtime");
+  probe._setPrefillSplitRates(440, 120, 2, "realtime");
+  assert.equal(probe.cachedPrefillTps, 20); // (440-400)/2
+  assert.equal(probe.uncachedPrefillTps, 10); // (120-100)/2
+  // A different source counts different series: the first sample seeds.
+  probe._setPrefillSplitRates(800, 60, 2, "cumulative");
+  assert.equal(probe.cachedPrefillTps, 0);
+  assert.equal(probe.uncachedPrefillTps, 0);
+  probe._setPrefillSplitRates(900, 80, 2, "cumulative");
+  assert.equal(probe.cachedPrefillTps, 50);
+  assert.equal(probe.uncachedPrefillTps, 10);
+  assert.equal(probe.prefixCacheHitRate, 0.9184); // 900 / (900 + 80)
+});
+
+test("_applySglangMetrics: a missing cache counter falls back to the prompt delta", () => {
+  const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 30000);
+  const sample = (cached) =>
+    [
+      `sglang:generation_tokens_total ${cached.gen}`,
+      `sglang:prompt_tokens_total ${cached.prompt}`,
+      ...(cached.cached == null
+        ? []
+        : [`sglang:cached_tokens_total{cache_source="device"} ${cached.cached}`]),
+      "sglang:num_running_reqs 1",
+    ].join("\n") + "\n";
+
+  probe._applySglangMetrics(sample({ gen: 10, prompt: 100, cached: 40 }), 2);
+  probe._applySglangMetrics(sample({ gen: 30, prompt: 140, cached: 70 }), 2);
+  assert.equal(probe.prefillTps, 5); // computed (140-70)-(100-40)=10 over 2s
+
+  // The cache counter disappears: the split clears and the prompt delta owns
+  // the prefill rate again instead of a stale uncached value.
+  probe._applySglangMetrics(sample({ gen: 50, prompt: 200, cached: null }), 2);
+  assert.equal(probe.cachedPrefillTps, null);
+  assert.equal(probe.uncachedPrefillTps, null);
+  assert.equal(probe.prefillTps, 30); // (200-140)/2
 });
 
 test("SGLang gen_throughput is the live rate while generation_tokens_total is flat", () => {
@@ -669,6 +758,103 @@ test("probe: first SGLang poll seeds the prompt baseline, not a lifetime spike (
   const snap = await probe.probe(); // idle engine, counters unchanged
   assert.equal(snap.prefillTps, 0); // not lifetimePrompt / dtSec = 114000
   assert.equal(snap.generationTps, 0);
+});
+
+/**
+ * Relay-shaped SGLang (mama behind its telemetry relay): only /v1/models and
+ * /metrics answer — no /server_info, no /v1/loads — and the exposition carries
+ * the per-step realtime_tokens_total counters.
+ */
+function sglangRelayProbe(state) {
+  const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 4000, { telemetryPort: 9341 });
+  probe.serverIsOpenAI = true;
+  probe.backendType = "sglang";
+  probe.authOpen = true;
+  probe._lastDetectAt = Date.now();
+  probe._fetch = async (url) => {
+    const u = String(url);
+    if (u.endsWith("/v1/models")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          data: [
+            { id: "qwen3.8-27b-sglang", owned_by: "sglang", status: "loaded" },
+            { id: "ornith-1.5:35b", owned_by: "mama-telemetry-relay", status: "unloaded" },
+          ],
+        }),
+        text: async () => "",
+      };
+    }
+    if (u.endsWith("/metrics")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({}),
+        text: async () =>
+          [
+            `sglang:generation_tokens_total ${state.gen}`,
+            `sglang:prompt_tokens_total ${state.prompt}`,
+            `sglang:cached_tokens_total{cache_source="device"} ${state.cached}`,
+            `sglang:realtime_tokens_total{mode="decode"} ${state.rtDecode}`,
+            `sglang:realtime_tokens_total{mode="prefill_compute"} ${state.rtCompute}`,
+            `sglang:realtime_tokens_total{mode="prefill_cache"} ${state.rtCache}`,
+            `sglang:num_running_reqs ${state.running}`,
+            "sglang:gen_throughput 5.5",
+          ].join("\n") + "\n",
+      };
+    }
+    return { ok: false, status: 404, json: async () => ({}), text: async () => "" };
+  };
+  return probe;
+}
+
+test("probe: relay-shaped SGLang reports live decode/prefill and a true cache hit rate", async () => {
+  const state = {
+    gen: 828_799,
+    prompt: 160_021_629,
+    cached: 157_007_826,
+    rtDecode: 1_149_533,
+    rtCompute: 6_969_741,
+    rtCache: 157_569_234,
+    running: 0,
+  };
+  const probe = sglangRelayProbe(state);
+
+  const seed = await probe.probe(); // seeds baselines; engine idle
+  assert.equal(seed.status, "idle");
+  assert.equal(seed.generationTps, 0);
+  assert.equal(seed.prefillTps, 0);
+
+  // Busy window: 160 decoded, 75 computed prefill, 7168 cache-served in 2s.
+  state.rtDecode += 160;
+  state.rtCompute += 75;
+  state.rtCache += 7168;
+  state.prompt += 7243;
+  state.cached += 7168;
+  state.running = 1;
+  probe.lastProbeTime = Date.now() - 2000;
+  const busy = await probe.probe();
+  assert.equal(busy.status, "active");
+  assert.equal(busy.generationTps, 80); // (160)/2 — live, not the lagging gauge
+  assert.equal(busy.prefillTps, 37.5); // (75)/2 computed only
+  assert.equal(busy.cachedPrefillTps, 3584); // (7168)/2
+  assert.equal(busy.uncachedPrefillTps, 37.5);
+  // 157,576,402 / (157,576,402 + 6,969,816) — not cached/(cached+prompt).
+  assert.equal(busy.prefixCacheHitRate, 0.9576);
+
+  // Engine idle again: counters frozen, nothing running.
+  state.running = 0;
+  for (const _ of [1, 2]) {
+    probe.lastProbeTime = Date.now() - 2000;
+    await probe.probe();
+  }
+  const idle = await probe.probe();
+  assert.equal(idle.status, "idle");
+  assert.equal(idle.generationTps, 0);
+  assert.equal(idle.prefillTps, 0);
+  assert.equal(idle.cachedPrefillTps, 0);
+  assert.equal(idle.uncachedPrefillTps, 0);
 });
 
 test("probe: server_info totals stay authoritative over Prometheus counters", async () => {

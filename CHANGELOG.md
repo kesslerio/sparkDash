@@ -16,6 +16,9 @@ Format: version sections are listed newest first.
   - real hardware header, and uptime from `kern.boottime`.
 - **oMLX LLM backend** — detected from `owned_by: "omlx"`. The card reads `/api/status`: loaded model, active and waiting requests, prefill and decode tok/s from oMLX's rolling averages while busy, cache efficiency, and model memory. With the port's API key set to an oMLX admin key, prefill and decode come live from oMLX's admin activity feed instead.
 
+### Fixed
+- **SGLang live decode/prefill on per-step counters** — recent SGLang builds tick `sglang:realtime_tokens_total{mode=…}` while a request runs, where `gen_throughput` and `num_running_reqs` only move on the decode log interval. Decode tok/s now reads the per-step counter's delta, so a long generation shows its real rate instead of 0 until the first log interval lands. SGLang's `prompt_tokens_total` includes cache-served tokens, so **Prefill tok/s** now reports the computed share (prompt − cached, or `mode="prefill_compute"` when the build reports it directly) and the cached/uncached split and prefix-cache hit rate match the engine's own split — a server running ~96% cache hits read 0.49 before, now 0.96. Builds without the per-step counters keep the log-interval gauge path.
+
 ---
 
 ## [1.8.9] — 2026-09-28
