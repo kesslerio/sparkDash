@@ -21,10 +21,14 @@ import { llmProbeHost } from "./llmHost.js";
 // checking PATH entries directly is faster and avoids spawning a shell.
 let _sshpassAvailable = null;
 const _multiplexStates = new Map();
+
 // Keep the private directory short even on macOS, where TMPDIR can already
 // consume most of a Unix socket's 104-byte path limit.
 const _controlDir = fs.mkdtempSync("/tmp/sparkdash-ssh-");
 const _controlSalt = crypto.randomBytes(32);
+
+/** ssh's own exit code for transport-level failures (dropped connection, auth). */
+const SSH_TRANSPORT_EXIT = 255;
 fs.chmodSync(_controlDir, 0o700);
 
 function controlPersistSeconds() {
@@ -261,8 +265,8 @@ export function sshCommandSpec(spark, opts = {}) {
  *
  * Commands like `df` exit nonzero after printing a complete table when a
  * single mount fails (a stale FUSE mount, a dead NFS share). Callers that can
- * use that output pass `allowNonZeroExit`; timeouts and spawn failures never
- * count, because those produce no trustworthy result.
+ * use that output pass `allowNonZeroExit`; timeouts, spawn failures, and ssh
+ * transport failures never count, because those produce no trustworthy result.
  *
  * @param {{ error?: (Error & { code?: number | string, killed?: boolean }) | null, stdout?: unknown, allowNonZeroExit?: boolean }} outcome
  * @returns {string | null} trimmed stdout, or null when the caller must reject
@@ -270,7 +274,17 @@ export function sshCommandSpec(spark, opts = {}) {
 export function sshExecOutcome({ error = null, stdout, allowNonZeroExit = false } = {}) {
   const out = String(stdout ?? "").trim();
   if (!error) return out;
-  if (allowNonZeroExit && out && !error.killed && typeof error.code === "number") return out;
+  // 255 is ssh's own transport-failure code (dropped connection, auth), not the
+  // remote command's status; a partial table from a dead transport is not a result.
+  if (
+    allowNonZeroExit &&
+    out &&
+    !error.killed &&
+    typeof error.code === "number" &&
+    error.code !== SSH_TRANSPORT_EXIT
+  ) {
+    return out;
+  }
   return null;
 }
 

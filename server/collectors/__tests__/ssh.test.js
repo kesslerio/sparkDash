@@ -192,3 +192,11 @@ test("sshExecOutcome: an opted-in failure with no output still rejects", () => {
   const error = Object.assign(new Error("Permission denied"), { code: 255 });
   assert.equal(sshExecOutcome({ error, stdout: "", allowNonZeroExit: true }), null);
 });
+
+test("sshExecOutcome: a transport failure never yields output even with stdout", () => {
+  const transport = Object.assign(new Error("Connection closed by remote host"), { code: 255 });
+  assert.equal(
+    sshExecOutcome({ error: transport, stdout: "partial table", allowNonZeroExit: true }),
+    null
+  );
+});
