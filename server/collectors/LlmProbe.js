@@ -270,6 +270,14 @@ export class LlmProbe {
      * @type {"server_info" | "prometheus" | null}
      */
     this._sglangTokenSource = null;
+    /** Previous `sglang:realtime_tokens_total` counts by mode; null until first sample. */
+    this._sglangRealtimeLast = null;
+    /**
+     * Counter family that seeded `lastPrefillKinds` ("realtime" | "cumulative").
+     * Different families count different series, so a switch re-seeds.
+     * @type {"realtime" | "cumulative" | null}
+     */
+    this._prefillSplitSource = null;
   }
 
   /**
@@ -290,17 +298,24 @@ export class LlmProbe {
    * @param {number|null|undefined} cachedCount
    * @param {number|null|undefined} computedCount
    * @param {number} dtSec
+   * @param {"realtime" | "cumulative" | null} [source] Counter family; a
+   *   different family re-seeds instead of differencing across two series.
    */
-  _setPrefillSplitRates(cachedCount, computedCount, dtSec) {
+  _setPrefillSplitRates(cachedCount, computedCount, dtSec, source = null) {
     if (cachedCount == null || computedCount == null || !Number.isFinite(cachedCount) || !Number.isFinite(computedCount)) {
       this.cachedPrefillTps = null;
       this.uncachedPrefillTps = null;
       this.lastPrefillKinds = null;
+      this._prefillSplitSource = null;
       return;
     }
     const total = cachedCount + computedCount;
     this.prefixCacheHitRate =
       total > 0 ? Math.round((cachedCount / total) * 10000) / 10000 : null;
+    if (source != null && source !== this._prefillSplitSource) {
+      this._prefillSplitSource = source;
+      this.lastPrefillKinds = null;
+    }
     if (this.lastPrefillKinds == null) {
       this.lastPrefillKinds = { cached: cachedCount, computed: computedCount };
       this.cachedPrefillTps = 0;
@@ -441,11 +456,13 @@ export class LlmProbe {
     this.slotState.clear();
     this.lastTokenCounts = { input: 0, output: 0 };
     this.lastPrefillKinds = null;
+    this._prefillSplitSource = null;
     this.lastTtftSum = null;
     this.lastTtftCount = null;
     this.lastIterSum = null;
     this._sglangStickyTps = null;
     this._sglangLoadGenTps = null;
+    this._sglangRealtimeLast = null;
     this.totalPromptTokens = null;
     this.totalOutputTokens = 0;
     this.completedRequestsTotal = null;
@@ -1817,6 +1834,45 @@ export class LlmProbe {
   }
 
   /**
+   * Per-step token counters (`sglang:realtime_tokens_total{mode=...}`) on
+   * recent builds. Unlike the log-interval gauges (gen_throughput,
+   * num_running_reqs) they tick while the request runs, so their deltas are the
+   * live decode / prefill rates, and prefill_compute vs prefill_cache is the
+   * computed vs cache-served split. Max, not sum: tensor-parallel ranks repeat
+   * the same counter.
+   * @param {string} txt
+   * @param {number} dtSec
+   * @returns {{ counts: Record<string, number|null>, rates: Record<string, number|null> }}
+   */
+  _sglangRealtimeRates(txt, dtSec) {
+    const count = (mode) =>
+      this._getPromMetricMax(txt, "sglang:realtime_tokens_total", "mode", mode);
+    const counts = {
+      decode: count("decode"),
+      prefillCompute: count("prefill_compute"),
+      prefillCache: count("prefill_cache"),
+    };
+    if (counts.decode == null && counts.prefillCompute == null && counts.prefillCache == null) {
+      this._sglangRealtimeLast = null;
+      return { counts, rates: { decode: null, prefillCompute: null, prefillCache: null } };
+    }
+    const prev = this._sglangRealtimeLast;
+    this._sglangRealtimeLast = counts;
+    const rate = (now, before) =>
+      prev != null && now != null && before != null && dtSec > 0 && dtSec < 10 && now >= before
+        ? Math.max(0, Math.round(((now - before) / dtSec) * 100) / 100)
+        : null;
+    return {
+      counts,
+      rates: {
+        decode: rate(counts.decode, prev?.decode ?? null),
+        prefillCompute: rate(counts.prefillCompute, prev?.prefillCompute ?? null),
+        prefillCache: rate(counts.prefillCache, prev?.prefillCache ?? null),
+      },
+    };
+  }
+
+  /**
    * Apply SGLang Prometheus /metrics (--enable-metrics).
    * Supports both `sglang:` and `sglang_` prefixes.
    * @param {string} txt
@@ -1838,11 +1894,45 @@ export class LlmProbe {
       this.requestsRunning = running;
       this.slotsActive = Math.round(running);
     }
+
+    // Per-step counters tick during the request; the gauges below only move on
+    // the decode log interval, so their deltas are the live signal.
+    const realtime = this._sglangRealtimeRates(txt, dtSec);
+    const liveDecode = realtime.rates.decode;
+    const livePrefill = realtime.rates.prefillCompute;
+    const inflight =
+      this._sglangInflight() ||
+      (liveDecode != null && liveDecode > 0) ||
+      (livePrefill != null && livePrefill > 0);
+
+    // SGLang's prompt counter includes cache-served tokens, so the prefill work
+    // is the computed share (prompt − cached) — or the realtime split when the
+    // build reports it directly. The split owns both rates and the hit rate.
+    const cachedNow = this._sglangCachedTokens(txt);
+    const cachedTotal = cachedNow ?? realtime.counts.prefillCache;
+    if (cachedTotal != null) this.totalCachedTokens = cachedTotal;
+    if (realtime.counts.prefillCompute != null && realtime.counts.prefillCache != null) {
+      this._setPrefillSplitRates(
+        realtime.counts.prefillCache,
+        realtime.counts.prefillCompute,
+        dtSec,
+        "realtime"
+      );
+    } else if (cachedNow != null && prompt != null) {
+      this._setPrefillSplitRates(cachedNow, Math.max(0, prompt - cachedNow), dtSec, "cumulative");
+    } else {
+      // No split source: clear any prior rates so the prefill fallback below
+      // reads the prompt counter, not a stale split.
+      this._setPrefillSplitRates(null, null, dtSec);
+    }
+
     if (gen == null) {
       const gauge = this._sglangGenGauge(txt);
-      if (gauge != null) {
+      if (liveDecode != null) this.generationTps = liveDecode;
+      else if (gauge != null) {
         this.generationTps = Math.max(0, Math.round(gauge * 100) / 100);
       }
+      if (livePrefill != null) this._setPrefillTps(livePrefill, inflight);
       return;
     }
 
@@ -1862,6 +1952,9 @@ export class LlmProbe {
       const busy = (running != null && running > 0) || this._sglangInflight();
       if (!baselineReady || counterReset) {
         this.generationTps = 0;
+      } else if (liveDecode != null) {
+        // The per-step counter is ahead of the log-interval gauge.
+        this.generationTps = liveDecode;
       } else if (gauge != null && busy) {
         this.generationTps = Math.max(0, Math.round(gauge * 100) / 100);
       } else if (gauge != null) {
@@ -1871,11 +1964,10 @@ export class LlmProbe {
       } else {
         this.generationTps = Math.max(0, Math.round((deltaOut / dtSec) * 100) / 100);
       }
-      if (prompt != null) {
-        this._setPrefillTps(
-          !baselineReady || counterReset ? 0 : deltaIn / dtSec,
-          deltaOut > 0
-        );
+      const prefillRate =
+        livePrefill ?? this.uncachedPrefillTps ?? (deltaIn != null ? deltaIn / dtSec : null);
+      if (prefillRate != null) {
+        this._setPrefillTps(!baselineReady || counterReset ? 0 : prefillRate, inflight || deltaOut > 0);
       } else if (deltaOut <= 0) {
         this.prefillTps = 0;
       }
@@ -1895,14 +1987,6 @@ export class LlmProbe {
     this._completedCounterObserved = this.completedRequestsTotal != null;
     this.totalOutputTokens = gen;
     this.totalPromptTokens = prompt ?? null;
-    // Cached share from the same exposition (device layer preferred).
-    const cachedNow = this._sglangCachedTokens(txt);
-    if (cachedNow != null) this.totalCachedTokens = cachedNow;
-
-    const cached = this._sglangCachedTokens(txt);
-    if (cached != null && prompt != null) {
-      this._setPrefillSplitRates(cached, prompt, dtSec);
-    }
   }
 
   /**
@@ -1916,7 +2000,9 @@ export class LlmProbe {
     const cached = this._sglangCachedTokens(txt);
     if (cached != null) this.totalCachedTokens = cached;
     if (cached != null && prompt != null) {
-      this._setPrefillSplitRates(cached, prompt, dtSec);
+      // prompt_tokens_total includes the cache-served share; the computed
+      // prefill work is prompt − cached.
+      this._setPrefillSplitRates(cached, Math.max(0, prompt - cached), dtSec, "cumulative");
     }
   }
 
@@ -2107,17 +2193,21 @@ export class LlmProbe {
   }
 
   /**
-   * Max of Prometheus series matching `name` (avoids summing HiCache layers).
+   * Max of Prometheus series matching `name` (avoids summing HiCache layers,
+   * tensor-parallel repeats of the same counter, …).
    * @param {string} body
    * @param {string} name
+   * @param {string|null} [labelKey] Only series carrying this label…
+   * @param {string|null} [labelValue] …with this value.
    * @returns {number | null}
    */
-  _getPromMetricMax(body, name) {
+  _getPromMetricMax(body, name, labelKey = null, labelValue = null) {
     const esc = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const re = new RegExp(`^${esc}(?:\\{([^}]*)\\})?\\s+([\\d.eE+-]+)\\s*$`, "gm");
     let best = null;
     let m;
     while ((m = re.exec(body)) !== null) {
+      if (labelKey != null && promLabelValue(m[1], labelKey) !== labelValue) continue;
       if (!this._promLabelsMatchModel(m[1])) continue;
       const v = parseFloat(m[2]);
       if (Number.isFinite(v)) best = best == null ? v : Math.max(best, v);
