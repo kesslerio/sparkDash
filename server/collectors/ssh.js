@@ -257,11 +257,29 @@ export function sshCommandSpec(spark, opts = {}) {
 }
 
 /**
+ * Decide what a finished ssh command yields.
+ *
+ * Commands like `df` exit nonzero after printing a complete table when a
+ * single mount fails (a stale FUSE mount, a dead NFS share). Callers that can
+ * use that output pass `allowNonZeroExit`; timeouts and spawn failures never
+ * count, because those produce no trustworthy result.
+ *
+ * @param {{ error?: (Error & { code?: number | string, killed?: boolean }) | null, stdout?: unknown, allowNonZeroExit?: boolean }} outcome
+ * @returns {string | null} trimmed stdout, or null when the caller must reject
+ */
+export function sshExecOutcome({ error = null, stdout, allowNonZeroExit = false } = {}) {
+  const out = String(stdout ?? "").trim();
+  if (!error) return out;
+  if (allowNonZeroExit && out && !error.killed && typeof error.code === "number") return out;
+  return null;
+}
+
+/**
  * Execute a command on a remote Spark via SSH.
  *
  * @param {Object} spark - Spark config object
  * @param {string} cmd - Command to execute (passed as a single remote argv via bash -c)
- * @param {{ timeoutMs?: number }} [options]
+ * @param {{ timeoutMs?: number, allowNonZeroExit?: boolean }} [options]
  * @returns {Promise<string>} - Trimmed stdout
  */
 export async function sshExec(spark, cmd, options = {}) {
@@ -279,11 +297,16 @@ export async function sshExec(spark, cmd, options = {}) {
   const execute = (execArgs) =>
     new Promise((resolve, reject) => {
       execFile(file, execArgs, { timeout: timeoutMs, env, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
-        if (err) {
-          const msg = stderr?.trim() || err.message;
+        const outcome = sshExecOutcome({
+          error: err,
+          stdout,
+          allowNonZeroExit: options.allowNonZeroExit,
+        });
+        if (outcome === null) {
+          const msg = stderr?.trim() || err?.message || "command failed";
           reject(new Error(`SSH to ${targetHost} failed: ${msg}`));
         } else {
-          resolve(String(stdout).trim());
+          resolve(outcome);
         }
       });
     });

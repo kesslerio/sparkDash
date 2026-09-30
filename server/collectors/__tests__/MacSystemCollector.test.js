@@ -219,3 +219,18 @@ test("detectHardware names the real Mac", async () => {
   assert.equal(hw.totalMemoryGB, 256);
   assert.equal(hw.cudaDriver, null);
 });
+
+test("mac snapshot keeps its output when the trailing route guard exits nonzero", async () => {
+  const calls = [];
+  const exec = async (_spark, cmd, options) => {
+    calls.push({ cmd, options });
+    return snapshotOutput();
+  };
+  const collector = new MacSystemCollector(spark, { exec });
+
+  const data = await collector._snapshot();
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].options.allowNonZeroExit, true);
+  assert.match(data.df, /System\/Volumes\/Data/);
+});
