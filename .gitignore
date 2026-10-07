@@ -35,3 +35,7 @@ handoff.md
 test/
 .context/compound-engineering/
 .worktrees/
+
+# Python bytecode from the Mac node agent tests
+__pycache__/
+*.pyc

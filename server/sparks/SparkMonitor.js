@@ -5,6 +5,7 @@ import {
   collectionWasSuccessful,
 } from "../collectors/SystemCollector.js";
 import { MacSystemCollector } from "../collectors/MacSystemCollector.js";
+import { MacAgentCollector } from "../collectors/MacAgentCollector.js";
 import { LlmProbe } from "../collectors/LlmProbe.js";
 import { ComfyProbe } from "../collectors/ComfyProbe.js";
 import { HermesProbe } from "../collectors/HermesProbe.js";
@@ -135,6 +136,9 @@ export class SparkMonitor {
       llm: [],
       comfy: null,
       tailscale: null,
+      /** Mac-agent units only: detected model runtimes + what it could not read. */
+      runtimes: null,
+      unavailable: null,
     };
     this._lastUpdate = {};
     this._metricCollectionSuccessful = { gpu: false, cpu: false };
@@ -178,8 +182,12 @@ export class SparkMonitor {
     this._inflight = {};
     this._metricCollectionSuccessful = { gpu: false, cpu: false };
     const kindChanged = (this.spark?.kind === "mac") !== (spark?.kind === "mac");
+    // The agent endpoint is baked into the collector, so moving or removing it
+    // needs a fresh collector just like a kind change does.
+    const transportChanged =
+      JSON.stringify(this.spark?.agent ?? null) !== JSON.stringify(spark?.agent ?? null);
     this.spark = spark;
-    if (kindChanged) {
+    if (kindChanged || transportChanged) {
       this.collector = createCollector(spark);
       this._hardwareSummary = this._staticHardwareSummary(spark);
       this._detectHardwareInBackground();
@@ -558,6 +566,12 @@ export class SparkMonitor {
         network: this._metrics.network,
         unifiedMemory: this._metrics.unifiedMemory,
         llm: this._metrics.llm,
+        /** Mac-agent units: detected model runtimes; null for other transports. */
+        runtimes: this._metrics.runtimes,
+        /** Mac-agent units: metrics this node declared unavailable; null otherwise. */
+        unavailable: this._metrics.unavailable,
+        /** Mac-agent units: whether the agent answered the last runtime poll. */
+        agentOnline: this._metrics.agentOnline ?? null,
         comfy: comfyOn ? this._metrics.comfy : null,
         tailscale: tailscaleOn ? this._metrics.tailscale : null,
       },
@@ -642,6 +656,7 @@ export class SparkMonitor {
       this._pollDomain("storage"),
       this._pollDomain("ram"),
       this._pollDomain("memory"),
+      this._pollDomain("runtimes"),
       this._pollDomain("llm"),
       this._pollDomain("comfy"),
       this._pollDomain("hermes"),
@@ -658,6 +673,8 @@ export class SparkMonitor {
     if (domain === "comfy" && !this._comfyMonitoringEnabled()) return;
     if (domain === "hermes" && !this._hermesMonitoringEnabled()) return;
     if (domain === "tailscale" && !this._tailscaleMonitoringEnabled()) return;
+    // Only agent-backed units can report runtimes / declared gaps.
+    if (domain === "runtimes" && typeof this.collector.collectRuntimes !== "function") return;
     const runGeneration = this._runGeneration;
     const pollToken = Symbol(domain);
     this._inflight[domain] = pollToken;
@@ -681,6 +698,9 @@ export class SparkMonitor {
           break;
         case "memory":
           result = await this.collector.collectUnifiedMemory();
+          break;
+        case "runtimes":
+          result = await this.collector.collectRuntimes();
           break;
         case "llm":
           // Probe all ports in parallel
@@ -731,6 +751,11 @@ export class SparkMonitor {
           break;
         case "memory":
           this._metrics.unifiedMemory = result;
+          break;
+        case "runtimes":
+          this._metrics.runtimes = Array.isArray(result?.runtimes) ? result.runtimes : [];
+          this._metrics.unavailable = Array.isArray(result?.unavailable) ? result.unavailable : [];
+          this._metrics.agentOnline = Boolean(result?.agentOnline);
           break;
         case "llm":
           this._metrics.llm = result;
@@ -961,10 +986,14 @@ export class SparkMonitor {
 }
 
 /**
- * Metrics collector for a unit: Apple Silicon Macs are read with macOS tools
- * over SSH; every other kind uses the Linux/NVIDIA collector.
+ * Metrics collector for a unit: Apple Silicon Macs with an on-device agent are
+ * read from that agent (vitals + runtime inventory); Macs without one use stock
+ * macOS tools over SSH; every other kind uses the Linux/NVIDIA collector.
  * @param {object} spark
  */
 export function createCollector(spark) {
-  return spark?.kind === "mac" ? new MacSystemCollector(spark) : new SystemCollector(spark);
+  if (spark?.kind !== "mac") return new SystemCollector(spark);
+  return spark.agent
+    ? new MacAgentCollector(spark)
+    : new MacSystemCollector(spark);
 }

@@ -15,7 +15,7 @@ sparkDash is a real-time web dashboard for one or more **NVIDIA DGX Spark (GB10)
 
 It also supports **non-Spark units**: any Linux machine with an NVIDIA GPU (e.g. a workstation with a dedicated RTX/L-series card) can be added as a **dedicated GPU host** and monitored the same way via SSH and `nvidia-smi`. For these units the dashboard correctly separates **RAM** (system memory) from **VRAM** (discrete GPU memory).
 
-**Apple Silicon Macs** (for example a Mac Studio serving models with [oMLX](https://github.com/jundot/omlx)) can be added as a **Mac** unit. They are read over SSH with stock macOS tools, and an oMLX server gets a live LLM card. See [Mac units](#mac-units).
+**Apple Silicon Macs** (for example a Mac Studio serving models with [oMLX](https://github.com/jundot/omlx)) can be added as a **Mac** unit. They are read over SSH with stock macOS tools, optionally plus a small [on-device agent](agents/macos/README.md) that adds the model-runtime inventory and honest "unavailable" reporting, and an oMLX server gets a live LLM card. See [Mac units](#mac-units).
 
 <img src="./assets/screenshot.jpg" alt="sparkDash Overview page with multiple DGX Spark units, GPU metrics, and LLM status">
 
@@ -483,7 +483,7 @@ For compatibility, `SSH_CONTROL_PERSIST` is accepted as a seconds-based fallback
 1. Open the **+** tab.
 2. Choose **Unit type**:
    - **NVIDIA DGX Spark** — the default; hardware summary shows DGX Spark specs and the CX7 IP field is available.
-   - **Apple Silicon Mac** — a Mac monitored over SSH with macOS tools; see [Mac units](#mac-units).
+   - **Apple Silicon Mac** — a Mac monitored over SSH with macOS tools, optionally through the [Mac node agent](agents/macos/README.md) for runtime detection; see [Mac units](#mac-units).
    - **Dedicated GPU host** — any Linux machine with an NVIDIA GPU. It is monitored exactly like a Spark (SSH + `nvidia-smi`) but is **not** reported as a DGX Spark: the header shows a detected hardware summary (GPU model, CPU, RAM) instead of fixed GB10 specs, and the page shows separate **RAM** and **VRAM** panels (VRAM from `nvidia-smi`, RAM from system memory). On the unit page, RAM → Network → Storage stack in the right column with GPU filling the left column. A host with **more than one GPU** needs nothing extra: every card `nvidia-smi` lists is collected, the header names them all, the GPU panel shows a block per card, and `metrics.gpu` stays the aggregate (hottest / busiest card, summed power and VRAM) with the per-card detail under `gpu.gpus[]`.
 3. Set **Name** and choose whether this is **This host**. Local units do not require a LAN IP or SSH; their optional LAN IP enables browser links and directed Wake-on-LAN. Remote units require a LAN IP/host, SSH user, and key or password. Key auth in Docker needs a key mounted into the container (see Quick start).
 4. **Test** shows pass/fail/skipped for host collectors/SSH and each enabled service (LLM, ComfyUI, Hermes Agent, Tailnet). Every enabled capability must pass; disable an unavailable optional service before saving if it should not be monitored.
@@ -512,6 +512,30 @@ The non-privileged reads share one SSH call per poll. Metal wires MLX weights an
   Without it the GPU fields read **n/a** and everything else still works.
 - For the LLM card, the model server port reachable from the sparkDash host.
 
+**Mac node agent (optional, recommended).** Installing [`agents/macos`](agents/macos/README.md)
+— one stdlib-only Python script, no `pip install` — and setting the unit's
+**Mac node agent** port reads the Mac from the device instead of over SSH, and
+adds two things SSH cannot provide:
+
+- **Runtime inventory.** Which model runtime is actually serving, its port, and
+  the model it serves, detected from the process table and port signatures
+  against a data-driven inventory file (`agents/macos/runtimes.json`) rather than
+  hardcoded names. A server that is not in the inventory is reported as
+  `other-runtime` with its own command basename — never renamed into an engine it
+  resembles. The overview card shows the runtimes as chips; the Mac page gets a
+  **Model runtimes** panel.
+- **Honest availability.** Metrics macOS only hands to root (`gpu.utilization`,
+  `gpu.power`, `ane.power` without a root powermetrics read) come back as an
+  explicit `unavailable` list with the reason. Non-DGX units render those tiles
+  as **unavailable** with the node's reason in the tooltip — a DGX-only metric
+  never reads as `0W`/`0%` on a machine that cannot measure it. A Mac (or Linux
+  host) also carries a platform badge, so it is never mistaken for a Spark.
+
+If the agent stops answering, the unit keeps its vitals from the SSH reads and
+says so (**Runtimes (agent unreachable)**) rather than claiming nothing is
+serving. DGX Spark behaviour is untouched: no agent, no runtime row, and the
+card is unchanged apart from the platform badge.
+
 **oMLX backend.** An OpenAI-compatible server whose `/v1/models` entries are `owned_by: "omlx"` is detected as **oMLX**. oMLX has no Prometheus `/metrics`, so the card reads `GET /api/status`:
 - loaded model (oMLX lists every model on disk, so the loaded one is picked from `loaded_models`);
 - active and waiting requests;
@@ -530,6 +554,7 @@ The non-privileged reads share one SSH call per poll. Metal wires MLX weights an
   "kind": "mac",
   "lanIp": "100.64.0.10",
   "ssh": { "host": "100.64.0.10", "user": "macuser", "auth": "key" },
+  "agent": { "port": 8790 },
   "llmPorts": [8000],
   "role": "standalone",
   "llmMonitoring": true

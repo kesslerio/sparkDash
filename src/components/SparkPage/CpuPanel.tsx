@@ -1,7 +1,8 @@
-import type { CpuMetrics, HardwareInfo } from "../../api/types";
+import type { CpuMetrics, HardwareInfo, MetricGap } from "../../api/types";
 import { Sparkline } from "../ui/Sparkline";
 import { Panel } from "../ui/Panel";
 import { CpuIcon } from "../ui/icons";
+import { honestGap } from "../ui/platform";
 import { useMetricsHistoryTail } from "../../hooks/metricsStore";
 
 interface CpuPanelProps {
@@ -10,6 +11,10 @@ interface CpuPanelProps {
   sparkId: string;
   temperatureUnit: "celsius" | "fahrenheit";
   className?: string;
+  /** Apple Silicon Mac: no CPU temperature sensor, and power only with root. */
+  mac?: boolean;
+  /** Metrics this node declared unavailable (mac agent transport). */
+  unavailable?: MetricGap[] | null;
 }
 
 function celsiusToFahrenheit(c: number): number {
@@ -46,7 +51,15 @@ function MetricRow({
  * this panel makes that visible at the device level. For non-Spark GPU
  * hosts it covers the discrete CPU.
  */
-export function CpuPanel({ cpu, hardware, sparkId, temperatureUnit, className }: CpuPanelProps) {
+export function CpuPanel({
+  cpu,
+  hardware,
+  sparkId,
+  temperatureUnit,
+  className,
+  mac = false,
+  unavailable = null,
+}: CpuPanelProps) {
   const usageHistory = useMetricsHistoryTail(sparkId, "cpu.usage");
   const tempHistory = useMetricsHistoryTail(sparkId, "cpu.temp");
 
@@ -58,6 +71,15 @@ export function CpuPanel({ cpu, hardware, sparkId, temperatureUnit, className }:
   const displayTemp =
     temperatureUnit === "fahrenheit" ? celsiusToFahrenheit(temperature) : temperature;
   const tempLabel = temperatureUnit === "fahrenheit" ? `${displayTemp}°F` : `${displayTemp}°C`;
+
+  // Apple Silicon exposes no CPU temperature, and CPU power needs a root
+  // powermetrics read. Show the declared gap rather than a confident 0.
+  const tempView = honestGap(unavailable, "cpu.temperature", tempLabel, {
+    nonDgx: mac && temperature === 0,
+  });
+  const powerView = honestGap(unavailable, "cpu.power", `${draw}W${tdp > 0 ? ` / ${tdp}W` : ""}`, {
+    nonDgx: mac && draw === 0,
+  });
 
   // GB10 SoC bands: the CPU complex derates in the mid-80s; x86 hosts run
   // hotter before throttling, so the danger band sits higher.
@@ -88,12 +110,22 @@ export function CpuPanel({ cpu, hardware, sparkId, temperatureUnit, className }:
         label="Temperature"
         color={tempColor}
         spark={<Sparkline data={tempHistory} color={tempColor} width={180} />}
-        value={<span className="text-text-strong">{tempLabel}</span>}
+        value={
+          <span
+            className={`text-text-strong ${tempView.muted ? "font-normal text-muted" : ""}`}
+            title={tempView.title}
+          >
+            {tempView.text}
+          </span>
+        }
       />
       <div className="flex justify-between text-sm">
         <span className="text-muted">CPU Power</span>
-        <span className="font-tabular text-sm text-text">
-          {draw}W{tdp > 0 ? ` / ${tdp}W` : ""}
+        <span
+          className={`font-tabular text-sm ${powerView.muted ? "text-muted" : "text-text"}`}
+          title={powerView.title}
+        >
+          {powerView.text}
         </span>
       </div>
       {model && (

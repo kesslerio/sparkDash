@@ -13,6 +13,7 @@ import { resolveSparkRole } from "../api/sparkRole";
 import { useModalPresence } from "../hooks/useModalPresence";
 import { InfoIcon } from "./ui/icons";
 import { ConnectivityResult } from "./ui/ConnectivityResult";
+import { MacAgentFields } from "./MacAgentFields";
 
 interface EditSparkDialogProps {
   open: boolean;
@@ -233,6 +234,7 @@ export function EditSparkDialog({
         llmMonitoring:
           role === "worker" ? false : role === "head" ? true : config.llmMonitoring !== false,
         comfyMonitoring: Boolean(config.comfyMonitoring),
+        agent: config.kind === "mac" ? config.agent ?? null : null,
         comfyPort: (() => {
           const n = Number(config.comfyPort);
           return Number.isInteger(n) && n >= 1 && n <= 65535 ? n : 8188;
@@ -302,7 +304,7 @@ export function EditSparkDialog({
                 >
                   <option value="spark">NVIDIA DGX Spark</option>
                   <option value="host">Dedicated GPU host (Linux, nvidia-smi, not a Spark)</option>
-                  <option value="mac">Apple Silicon Mac (macOS over SSH)</option>
+                  <option value="mac">Apple Silicon Mac (macOS over SSH, or via the Mac node agent)</option>
                 </select>
               </div>
 
@@ -332,6 +334,10 @@ export function EditSparkDialog({
                   </p>
                 )}
               </div>
+
+              {config.kind === "mac" && (
+                <MacAgentFields agent={config.agent} onChange={(agent) => update({ agent })} />
+              )}
 
               {config.kind !== "host" && config.kind !== "mac" && (
                 <div>
