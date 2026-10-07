@@ -10,6 +10,10 @@ Format: version sections are listed newest first.
 ## [Unreleased]
 
 ### Added
+- **Mac node agent — runtime inventory and honest availability on Apple Silicon** — `agents/macos/sparkdash_mac_agent.py` is a stdlib-only (optional psutil) collector you run on the Mac (`--serve`, launchd plist and a one-line install included). Point a Mac unit's **Mac node agent** port (or `agent: { port }` in `config/sparks.json`) at it and the unit gains:
+  - **detected model runtimes** — engine name, served model, and port, read from the process table and port signatures against a data-driven inventory (`agents/macos/runtimes.json`, seeded from the owner's `model-start()` functions: omlx, qflash, splash/-27b/-35b, ds4, ds4-serve, mtplx/-27b/-35b/-flash, the :8200 mux, tensorfold). Nothing is hardcoded in the agent, and an uncatalogued Python server is reported as `other-runtime` with its own command basename rather than mislabeled;
+  - **declared-unavailable metrics** — GPU busy, GPU/CPU/ANE power and thermal pressure need root `powermetrics`, so a non-root agent reports them as gaps with the reason. Non-DGX tiles render **unavailable** with the reason instead of `0W`/`0%`, and a Mac or Linux host now carries a platform badge so it is never mistaken for a Spark;
+  - while the agent is unreachable the unit keeps its SSH-read vitals and says the agent is gone, instead of claiming nothing is serving. DGX Spark behavior is untouched.
 - **Apple Silicon Mac units** — new unit type `kind: "mac"`, read over SSH with macOS tools:
   - CPU, unified memory with its GPU-wired share, swap, disk and network;
   - GPU busy %, clock, power and thermal pressure through `sudo -n powermetrics`, showing n/a when it isn't permitted;

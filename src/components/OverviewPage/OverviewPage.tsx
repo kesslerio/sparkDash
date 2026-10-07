@@ -8,6 +8,8 @@ import { FleetEnergyCard } from "./FleetEnergyCard";
 import { FleetAlertStrip } from "./FleetAlertStrip";
 import { FleetTokenTotals } from "./FleetTokenTotals";
 import { ActivityIcon, PowerOffIcon, PowerOnIcon, RotateIcon } from "../ui/icons";
+import { PlatformBadge, gapFor, honestValue } from "../ui/platform";
+import { RuntimeChips } from "../ui/RuntimeChips";
 
 /** Short backend names for the Overview LLM stat; unknown backends show their raw id. */
 const OVERVIEW_BACKEND_LABELS: Record<string, string> = {
@@ -61,6 +63,33 @@ function overviewLlm(llmArr: SparkSnapshot["metrics"]["llm"]) {
 
 function formatLlmRate(rate: number | null | undefined): string {
   return rate == null || !Number.isFinite(rate) ? "—" : rate.toFixed(0);
+}
+
+/**
+ * GPU power for the overview tile. A Mac without a powermetrics read declares
+ * the gap (or predates the declaration with `powermetricsAvailable: false`);
+ * either way the tile says so instead of showing 0W.
+ */
+function gpuPowerValue(spark: SparkSnapshot, gpu: SparkSnapshot["metrics"]["gpu"]): string {
+  return honestValue(
+    spark,
+    "gpu.power",
+    spark.kind === "mac"
+      ? `${gpu?.power?.draw ?? 0}W · sys ${gpu?.power?.systemDraw ?? 0}W`
+      : `${gpu?.power?.draw ?? 0}W / ${gpu?.power?.limit ?? 0}W`,
+    { fallbackForNonDgx: spark.kind === "mac" && gpu?.powermetricsAvailable === false }
+  ).text;
+}
+
+/** GPU busy, or the reason it is not measurable here. */
+function gpuUsageCaption(
+  spark: SparkSnapshot,
+  gpu: SparkSnapshot["metrics"]["gpu"],
+  usage: number
+): string {
+  return honestValue(spark, "gpu.utilization", `${usage}%`, {
+    fallbackForNonDgx: spark.kind === "mac" && gpu?.powermetricsAvailable === false,
+  }).text;
 }
 
 function MiniStat({
@@ -180,12 +209,15 @@ function SparkCard({
                   ? "Standalone — LLM monitoring off"
                   : "Standalone Spark";
           return (
-            <span
-              className="shrink-0 rounded bg-accent/15 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-accent"
-              title={title}
-            >
-              {text}
-            </span>
+            <>
+              <PlatformBadge spark={spark} />
+              <span
+                className="shrink-0 rounded bg-accent/15 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-accent"
+                title={title}
+              >
+                {text}
+              </span>
+            </>
           );
         })()}
         {spark.comfyMonitoring ? (
@@ -311,7 +343,7 @@ function SparkCard({
               max={100}
               color={usageBarColor}
               caption={
-                spark.kind === "mac" && gpu?.powermetricsAvailable === false ? "n/a" : `${usage}%`
+                gpuUsageCaption(spark, gpu, usage)
               }
             />
           </div>
@@ -320,12 +352,12 @@ function SparkCard({
           <div className="mt-4 grid grid-cols-2 gap-x-4 gap-y-2.5 border-t border-border pt-3.5">
             <MiniStat
               label="GPU Power"
-              value={
-                spark.kind === "mac"
-                  ? gpu?.powermetricsAvailable === false
-                    ? "n/a"
-                    : `${gpu?.power?.draw ?? 0}W · sys ${gpu?.power?.systemDraw ?? 0}W`
-                  : `${gpu?.power?.draw ?? 0}W / ${gpu?.power?.limit ?? 0}W`
+              value={gpuPowerValue(spark, gpu)}
+              title={
+                gapFor(spark, "gpu.power")?.reason ??
+                (spark.kind === "mac" && gpu?.powermetricsAvailable === false
+                  ? "powermetrics needs root on macOS, so this Mac cannot report power"
+                  : undefined)
               }
             />
             {vramAvail > 0 && (
@@ -419,6 +451,27 @@ function SparkCard({
               </div>
             );
           })()}
+
+          {/* Mac agent units report what is actually serving, straight from the
+              node's process table + port signature. null means this transport
+              has no inventory (DGX, mac-over-SSH) — show nothing rather than an
+              empty row that reads as "nothing serving". */}
+          {Array.isArray(spark.metrics.runtimes) ? (
+            <div className="mt-3.5 flex flex-col gap-1.5 border-t border-border pt-3">
+              <span className="text-[10px] uppercase tracking-wide text-muted">
+                {spark.metrics.agentOnline === false ? "Runtimes (agent unreachable)" : "Runtimes"}
+              </span>
+              {spark.metrics.runtimes.length > 0 ? (
+                <RuntimeChips runtimes={spark.metrics.runtimes} />
+              ) : (
+                <span className="text-[12px] text-muted">
+                  {spark.metrics.agentOnline === false
+                    ? "Unknown — the Mac agent is not answering"
+                    : "Nothing serving"}
+                </span>
+              )}
+            </div>
+          ) : null}
         </>
       )}
     </div>

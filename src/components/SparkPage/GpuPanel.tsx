@@ -1,8 +1,9 @@
-import type { ConversationRow, GpuDevice, GpuMetrics } from "../../api/types";
+import type { ConversationRow, GpuDevice, GpuMetrics, MetricGap } from "../../api/types";
 import { Sparkline } from "../ui/Sparkline";
 import { Panel } from "../ui/Panel";
 import { ActivityIcon } from "../ui/icons";
 import { MetricBar } from "../ui/MetricBar";
+import { honestGap } from "../ui/platform";
 import { useMetricsHistoryTail } from "../../hooks/metricsStore";
 
 interface GpuPanelProps {
@@ -14,6 +15,8 @@ interface GpuPanelProps {
   conversations?: ConversationRow[];
   /** Apple Silicon Mac: no GPU temperature or power limit; show thermal pressure instead. */
   mac?: boolean;
+  /** Metrics this node declared unavailable (mac agent transport). */
+  unavailable?: MetricGap[] | null;
 }
 
 function celsiusToFahrenheit(c: number): number {
@@ -138,7 +141,14 @@ function GpuDeviceRow({
   );
 }
 
-export function GpuPanel({ gpu, sparkId, temperatureUnit, className, mac = false }: GpuPanelProps) {
+export function GpuPanel({
+  gpu,
+  sparkId,
+  temperatureUnit,
+  className,
+  mac = false,
+  unavailable = null,
+}: GpuPanelProps) {
   const tempHistory = useMetricsHistoryTail(sparkId, "gpu.temp");
   const usageHistory = useMetricsHistoryTail(sparkId, "gpu.usage");
 
@@ -154,6 +164,27 @@ export function GpuPanel({ gpu, sparkId, temperatureUnit, className, mac = false
   const vramPct = gpu?.vram?.percentage ?? 0;
   const devices = gpu?.gpus ?? [];
   const multiGpu = devices.length > 1;
+
+  // On a Mac, GPU busy and power come from powermetrics, which needs root. When
+  // the node said it could not read them (a declared gap, or the older
+  // powermetricsAvailable flag), say so: 0W reads as an idle GPU, not as
+  // "not measurable here".
+  const gaps = unavailable ?? gpu?.unavailable ?? null;
+  const macUnmeasured = mac && gpu?.powermetricsAvailable === false;
+  const powerView = honestGap(
+    gaps,
+    "gpu.power",
+    mac
+      ? `${powerDraw}W · system ${gpu?.power?.systemDraw ?? 0}W`
+      : `${powerDraw}W / ${powerLimit}W`,
+    { nonDgx: macUnmeasured }
+  );
+  if (powerView.muted && !powerView.title) {
+    powerView.title = "powermetrics needs root on macOS";
+  }
+  const usageView = honestGap(gaps, "gpu.utilization", `${usage}%`, {
+    nonDgx: macUnmeasured,
+  });
 
   const tempColor =
     temperature > 85
@@ -174,7 +205,14 @@ export function GpuPanel({ gpu, sparkId, temperatureUnit, className, mac = false
         label="Usage"
         color="var(--color-accent)"
         spark={<Sparkline data={usageHistory} color="var(--color-accent)" width={180} />}
-        value={<span className="text-text-strong">{usage}%</span>}
+        value={
+          <span
+            className={usageView.muted ? "font-normal text-muted" : "text-text-strong"}
+            title={usageView.title}
+          >
+            {usageView.text}
+          </span>
+        }
       />
       {mac ? (
         <div className="flex justify-between text-sm">
@@ -191,12 +229,11 @@ export function GpuPanel({ gpu, sparkId, temperatureUnit, className, mac = false
       )}
       <div className="flex justify-between text-sm">
         <span className="text-muted">{multiGpu ? "GPU Power (all cards)" : "GPU Power"}</span>
-        <span className="font-tabular text-sm text-text">
-          {mac
-            ? gpu?.powermetricsAvailable === false
-              ? "n/a (needs sudo powermetrics)"
-              : `${powerDraw}W · system ${gpu?.power?.systemDraw ?? 0}W`
-            : `${powerDraw}W / ${powerLimit}W`}
+        <span
+          className={`font-tabular text-sm ${powerView.muted ? "text-muted" : "text-text"}`}
+          title={powerView.title}
+        >
+          {powerView.text}
         </span>
       </div>
 

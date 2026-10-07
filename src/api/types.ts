@@ -11,6 +11,12 @@ export interface SparkConfig {
    *   (sysctl, vm_stat, powermetrics). Always remote.
    */
   kind?: "spark" | "host" | "mac";
+  /**
+   * Mac units only: read vitals + the runtime inventory from the on-device agent
+   * (`agents/macos/sparkdash_mac_agent.py --serve`) instead of SSH-only reads.
+   * Set `url` to override the whole endpoint, or `host`/`port` to build one.
+   */
+  agent?: MacAgentConfig | null;
   lanIp: string;
   cx7Ip?: string | null;
   /**
@@ -202,6 +208,8 @@ export interface GpuMetrics {
   thermalPressure?: string | null;
   /** Mac units: false when `sudo -n powermetrics` is not permitted, so GPU activity and power are unknown. */
   powermetricsAvailable?: boolean;
+  /** Mac-agent units: what this node could not read (e.g. gpu.power without root). */
+  unavailable?: MetricGap[];
   power: {
     draw: number;
     limit: number;
@@ -551,6 +559,16 @@ export interface SparkMetrics {
   comfy?: ComfyMetrics | null;
   /** Tailnet probe result when monitoring is enabled; null when off or not yet polled. */
   tailscale?: TailscaleMetrics | null;
+  /**
+   * Mac-agent units: model runtimes detected on the machine. null for other
+   * transports (DGX Sparks, macs read over SSH) — an empty array only when the
+   * agent actually answered and found nothing serving.
+   */
+  runtimes?: MacRuntime[] | null;
+  /** Mac-agent units: metrics the node declared unavailable (never zeroed). */
+  unavailable?: MetricGap[] | null;
+  /** Mac-agent units: whether the agent answered the last runtime poll. */
+  agentOnline?: boolean | null;
 }
 
 // ─── Occupancy conversations (not LlmMetrics) ────────────
@@ -576,6 +594,42 @@ export interface ConversationRow {
   contextWindow?: number;
   /** True when used tokens are a stale/approximate snapshot. */
   contextApprox?: boolean;
+}
+
+// ─── Mac node agent ──────────────────────────────────────────
+export interface MacAgentConfig {
+  /** Full base URL, e.g. http://100.64.0.10:8790 (wins over host/port). */
+  url?: string | null;
+  /** Host to reach the agent on; defaults to the unit's probe host. */
+  host?: string | null;
+  /** Agent listen port (default 8790). */
+  port?: number | null;
+}
+
+/** One detected model runtime, from the Mac agent's data-driven inventory. */
+export interface MacRuntime {
+  /** Inventory name — e.g. "omlx", "splash-35b", "tensorfold", or "other-runtime". */
+  name: string;
+  /** Display label; for other-runtime this is the command basename. */
+  label: string;
+  /** "server" (owns a listener) or "watchdog" (a launcher, not serving). */
+  role: string;
+  pid: number;
+  command: string;
+  script?: string | null;
+  port: number | null;
+  /** Served model id when argv or the server's own API exposes one. */
+  model?: string | null;
+  /** "serving" (health path answered) | "listening" | "running". */
+  state: string;
+  detectedBy: string;
+  health?: { ok: boolean; url: string };
+}
+
+/** A metric this node could not read, with the reason shown in the UI. */
+export interface MetricGap {
+  metric: string;
+  reason: string;
 }
 
 // ─── Spark snapshot (server pushes this) ──────────────────

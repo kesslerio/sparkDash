@@ -14,6 +14,22 @@ import { isValidSparkId } from "../validate.js";
  *  - Held in memory for SSH collectors / LLM probes
  *  - Encrypted at rest in config/sparks-secrets.json (survives Docker restart)
  */
+/**
+ * Normalize the optional Mac agent endpoint. `null` (or a block with nothing
+ * usable in it) keeps the SSH transport for a mac unit.
+ * @param {unknown} value
+ */
+export function normalizeMacAgent(value) {
+  if (!value || typeof value !== "object") return null;
+  const row = /** @type {Record<string, unknown>} */ (value);
+  const url = String(row.url || "").trim();
+  const host = String(row.host || "").trim();
+  const port = Number.parseInt(String(row.port ?? ""), 10);
+  const usablePort = Number.isInteger(port) && port > 0 && port <= 65535 ? port : null;
+  if (!url && !host && !usablePort) return null;
+  return { url: url || null, host: host || null, port: usablePort };
+}
+
 export class SparkRegistry {
   constructor() {
     this._sparks = [];
@@ -588,6 +604,11 @@ export class SparkRegistry {
       name: config.name || config.id,
       /** Unit type: spark (DGX Spark), host (dedicated GPU Linux box), or mac (Apple Silicon over SSH). */
       kind: config.kind === "host" || config.kind === "mac" ? config.kind : "spark",
+      /**
+       * Mac units only: read vitals and the runtime inventory from the on-device
+       * agent (agents/macos) instead of SSH-only reads. null = SSH transport.
+       */
+      agent: config.kind === "mac" ? normalizeMacAgent(config.agent) : null,
       lanIp: config.lanIp || "",
       cx7Ip: config.cx7Ip || null,
       /** Optional user override for Wake-on-LAN. Empty → use detectedMacAddress. */

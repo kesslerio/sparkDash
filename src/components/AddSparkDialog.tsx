@@ -5,6 +5,7 @@ import type { SparkConfig, SparkTestResponse } from "../api/types";
 import { useModalPresence } from "../hooks/useModalPresence";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { ConnectivityResult } from "./ui/ConnectivityResult";
+import { MacAgentFields } from "./MacAgentFields";
 
 interface AddSparkDialogProps {
   open: boolean;
@@ -148,7 +149,7 @@ export function AddSparkDialog({ open, onClose, onAdded, defaultLlmPort = 8888 }
             >
               <option value="spark">NVIDIA DGX Spark</option>
               <option value="host">Dedicated GPU host (Linux, nvidia-smi, not a Spark)</option>
-              <option value="mac">Apple Silicon Mac (macOS over SSH)</option>
+              <option value="mac">Apple Silicon Mac (macOS over SSH, or via the Mac node agent)</option>
             </select>
           </div>
 
@@ -180,6 +181,10 @@ export function AddSparkDialog({ open, onClose, onAdded, defaultLlmPort = 8888 }
               </p>
             )}
           </div>
+
+          {config.kind === "mac" && (
+            <MacAgentFields agent={config.agent} onChange={(agent) => update({ agent })} />
+          )}
 
           {config.kind !== "host" && config.kind !== "mac" && (
             <div>
