@@ -4,7 +4,7 @@
 # not stopped or removed.
 set -eu
 
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname "$0")" && pwd)
 LABEL=ai.onyx.sparkdash-mac-agent.privileged
 DEST="/Library/LaunchDaemons/${LABEL}.plist"
 USER_AGENT="${HOME:-}/Library/LaunchAgents/ai.onyx.sparkdash-mac-agent.plist"

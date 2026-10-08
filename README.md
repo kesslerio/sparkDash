@@ -491,7 +491,7 @@ For compatibility, `SSH_CONTROL_PERSIST` is accepted as a seconds-based fallback
 
 ### Mac units
 
-A unit with **Unit type → Apple Silicon Mac** (`kind: "mac"`) is always remote and is read over SSH with stock macOS tools:
+A unit with **Unit type → Apple Silicon Mac** (`kind: "mac"`) is always remote. Without the optional [Mac node agent](agents/macos/README.md), it is read over SSH with stock macOS tools:
 
 | Metric | Source |
 |---|---|
@@ -503,7 +503,7 @@ A unit with **Unit type → Apple Silicon Mac** (`kind: "mac"`) is always remote
 | Uptime | `kern.boottime` |
 | Hardware header (model, chip, cores, memory) | `sysctl` |
 
-The non-privileged reads share one SSH call per poll. Metal wires MLX weights and KV cache while a model is working, but macOS can un-wire an idle model back into ordinary app memory without freeing it, so memory in use counts app memory as well as wired pages; the wired share is reported separately. There is no GPU temperature on Apple Silicon, so the GPU panel shows thermal pressure instead.
+The non-privileged reads share one SSH call per poll. Metal wires MLX weights and KV cache while a model is working, but macOS can un-wire an idle model back into ordinary app memory without freeing it, so memory in use counts app memory as well as wired pages; the wired share is reported separately. SSH does not supply CPU or GPU temperatures. For measured temperatures, see the agent's [opt-in root collector](agents/macos/README.md#opt-in-root-temperatures).
 
 **Requirements on the Mac**
 - Remote Login (SSH) enabled, and the sparkDash host's key in the account's `authorized_keys`.
@@ -515,26 +515,23 @@ The non-privileged reads share one SSH call per poll. Metal wires MLX weights an
 **Mac node agent (optional, recommended).** Installing [`agents/macos`](agents/macos/README.md)
 — one stdlib-only Python script, no `pip install` — and setting the unit's
 **Mac node agent** port reads the Mac from the device instead of over SSH, and
-adds two things SSH cannot provide:
+adds runtime inventory and explicit metric availability:
 
-- **Runtime inventory.** Which model runtime is actually serving, its port, and
-  the model it serves, detected from the process table and port signatures
-  against a data-driven inventory file (`agents/macos/runtimes.json`) rather than
-  hardcoded names. A server that is not in the inventory is reported as
-  `other-runtime` with its own command basename — never renamed into an engine it
-  resembles. The overview card shows the runtimes as chips; the Mac page gets a
-  **Model runtimes** panel.
-- **Honest availability.** Metrics macOS only hands to root (`gpu.utilization`,
-  `gpu.power`, `ane.power` without a root powermetrics read) come back as an
-  explicit `unavailable` list with the reason. Non-DGX units render those tiles
-  as **unavailable** with the node's reason in the tooltip — a DGX-only metric
-  never reads as `0W`/`0%` on a machine that cannot measure it. A Mac (or Linux
-  host) also carries a platform badge, so it is never mistaken for a Spark.
+- **Runtime inventory.** The overview card shows runtimes as chips; the Mac page
+  gets a **Model runtimes** panel. See the agent guide's
+  [inventory rules](agents/macos/README.md#runtime-inventory) and
+  [elevated-process privacy rules](agents/macos/README.md#opt-in-root-temperatures).
+- **Honest availability.** Missing metrics render as **unavailable** with the
+  node's reason in the tooltip; CPU and GPU temperature rows also show the reason
+  inline. See the [agent guide](agents/macos/README.md) for metric sources and
+  privilege requirements. A Mac (or Linux host) carries a platform badge, so it
+  is never mistaken for a Spark.
 
-If the agent stops answering, the unit keeps its vitals from the SSH reads and
-says so (**Runtimes (agent unreachable)**) rather than claiming nothing is
-serving. DGX Spark behaviour is untouched: no agent, no runtime row, and the
-card is unchanged apart from the platform badge.
+See the agent guide's [snapshot and SSH fallback contract](agents/macos/README.md#run-it)
+for collection ownership and pending samples. When fallback is needed, the UI
+shows **Runtimes (agent unreachable)** rather than claiming nothing is serving.
+DGX Spark behaviour is untouched: no agent, no runtime row, and the card is
+unchanged apart from the platform badge.
 
 **oMLX backend.** An OpenAI-compatible server whose `/v1/models` entries are `owned_by: "omlx"` is detected as **oMLX**. oMLX has no Prometheus `/metrics`, so the card reads `GET /api/status`:
 - loaded model (oMLX lists every model on disk, so the loaded one is picked from `loaded_models`);

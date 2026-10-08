@@ -68,7 +68,7 @@ POWERMETRICS_CMD = [
 # ─── small helpers ───────────────────────────────────────────────────────────
 
 def _bounded_timeout(timeout: float | None) -> float:
-    """Every external command gets a finite timeout. None and huge values do not wait."""
+    """Default missing or invalid timeouts and cap oversized values."""
     try:
         value = float(CMD_TIMEOUT_S if timeout is None else timeout)
     except (TypeError, ValueError):
