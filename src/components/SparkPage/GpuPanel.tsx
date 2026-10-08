@@ -13,7 +13,7 @@ interface GpuPanelProps {
   className?: string;
   llmPort?: number;
   conversations?: ConversationRow[];
-  /** Apple Silicon Mac: no GPU temperature or power limit; show thermal pressure instead. */
+  /** Apple Silicon Mac: no GPU power limit is available. */
   mac?: boolean;
   /** Metrics this node declared unavailable (mac agent transport). */
   unavailable?: MetricGap[] | null;

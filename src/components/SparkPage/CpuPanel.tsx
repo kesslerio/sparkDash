@@ -11,7 +11,7 @@ interface CpuPanelProps {
   sparkId: string;
   temperatureUnit: "celsius" | "fahrenheit";
   className?: string;
-  /** Apple Silicon Mac: no CPU temperature sensor, and power only with root. */
+  /** Apple Silicon Mac: CPU power requires an elevated powermetrics read. */
   mac?: boolean;
   /** Metrics this node declared unavailable (mac agent transport). */
   unavailable?: MetricGap[] | null;

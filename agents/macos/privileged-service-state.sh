@@ -1,3 +1,5 @@
+# SERVICE_STATE is consumed by scripts that source this helper.
+# shellcheck disable=SC2034
 privileged_service_state() {
   if SERVICE_OUTPUT=$(sudo -n launchctl print "system/$1" 2>&1); then
     SERVICE_STATE=loaded

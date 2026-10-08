@@ -4,8 +4,8 @@
 # read or written.
 set -eu
 
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
-REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname "$0")" && pwd)
+REPO_ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/../.." && pwd)
 LABEL=ai.onyx.sparkdash-mac-agent.privileged
 TEMPLATE="$SCRIPT_DIR/ai.onyx.sparkdash-mac-agent.privileged.plist"
 DEST="/Library/LaunchDaemons/${LABEL}.plist"

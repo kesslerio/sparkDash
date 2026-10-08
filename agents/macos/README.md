@@ -5,13 +5,10 @@ vitals plus an honest picture of which local model runtime, if any, is serving.
 
 - **stdlib only.** Runs on the system `python3`. `psutil` is used when present
   (per-core CPU detail) and never required, so there is nothing to `pip install`.
-- **Nothing invented.** GPU busy-ness and GPU/CPU/ANE power
-  need `powermetrics`, which requires root. An ordinary user keeps CPU and GPU
-  temperature null, with the reason, and still reports thermal pressure from
-  `pmset -g therm` (nominal, slow, trapped, or unknown, plus the last recorded
-  event lines). A root LaunchDaemon can publish real die temperatures in
-  celsius. Without a reading the dashboard renders "unavailable" instead of a
-  convincing zero.
+- **Nothing invented.** Missing readings are declared in `unavailable` with a
+  reason, so the dashboard renders "unavailable" instead of a convincing zero.
+  See [power](#unlocking-gpu-and-ane-power) and
+  [temperature](#opt-in-root-temperatures) collection for privilege requirements.
 - **Nothing hardcoded about the engines.** Which runtimes exist, their ports, how
   to recognise them, and how to read the served model out of argv all come from
   [`runtimes.json`](runtimes.json). A Python server that is not in the inventory
@@ -32,6 +29,11 @@ Samples are shared for two seconds (`SAMPLE_TTL_S`) so a fast poll loop costs on
 While the first sample is pending, `/metrics` returns HTTP 503 without telemetry.
 A slow refresh retains one worker and publishes its result when it finishes;
 previous samples include `sampleAgeSeconds` and `sampleStale`.
+
+A valid agent snapshot owns all system reads, including uptime and hardware
+metadata. Missing uptime or hardware metadata does not trigger SSH fallback;
+fallback is used only when the agent cannot supply a valid snapshot, including
+HTTP 503 during initial collection.
 
 ## Install as a LaunchAgent (one line)
 
@@ -70,25 +72,35 @@ plist to `/Library/LaunchDaemons/` and to bootstrap or bootout
 (`ai.onyx.sparkdash-mac-agent`, port 8790) is not modified, stopped, or
 replaced. The daemon listens on `127.0.0.1:8791` so the install does not open
 another LAN port. Point the sparkDash Mac node agent port at 8791 to read
-temperatures. Edit the installed plist's `--host` only if a remote dashboard
-must scrape it; that is the same unauthenticated `/metrics` trust model as the
-user agent.
+temperatures. A dashboard on another host cannot reach this loopback listener
+by changing the port alone. Edit the installed plist's `--host` only if a remote
+dashboard must scrape it; that is the same unauthenticated `/metrics` trust
+model as the user agent. An authorized launchd reload is needed for the new bind
+address to take effect; reinstalling restores the checked-in template's address.
 
 Installation copies only `sparkdash_mac_agent.py` and `runtimes.json` into
 `/Library/Application Support/ai.onyx.sparkdash-mac-agent`, owned by root:wheel
 and writable only by root. It refuses unprotected or symlinked parent
 directories. The daemon uses isolated Python imports and runs the protected
 copy, so checkout edits require another authorized installation to take effect.
+Uninstall confirms that the daemon is absent before deleting its plist; the
+protected collector files and logs remain on disk. Authentication or service
+inspection errors stop either script before changing the service.
 Elevated runtime detection remains limited to the console user's processes;
 without a console user it reports no runtimes. Agent processes are excluded.
 
 Security: the daemon runs as root so it can read hardware counters. It reads
-`powermetrics` text and, when that text has no die-temperature lines (Apple
-Silicon `powermetrics` does not print them), AppleSMC temperature keys
-(`Tp`/`Te`/`Ts` for CPU, `Tg` for GPU). It does not write hardware state and
-does not add a network service beyond the agent's existing read-only metrics
-listener. Every external command the agent runs has a hard timeout, so one
-stuck probe cannot wedge `/metrics`.
+`powermetrics` text and, when a CPU or GPU die-temperature reading is missing,
+falls back to AppleSMC temperature keys
+(`Tp`/`Te`/`Ts` for CPU, `Tg` for GPU). CPU and GPU temperatures are published in
+Celsius only when measured by an elevated agent; otherwise they remain null
+with an unavailable reason. The agent's thermal-pressure row summarizes **last
+recorded** `pmset -g therm` warnings (nominal, slow, trapped, or unknown, with
+event lines), rather than a live temperature. SSH fallback instead uses the
+`powermetrics` pressure label described in [Mac units](../../README.md#mac-units).
+The daemon does not write hardware state. It exposes a separate read-only
+metrics listener on the loopback address above. Every external command the agent
+runs has a hard timeout, so one stuck probe cannot wedge `/metrics`.
 
 ## Runtime inventory
 
@@ -107,8 +119,10 @@ so a model-specific variant (`splash-35b`) is listed before its catch-all parent
 | `health`      | `{path, timeoutMs}` GET on loopback that proves "serving" (default `/v1/models`) |
 | `model`       | `{flags, positional}` — how to read the served model out of argv         |
 
-Anything matched by an entry is claimed by it. Every remaining TCP listener owned
-by a Python-ish process is reported once as `other-runtime`.
+Anything matched by an entry is claimed by it. Among the eligible processes
+described in [elevated-process privacy rules](#opt-in-root-temperatures), every
+remaining TCP listener owned by a Python-ish process is reported once as
+`other-runtime`.
 
 The shipped file is seeded from the captain's `model-start()` shell functions
 (`omlx`, `qflash`, `splash` + `-27b`/`-35b`, `ds4`, `ds4-serve`, `mtplx` +
@@ -123,8 +137,3 @@ python3 -m unittest discover -s agents/macos/tests
 
 They reuse the SSH collector's macOS fixtures, so both transports are asserted to
 produce the same unified-memory and powermetrics numbers from the same capture.
-
-A reachable agent owns all system reads, including uptime and hardware metadata.
-Missing fields remain unavailable; SSH fallback is used only when the agent
-cannot supply a valid snapshot. The thermal-pressure row summarizes **last
-recorded** pmset warnings, not a temperature sensor or a live Celsius reading.
