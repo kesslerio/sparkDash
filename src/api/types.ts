@@ -633,6 +633,33 @@ export interface MetricGap {
   reason: string;
 }
 
+/** One launchable catalog entry from the Mac agent's control endpoint. */
+export interface RuntimeControlTarget {
+  name: string;
+  label: string;
+  group: string;
+  groupLabel: string;
+  models: { id: string; label: string }[];
+  startable: boolean;
+  stoppable: boolean;
+  reason?: string | null;
+}
+
+/**
+ * Mac runtime control as the dashboard server reports it.
+ * `serving` is null when the probe did not answer — that is not "nothing serving".
+ */
+export interface RuntimeControlView {
+  state: "ready" | "unavailable" | "denied";
+  reason: string | null;
+  serving: MacRuntime[] | null;
+  targets: RuntimeControlTarget[];
+  error?: string | null;
+  output?: string | null;
+  ok?: boolean;
+  authorized?: boolean;
+}
+
 // ─── Spark snapshot (server pushes this) ──────────────────
 export interface SparkSnapshot {
   id: string;

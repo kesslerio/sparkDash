@@ -21,8 +21,11 @@ Design rules this file lives by
 
 Usage
   sparkdash_mac_agent.py --once                     # one JSON snapshot to stdout
-  sparkdash_mac_agent.py --serve --port 8790        # HTTP: /metrics, /health
+  sparkdash_mac_agent.py --serve --port 8790        # HTTP: /metrics, /health, /control
   sparkdash_mac_agent.py --once --config my.json    # custom runtime inventory
+
+/control is opt-in. It is refused until SPARKDASH_MAC_CONTROL_TOKEN is set,
+and it never runs a start or stop command except on POST. /metrics is unchanged.
 """
 
 from __future__ import annotations
@@ -48,6 +51,8 @@ SCHEMA = "sparkdash.mac-agent/1"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8790
 DEFAULT_INVENTORY = Path(__file__).resolve().with_name("runtimes.json")
+DEFAULT_CONTROL = Path(__file__).resolve().with_name("control.json")
+CONTROL_SCHEMA = "sparkdash.mac-control/1"
 
 SAMPLE_TTL_S = 2.0            # share one sample across close-together requests
 CMD_TIMEOUT_S = 4.0
@@ -1255,6 +1260,7 @@ class SampleCache:
 
 class Handler(BaseHTTPRequestHandler):
     cache: SampleCache  # set on the subclass below
+    control = None  # RuntimeControl, or None when the catalog module is absent
     server_version = "sparkdash-mac-agent/" + AGENT_VERSION
 
     def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler API
@@ -1264,8 +1270,106 @@ class Handler(BaseHTTPRequestHandler):
             self._json(payload, status=200 if payload.get("schema") == SCHEMA else 503)
         elif path == "/health":
             self._json({"ok": True, "schema": SCHEMA, "agentVersion": AGENT_VERSION})
+        elif path == "/control":
+            self._control_status()
         else:
             self.send_error(404, "unknown path")
+
+    def do_POST(self):  # noqa: N802 - BaseHTTPRequestHandler API
+        path = self.path.split("?", 1)[0]
+        if path == "/control/start":
+            self._control_action("start")
+        elif path == "/control/stop":
+            self._control_action("stop")
+        else:
+            self.send_error(404, "unknown path")
+
+    def _root_control_refusal(self) -> dict[str, object] | None:
+        # The privileged collector is the same script. It must not launch
+        # anything, even if a control object was injected by mistake.
+        if os.geteuid() != 0:
+            return None
+        reason = "privileged collector cannot launch user runtimes"
+        return {
+            "schema": CONTROL_SCHEMA,
+            "ok": False,
+            "control": "denied",
+            "reason": reason,
+            "error": reason,
+            "serving": None,
+            "servingError": None,
+            "targets": [],
+        }
+
+    def _control_status(self) -> None:
+        refused = self._root_control_refusal()
+        if refused is not None:
+            self._json(refused)
+            return
+        if self.control is None:
+            reason = "runtime control is not installed on this agent"
+            self._json({
+                "schema": CONTROL_SCHEMA,
+                "control": "disabled",
+                "reason": reason,
+                "serving": None,
+                "servingError": None,
+                "targets": [],
+            })
+            return
+        self._json(self.control.status())
+
+    def _control_action(self, action: str) -> None:
+        refused = self._root_control_refusal()
+        if refused is not None:
+            self._json(refused, status=403)
+            return
+        if self.control is None:
+            reason = "runtime control is not installed on this agent"
+            self._json({
+                "schema": CONTROL_SCHEMA,
+                "ok": False,
+                "control": "disabled",
+                "reason": reason,
+                "error": reason,
+                "serving": None,
+                "servingError": None,
+                "targets": [],
+            }, status=403)
+            return
+        body, error = self._read_json_object()
+        if error:
+            self._json({
+                "schema": CONTROL_SCHEMA,
+                "ok": False,
+                "control": "ready",
+                "reason": error,
+                "error": error,
+                "serving": None,
+                "servingError": None,
+                "targets": [],
+            }, status=400)
+            return
+        status, payload = self.control.act(action, self.headers, body)
+        self._json(payload, status=status)
+
+    def _read_json_object(self) -> tuple[dict | None, str | None]:
+        try:
+            length = int(self.headers.get("Content-Length") or "0")
+        except ValueError:
+            return None, "control request has a bad Content-Length"
+        if length < 0 or length > 8192:
+            return None, "control request body is too large"
+        raw = self.rfile.read(length) if length else b""
+        if not raw:
+            return {}, None
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except Exception as exc:
+            return None, f"control request is not JSON: {exc}"
+        if not isinstance(data, dict):
+            return None, "control request must be a JSON object"
+        return data, None
 
     def _json(self, payload: dict[str, object], status: int = 200) -> None:
         body = json.dumps(payload).encode("utf-8")
@@ -1280,12 +1384,33 @@ class Handler(BaseHTTPRequestHandler):
         return
 
 
-def make_handler(cache: SampleCache):
-    return type("SparkdashHandler", (Handler,), {"cache": cache})
+def make_handler(cache: SampleCache, control=None):
+    return type("SparkdashHandler", (Handler,), {"cache": cache, "control": control})
 
 
-def serve(host: str, port: int, cache: SampleCache) -> None:
-    httpd = ThreadingHTTPServer((host, port), make_handler(cache))
+def build_runtime_control(inventory: dict[str, object], catalog_path: Path):
+    """User-agent control object. Import failure leaves metrics serving intact."""
+    try:
+        from runtime_control import RuntimeControl, load_control_catalog, run_control_command
+    except ImportError:
+        return None
+    catalog, load_error = load_control_catalog(catalog_path)
+
+    def probe():
+        return detect_runtimes(inventory, list_processes(), listening_sockets())
+
+    return RuntimeControl(
+        catalog,
+        token=os.environ.get("SPARKDASH_MAC_CONTROL_TOKEN", ""),
+        euid=os.geteuid(),
+        load_error=load_error,
+        probe_serving=probe,
+        runner=run_control_command,
+    )
+
+
+def serve(host: str, port: int, cache: SampleCache, control=None) -> None:
+    httpd = ThreadingHTTPServer((host, port), make_handler(cache, control))
     print(f"sparkdash-mac-agent listening on http://{host}:{port}/metrics", file=sys.stderr, flush=True)
     try:
         httpd.serve_forever()
@@ -1304,6 +1429,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="bind port for --serve")
     parser.add_argument("--config", default=os.environ.get("SPARKDASH_RUNTIMES", str(DEFAULT_INVENTORY)),
                         help="runtime inventory JSON")
+    parser.add_argument("--control", default=os.environ.get("SPARKDASH_MAC_CONTROL", str(DEFAULT_CONTROL)),
+                        help="runtime control catalog JSON; missing means control is unavailable")
     parser.add_argument("--powermetrics", action="store_true",
                         help="attempt powermetrics even when not root (needs sudo -n)")
     parser.add_argument("--sample-interval", type=float, default=SAMPLE_TTL_S,
@@ -1318,7 +1445,12 @@ def main(argv: list[str] | None = None) -> int:
         probe = CpuProbe(interval=args.sample_interval)
         probe.start()
         try:
-            serve(args.host, args.port, SampleCache(inventory, allow_powermetrics, probe))
+            serve(
+                args.host,
+                args.port,
+                SampleCache(inventory, allow_powermetrics, probe),
+                build_runtime_control(inventory, Path(args.control)),
+            )
         finally:
             probe.stop()
         return 0

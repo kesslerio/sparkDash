@@ -13,6 +13,7 @@ import { TailscalePanel } from "./TailscalePanel";
 import { LlmPanel } from "./LlmPanel";
 import { ComfyPanel } from "./ComfyPanel";
 import { RuntimesPanel } from "../ui/RuntimeChips";
+import { RuntimeLauncher } from "./RuntimeLauncher";
 import { ChevronDownIcon } from "../ui/icons";
 
 interface SparkPageProps {
@@ -286,6 +287,13 @@ export function SparkPage({
             <div className="flex flex-col" style={{ gap: "var(--density-page-gap)" }}>
               {(spark.kind === "host" || spark.kind === "mac") && (
                 <RamPanel ram={metrics.ram} sparkId={spark.id} />
+              )}
+              {spark.kind === "mac" && (
+                <RuntimeLauncher
+                  sparkId={spark.id}
+                  metricsRuntimes={metrics.runtimes}
+                  agentOnline={metrics.agentOnline}
+                />
               )}
               {/* Mac agent transport only: what is actually serving, from the
                   node's own process/port inventory. */}
