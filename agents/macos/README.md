@@ -29,6 +29,9 @@ python3 agents/macos/sparkdash_mac_agent.py --once --config my-runtimes.json
 `GET /metrics` returns the snapshot; `GET /health` is a cheap liveness answer.
 Samples are shared for two seconds (`SAMPLE_TTL_S`) so a fast poll loop costs one
 `iostat` + one `lsof`, not one per request.
+While the first sample is pending, `/metrics` returns HTTP 503 without telemetry.
+A slow refresh retains one worker and publishes its result when it finishes;
+previous samples include `sampleAgeSeconds` and `sampleStale`.
 
 ## Install as a LaunchAgent (one line)
 
@@ -70,6 +73,14 @@ another LAN port. Point the sparkDash Mac node agent port at 8791 to read
 temperatures. Edit the installed plist's `--host` only if a remote dashboard
 must scrape it; that is the same unauthenticated `/metrics` trust model as the
 user agent.
+
+Installation copies only `sparkdash_mac_agent.py` and `runtimes.json` into
+`/Library/Application Support/ai.onyx.sparkdash-mac-agent`, owned by root:wheel
+and writable only by root. It refuses unprotected or symlinked parent
+directories. The daemon uses isolated Python imports and runs the protected
+copy, so checkout edits require another authorized installation to take effect.
+Elevated runtime detection remains limited to the console user's processes;
+without a console user it reports no runtimes. Agent processes are excluded.
 
 Security: the daemon runs as root so it can read hardware counters. It reads
 `powermetrics` text and, when that text has no die-temperature lines (Apple

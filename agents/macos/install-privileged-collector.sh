@@ -9,6 +9,8 @@ REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
 LABEL=ai.onyx.sparkdash-mac-agent.privileged
 TEMPLATE="$SCRIPT_DIR/ai.onyx.sparkdash-mac-agent.privileged.plist"
 DEST="/Library/LaunchDaemons/${LABEL}.plist"
+INSTALL_DIR="/Library/Application Support/ai.onyx.sparkdash-mac-agent"
+HELPER="$SCRIPT_DIR/privileged_collector_install.py"
 USER_AGENT="${HOME:-}/Library/LaunchAgents/ai.onyx.sparkdash-mac-agent.plist"
 
 if [ ! -f "$TEMPLATE" ]; then
@@ -25,22 +27,17 @@ fi
 
 TMP=$(mktemp "${TMPDIR:-/tmp}/sparkdash-mac-agent-privileged.XXXXXX.plist")
 trap 'rm -f "$TMP"' EXIT
-python3 - "$TEMPLATE" "$TMP" "$REPO_ROOT" <<'PY'
-import pathlib, sys
-template, dest, root = sys.argv[1:]
-text = pathlib.Path(template).read_text(encoding="utf-8")
-pathlib.Path(dest).write_text(text.replace("REPO_ROOT", root), encoding="utf-8")
-PY
+/usr/bin/python3 -I "$HELPER" plist "$TEMPLATE" "$INSTALL_DIR" > "$TMP"
+plutil -lint "$TMP"
 
-sudo cp "$TMP" "$DEST"
-sudo chown root:wheel "$DEST"
-sudo chmod 644 "$DEST"
+sudo /usr/bin/python3 -I "$HELPER" install "$SCRIPT_DIR" "$INSTALL_DIR" "$TMP" "$DEST"
 if sudo launchctl print "system/${LABEL}" >/dev/null 2>&1; then
-  sudo launchctl bootout "system/${LABEL}" || true
+  sudo launchctl bootout "system/${LABEL}"
 fi
+sudo launchctl enable "system/${LABEL}"
 sudo launchctl bootstrap system "$DEST"
-sudo launchctl enable "system/${LABEL}" || true
-sudo launchctl kickstart -k "system/${LABEL}" || true
+sudo launchctl kickstart -k "system/${LABEL}"
+sudo launchctl print "system/${LABEL}" >/dev/null
 echo "Privileged collector is on http://127.0.0.1:8791/metrics"
 echo "Point the sparkDash Mac node agent port at 8791 to read temperatures."
 echo "Uninstall with: agents/macos/uninstall-privileged-collector.sh"
