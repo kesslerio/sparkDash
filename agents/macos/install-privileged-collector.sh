@@ -30,14 +30,17 @@ trap 'rm -f "$TMP"' EXIT
 /usr/bin/python3 -I "$HELPER" plist "$TEMPLATE" "$INSTALL_DIR" > "$TMP"
 plutil -lint "$TMP"
 
-sudo /usr/bin/python3 -I "$HELPER" install "$SCRIPT_DIR" "$INSTALL_DIR" "$TMP" "$DEST"
-if sudo launchctl print "system/${LABEL}" >/dev/null 2>&1; then
-  sudo launchctl bootout "system/${LABEL}"
+sudo -v
+. "$SCRIPT_DIR/privileged-service-state.sh"
+privileged_service_state "$LABEL"
+sudo -n /usr/bin/python3 -I "$HELPER" install "$SCRIPT_DIR" "$INSTALL_DIR" "$TMP" "$DEST"
+if [ "$SERVICE_STATE" = loaded ]; then
+  sudo -n launchctl bootout "system/${LABEL}"
 fi
-sudo launchctl enable "system/${LABEL}"
-sudo launchctl bootstrap system "$DEST"
-sudo launchctl kickstart -k "system/${LABEL}"
-sudo launchctl print "system/${LABEL}" >/dev/null
+sudo -n launchctl enable "system/${LABEL}"
+sudo -n launchctl bootstrap system "$DEST"
+sudo -n launchctl kickstart -k "system/${LABEL}"
+sudo -n launchctl print "system/${LABEL}" >/dev/null
 echo "Privileged collector is on http://127.0.0.1:8791/metrics"
 echo "Point the sparkDash Mac node agent port at 8791 to read temperatures."
 echo "Uninstall with: agents/macos/uninstall-privileged-collector.sh"
