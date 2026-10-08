@@ -11,7 +11,7 @@ interface CpuPanelProps {
   sparkId: string;
   temperatureUnit: "celsius" | "fahrenheit";
   className?: string;
-  /** Apple Silicon Mac: no CPU temperature sensor, and power only with root. */
+  /** Apple Silicon Mac: CPU power requires an elevated powermetrics read. */
   mac?: boolean;
   /** Metrics this node declared unavailable (mac agent transport). */
   unavailable?: MetricGap[] | null;
@@ -72,10 +72,12 @@ export function CpuPanel({
     temperatureUnit === "fahrenheit" ? celsiusToFahrenheit(temperature) : temperature;
   const tempLabel = temperatureUnit === "fahrenheit" ? `${displayTemp}°F` : `${displayTemp}°C`;
 
-  // Apple Silicon exposes no CPU temperature, and CPU power needs a root
-  // powermetrics read. Show the declared gap rather than a confident 0.
+  // A missing Mac temperature stays unavailable. A finite reading from the
+  // privileged collector is a real value, not a platform gap.
+  const hasTemperature =
+    typeof cpu?.temperature === "number" && Number.isFinite(cpu.temperature) && cpu.temperature > 0;
   const tempView = honestGap(unavailable, "cpu.temperature", tempLabel, {
-    nonDgx: mac || cpu?.temperature == null,
+    nonDgx: !hasTemperature && (mac || cpu?.temperature == null),
   });
   const powerView = honestGap(unavailable, "cpu.power", `${draw}W${tdp > 0 ? ` / ${tdp}W` : ""}`, {
     nonDgx: mac && draw === 0,

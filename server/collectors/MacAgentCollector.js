@@ -36,6 +36,10 @@ export function isUnavailable(unavailable, metric) {
   return Array.isArray(unavailable) && unavailable.some((row) => row?.metric === metric);
 }
 
+function finiteTemperature(value) {
+  return typeof value === "number" && Number.isFinite(value) && value > 0;
+}
+
 function reasonFor(unavailable, metric, fallback) {
   const row = Array.isArray(unavailable) ? unavailable.find((r) => r?.metric === metric) : null;
   return row?.reason || fallback;
@@ -94,8 +98,14 @@ export class MacAgentCollector extends MacSystemCollector {
 
   _agentEntries(snapshot) {
     const entries = Array.isArray(snapshot?.unavailable) ? [...snapshot.unavailable] : [];
+    const present = {
+      "cpu.temperature": finiteTemperature(snapshot?.cpu?.temperature),
+      "gpu.temperature": finiteTemperature(snapshot?.gpu?.temperature),
+    };
     for (const metric of ["cpu.temperature", "gpu.temperature"]) {
-      if (!isUnavailable(entries, metric)) entries.push({ metric, reason: "requires root for powermetrics" });
+      if (!present[metric] && !isUnavailable(entries, metric)) {
+        entries.push({ metric, reason: "requires root for powermetrics" });
+      }
     }
     return entries;
   }
@@ -112,7 +122,7 @@ export class MacAgentCollector extends MacSystemCollector {
     const thermal = gpu.thermalPressure && gpu.thermalPressure !== "Nominal";
     return {
       ...base,
-      temperature: null,
+      temperature: finiteTemperature(gpu.temperature) ? gpu.temperature : null,
       usage: read ? Math.round(gpu.activePercent ?? 0) : 0,
       power: {
         draw: read ? gpu.powerW ?? 0 : 0,
@@ -141,7 +151,7 @@ export class MacAgentCollector extends MacSystemCollector {
     this.lastCpuUsagePct = usage;
     return {
       usage,
-      temperature: null,
+      temperature: finiteTemperature(snapshot.cpu?.temperature) ? snapshot.cpu.temperature : null,
       draw: snapshot.gpu?.powermetrics === "ok" ? snapshot.gpu?.cpuW ?? 0 : 0,
       tdp: 0,
     };

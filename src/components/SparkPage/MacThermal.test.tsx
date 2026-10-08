@@ -28,6 +28,16 @@ describe("Mac thermal reporting", () => {
     expect(container.textContent).toContain("unavailable: cpu.temperature is not reported by this platform");
     expect(container.textContent).not.toContain("0°C");
   });
+  it("shows a privileged Mac temperature instead of the unavailable reason", () => {
+    const base = makeSpark("mac", true).metrics;
+    const { container } = render(<><CpuPanel cpu={{ ...base.cpu!, temperature: 46.2 }} mac sparkId="mac" temperatureUnit="celsius" unavailable={[]} />
+      <GpuPanel gpu={{ ...base.gpu!, temperature: 42.1, thermalPressure: "nominal", thermal: { pressureState: "nominal", lastRecordedEvents: [], source: "pmset -g therm" } }} mac sparkId="mac" temperatureUnit="celsius" unavailable={[]} />
+    </>);
+    expect(container.textContent).toContain("46.2°C");
+    expect(container.textContent).toContain("42.1°C");
+    expect(container.textContent).not.toContain("requires root for powermetrics");
+    expect(container.textContent).toContain("nominal");
+  });
   it("preserves measured DGX temperatures", () => {
     const base = makeSpark("dgx", true).metrics;
     const { container } = render(<>

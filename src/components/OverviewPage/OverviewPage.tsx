@@ -292,7 +292,6 @@ function SparkCard({
               );
             })()}
             {spark.kind === "mac" ? (() => {
-              // Macs have no GPU temperature; show CPU load in that slot.
               const cpuUsage = spark.metrics.cpu?.usage ?? 0;
               const cpuBarColor = cpuUsage > 85 ? "bg-danger" : cpuUsage > 60 ? "bg-warning" : "bg-accent";
               return (
