@@ -1,3 +1,4 @@
+# shellcheck shell=sh
 # SERVICE_STATE is consumed by scripts that source this helper.
 # shellcheck disable=SC2034
 privileged_service_state() {
