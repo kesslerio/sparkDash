@@ -93,7 +93,11 @@ export class MacAgentCollector extends MacSystemCollector {
   }
 
   _agentEntries(snapshot) {
-    return Array.isArray(snapshot?.unavailable) ? snapshot.unavailable : [];
+    const entries = Array.isArray(snapshot?.unavailable) ? [...snapshot.unavailable] : [];
+    for (const metric of ["cpu.temperature", "gpu.temperature"]) {
+      if (!isUnavailable(entries, metric)) entries.push({ metric, reason: "requires root for powermetrics" });
+    }
+    return entries;
   }
 
   // ─── Metrics ──────────────────────────────────────────────
@@ -108,7 +112,7 @@ export class MacAgentCollector extends MacSystemCollector {
     const thermal = gpu.thermalPressure && gpu.thermalPressure !== "Nominal";
     return {
       ...base,
-      temperature: 0,
+      temperature: null,
       usage: read ? Math.round(gpu.activePercent ?? 0) : 0,
       power: {
         draw: read ? gpu.powerW ?? 0 : 0,
@@ -123,7 +127,8 @@ export class MacAgentCollector extends MacSystemCollector {
       },
       processes: [],
       throttle: this._buildThrottle({ swThermal: Boolean(thermal), smClockMHz: gpu.freqMHz ?? null }),
-      thermalPressure: gpu.thermalPressure ?? null,
+      thermalPressure: snapshot.thermal?.pressureState ?? gpu.thermalPressure ?? null,
+      thermal: snapshot.thermal ?? null,
       powermetricsAvailable: read,
       unavailable: this._agentEntries(snapshot),
     };
@@ -136,7 +141,7 @@ export class MacAgentCollector extends MacSystemCollector {
     this.lastCpuUsagePct = usage;
     return {
       usage,
-      temperature: 0,
+      temperature: null,
       draw: snapshot.gpu?.powermetrics === "ok" ? snapshot.gpu?.cpuW ?? 0 : 0,
       tdp: 0,
     };
@@ -256,14 +261,15 @@ export class MacAgentCollector extends MacSystemCollector {
   async readBootTime() {
     const snapshot = await this._agentSnapshot();
     const boot = Number(snapshot?.bootTime);
-    if (Number.isFinite(boot) && boot > 0) return boot;
+    if (snapshot) return Number.isFinite(boot) && boot > 0 ? boot : null;
     return super.readBootTime();
   }
 
   async detectHardware() {
     const snapshot = await this._agentSnapshot();
     const host = snapshot?.host;
-    if (!host) return super.detectHardware();
+    if (!snapshot) return super.detectHardware();
+    if (!host) return null;
     const memMB = Number(host.totalMemoryMB) || 0;
     return {
       device: host.model ? `Mac (${host.model})` : "Apple Silicon Mac",

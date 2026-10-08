@@ -202,7 +202,8 @@ export interface GpuThrottle {
 }
 
 export interface GpuMetrics {
-  temperature: number;
+  temperature: number | null;
+  thermal?: { pressureState: string; lastRecordedEvents: string[]; source: string } | null;
   usage: number;
   /** macOS thermal pressure level from powermetrics (Nominal, Moderate, Heavy, …). Mac units only. */
   thermalPressure?: string | null;
@@ -254,7 +255,7 @@ export interface GpuDevice {
 // ─── CPU metrics ─────────────────────────────────────────
 export interface CpuMetrics {
   usage: number;
-  temperature: number;
+  temperature: number | null;
   draw: number;
   tdp: number;
 }

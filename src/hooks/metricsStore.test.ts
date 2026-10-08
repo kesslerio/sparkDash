@@ -105,7 +105,7 @@ describe("metricsStore LLM rate ingestion", () => {
     act(() => {
       ingestSnapshots([
         snapshot(llm({ generationTps: 10, prefillTps: 20 })),
-      ]);
+      ], 1000);
     });
     expect(result.current.generation).toEqual([10]);
     expect(result.current.prefill).toEqual([20]);
@@ -113,7 +113,7 @@ describe("metricsStore LLM rate ingestion", () => {
     act(() => {
       ingestSnapshots([
         snapshot(llm({ generationTps: Number.NaN, prefillTps: null })),
-      ]);
+      ], 2000);
     });
     expect(result.current.generation).toEqual([10]);
     expect(result.current.prefill).toEqual([20]);
@@ -121,7 +121,7 @@ describe("metricsStore LLM rate ingestion", () => {
     act(() => {
       ingestSnapshots([
         snapshot(llm({ generationTps: 0, prefillTps: 0 })),
-      ]);
+      ], 3000);
     });
     expect(result.current.generation).toEqual([10, 0]);
     expect(result.current.prefill).toEqual([20, 0]);

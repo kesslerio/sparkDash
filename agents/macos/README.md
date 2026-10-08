@@ -5,8 +5,10 @@ vitals plus an honest picture of which local model runtime, if any, is serving.
 
 - **stdlib only.** Runs on the system `python3`. `psutil` is used when present
   (per-core CPU detail) and never required, so there is nothing to `pip install`.
-- **Nothing invented.** GPU busy-ness, GPU/CPU/ANE power and thermal pressure
-  only exist behind `powermetrics`, which needs root. Without it the agent
+- **Nothing invented.** GPU busy-ness and GPU/CPU/ANE power
+  need `powermetrics`, which requires root. Temperature stays null with an
+  explicit reason. Thermal pressure is read without root from `pmset -g therm`
+  as nominal, slow, trapped, or unknown, preserving the last recorded event lines. Without it the agent
   reports those metrics in `unavailable` with a reason, and the dashboard renders
   "unavailable" instead of a convincing zero.
 - **Nothing hardcoded about the engines.** Which runtimes exist, their ports, how
@@ -81,3 +83,8 @@ python3 -m unittest discover -s agents/macos/tests
 
 They reuse the SSH collector's macOS fixtures, so both transports are asserted to
 produce the same unified-memory and powermetrics numbers from the same capture.
+
+A reachable agent owns all system reads, including uptime and hardware metadata.
+Missing fields remain unavailable; SSH fallback is used only when the agent
+cannot supply a valid snapshot. The thermal-pressure row summarizes **last
+recorded** pmset warnings, not a temperature sensor or a live Celsius reading.

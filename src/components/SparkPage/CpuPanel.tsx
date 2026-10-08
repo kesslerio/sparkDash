@@ -75,7 +75,7 @@ export function CpuPanel({
   // Apple Silicon exposes no CPU temperature, and CPU power needs a root
   // powermetrics read. Show the declared gap rather than a confident 0.
   const tempView = honestGap(unavailable, "cpu.temperature", tempLabel, {
-    nonDgx: mac && temperature === 0,
+    nonDgx: mac || cpu?.temperature == null,
   });
   const powerView = honestGap(unavailable, "cpu.power", `${draw}W${tdp > 0 ? ` / ${tdp}W` : ""}`, {
     nonDgx: mac && draw === 0,
@@ -109,13 +109,13 @@ export function CpuPanel({
       <MetricRow
         label="Temperature"
         color={tempColor}
-        spark={<Sparkline data={tempHistory} color={tempColor} width={180} />}
+        spark={tempView.muted ? null : <Sparkline data={tempHistory} color={tempColor} width={180} />}
         value={
           <span
             className={`text-text-strong ${tempView.muted ? "font-normal text-muted" : ""}`}
             title={tempView.title}
           >
-            {tempView.text}
+            {tempView.muted ? `unavailable: ${tempView.title}` : tempView.text}
           </span>
         }
       />

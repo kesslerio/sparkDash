@@ -119,7 +119,7 @@ export function ingestSnapshots(sparks: SparkSnapshot[], at = Date.now()): void 
     if (m.gpu) {
       pushHistory(`${s.id}:gpu.usage`, m.gpu.usage, at);
       // Macs expose no GPU temperature; a 0 would chart as a real reading.
-      if (s.kind !== "mac") pushHistory(`${s.id}:gpu.temp`, m.gpu.temperature, at);
+      if (s.kind !== "mac" && m.gpu.temperature != null) pushHistory(`${s.id}:gpu.temp`, m.gpu.temperature, at);
       // Per-card series for multi-GPU hosts (keyed by nvidia-smi index).
       if (Array.isArray(m.gpu.gpus) && m.gpu.gpus.length > 1) {
         for (const d of m.gpu.gpus) {
@@ -131,7 +131,7 @@ export function ingestSnapshots(sparks: SparkSnapshot[], at = Date.now()): void 
     if (m.cpu) {
       pushHistory(`${s.id}:cpu.usage`, m.cpu.usage, at);
       // Skip 0°C so a missing sensor does not draw a fake floor on the sparkline.
-      if (m.cpu.temperature > 0) {
+      if (m.cpu.temperature != null && m.cpu.temperature > 0) {
         pushHistory(`${s.id}:cpu.temp`, m.cpu.temperature, at);
       }
     }

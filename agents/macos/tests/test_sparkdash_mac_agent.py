@@ -305,6 +305,25 @@ class AvailabilityTests(unittest.TestCase):
         self.assertIn("cpu.usage", metrics)
         self.assertIn("cpu.perCore", metrics)
         self.assertIn("gpu.power", metrics)
+        for component in ("cpu", "gpu"):
+            self.assertIsNone(snap[component]["temperature"])
+            self.assertIn({"metric": f"{component}.temperature", "reason": "requires root for powermetrics"}, snap["unavailable"])
+        self.assertEqual(snap["thermal"]["pressureState"], "unknown")
+
+
+class ThermalTests(unittest.TestCase):
+    def test_last_recorded_states(self):
+        for state in ("nominal", "slow", "trapped"):
+            with self.subTest(state=state):
+                text = fixture(f"pmset-therm-{state}.txt")
+                parsed = agent.parse_pmset_therm(text)
+                self.assertEqual(parsed["pressureState"], state)
+                self.assertEqual(parsed["lastRecordedEvents"], text.splitlines())
+
+    def test_unknown_and_no_event_output(self):
+        for text in ("", "Error: Failed to get thermal warning level", "Thermal Warning Level = 255", "Thermal Warning Level = 42"):
+            self.assertEqual(agent.parse_pmset_therm(text)["pressureState"], "unknown")
+        self.assertEqual(agent.parse_pmset_therm("Note: No thermal warning level has been recorded")["pressureState"], "nominal")
 
 
 class ServeTests(unittest.TestCase):

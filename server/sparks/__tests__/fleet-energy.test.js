@@ -631,6 +631,7 @@ test("integration splits energy and coverage at UTC minute boundaries", (t) => {
   const tracker = new FleetEnergyTracker({
     filePath,
     load: false,
+    now: () => minute + 61_000,
     setIntervalFn: () => 1,
     clearIntervalFn: () => {},
   });
