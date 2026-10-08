@@ -9,7 +9,7 @@ function hasFreshTimestamp(timestamp, atMs) {
 
 function isDefaultGpuResult(gpu) {
   return (
-    gpu?.temperature === 0 &&
+    (gpu?.temperature === 0 || gpu?.temperature === null) &&
     gpu?.usage === 0 &&
     gpu?.power?.draw === 0 &&
     gpu?.vram?.total === 0
@@ -19,7 +19,7 @@ function isDefaultGpuResult(gpu) {
 function isDefaultCpuResult(cpu) {
   return (
     cpu?.usage === 0 &&
-    cpu?.temperature === 0 &&
+    (cpu?.temperature === 0 || cpu?.temperature === null) &&
     cpu?.draw === 0 &&
     cpu?.tdp === 0
   );

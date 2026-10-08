@@ -206,6 +206,16 @@ export class MacSystemCollector extends SystemCollector {
     this._powermetricsBlockedUntil = 0;
   }
 
+  _defaultGpu() {
+    return { ...super._defaultGpu(), temperature: null, unavailable: [
+      { metric: "gpu.temperature", reason: "temperature is not reported by this Mac" },
+    ] };
+  }
+
+  _defaultCpu() {
+    return { ...super._defaultCpu(), temperature: null };
+  }
+
   /** One batched SSH read shared by every collector call inside the TTL. */
   async _snapshot() {
     const now = Date.now();
@@ -266,7 +276,7 @@ export class MacSystemCollector extends SystemCollector {
       const thermal = power.thermalPressure && power.thermalPressure !== "Nominal";
       return {
         ...base,
-        temperature: 0,
+        temperature: null,
         usage: Math.round(power.gpuActivePct ?? 0),
         power: { draw: power.gpuW ?? 0, limit: 0, systemDraw: power.combinedW ?? 0 },
         vram: { used: mem.used, total: mem.total, percentage: mem.percentage, available: mem.available },
@@ -286,7 +296,7 @@ export class MacSystemCollector extends SystemCollector {
       const snap = await this._snapshot();
       const usage = parseTopCpu(snap.top) ?? 0;
       this.lastCpuUsagePct = usage;
-      return { usage, temperature: 0, draw: this._lastPower?.cpuW ?? 0, tdp: 0 };
+      return { usage, temperature: null, draw: this._lastPower?.cpuW ?? 0, tdp: 0 };
     } catch (err) {
       console.error(`[MacSystemCollector] CPU error for ${this.spark.id}:`, err.message);
       return this._defaultCpu();

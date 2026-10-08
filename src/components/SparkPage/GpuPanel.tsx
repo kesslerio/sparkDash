@@ -186,6 +186,9 @@ export function GpuPanel({
     nonDgx: macUnmeasured,
   });
 
+  const tempView = honestGap(gaps, "gpu.temperature", tempLabel, {
+    nonDgx: mac || gpu?.temperature == null,
+  });
   const tempColor =
     temperature > 85
       ? "var(--color-danger)"
@@ -214,19 +217,22 @@ export function GpuPanel({
           </span>
         }
       />
+      <MetricRow
+        label="Temperature"
+        color={tempColor}
+        spark={tempView.muted ? null : <Sparkline data={tempHistory} color={tempColor} width={180} />}
+        value={
+          <span className={tempView.muted ? "font-normal text-muted" : "text-text-strong"} title={tempView.title}>
+            {tempView.muted ? `unavailable: ${tempView.title}` : tempView.text}
+          </span>
+        }
+      />
       {mac ? (
         <div className="flex justify-between text-sm">
-          <span className="text-muted">Thermal pressure</span>
-          <span className="font-tabular text-sm text-text">{gpu?.thermalPressure ?? "—"}</span>
+          <span className="text-muted">Thermal pressure (last recorded)</span>
+          <span className="font-tabular text-sm text-text" title={gpu?.thermal?.lastRecordedEvents?.join("\n")}>{gpu?.thermalPressure ?? "unknown"}</span>
         </div>
-      ) : (
-        <MetricRow
-          label="Temperature"
-          color={tempColor}
-          spark={<Sparkline data={tempHistory} color={tempColor} width={180} />}
-          value={<span className="text-text-strong">{tempLabel}</span>}
-        />
-      )}
+      ) : null}
       <div className="flex justify-between text-sm">
         <span className="text-muted">{multiGpu ? "GPU Power (all cards)" : "GPU Power"}</span>
         <span

@@ -714,6 +714,23 @@ def host_info() -> dict[str, object]:
     }
 
 
+def parse_pmset_therm(text: str) -> dict[str, object]:
+    """Expose pmset's last recorded events, never a Celsius measurement."""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    state = "unknown"
+    # pmset reports historical warning events as well as explicit no-event notes.
+    levels = re.findall(r"(?:Thermal_Level(?:_Warning)?|thermal warning level)\s*[:=]\s*(\d+)", text, re.I)
+    if levels:
+        level = int(levels[-1])
+        state = "nominal" if level == 0 else "slow" if level in (5, 100) else "trapped" if level in (10, 110) else "unknown"
+    elif "No thermal warning level has been recorded" in text:
+        state = "nominal"
+    limits = re.findall(r"CPU_(?:Speed|Scheduler)_Limit\s*=\s*(\d+)", text)
+    if state == "nominal" and any(int(limit) < 100 for limit in limits):
+        state = "slow"
+    return {"pressureState": state, "lastRecordedEvents": lines, "source": "pmset -g therm"}
+
+
 def collect_snapshot(inventory: dict[str, object], *, allow_powermetrics: bool,
                      cpu_probe: CpuProbe | None = None,
                      procs: dict[int, dict[str, object]] | None = None,
@@ -749,6 +766,12 @@ def collect_snapshot(inventory: dict[str, object], *, allow_powermetrics: bool,
 
     gpu, gpu_unavailable = gpu_stats(allow_powermetrics)
     unavailable.extend(gpu_unavailable)
+    temperature_reason = "requires root for powermetrics" if not allow_powermetrics else "temperature is not reported by powermetrics"
+    for metric in ("cpu.temperature", "gpu.temperature"):
+        unavailable.append({"metric": metric, "reason": temperature_reason})
+    thermal = parse_pmset_therm(run(["pmset", "-g", "therm"], timeout=3.0))
+    if thermal["pressureState"] == "unknown":
+        unavailable.append({"metric": "thermal.pressureState", "reason": "pmset returned no recognized thermal state"})
 
     runtimes = detect_runtimes(
         inventory,
@@ -771,6 +794,7 @@ def collect_snapshot(inventory: dict[str, object], *, allow_powermetrics: bool,
         "host": host_info(),
         "cpu": {
             "usagePercent": usage,
+            "temperature": None,
             "perCorePercent": per_core,
             "loadAverage": [load1, load5, load15],
             "source": cpu.get("source"),
@@ -778,7 +802,8 @@ def collect_snapshot(inventory: dict[str, object], *, allow_powermetrics: bool,
         "memory": memory,
         "disks": disk_stats(),
         "network": network,
-        "gpu": gpu,
+        "gpu": {**gpu, "temperature": None},
+        "thermal": thermal,
         "runtimes": runtimes,
         "unavailable": unavailable,
     }

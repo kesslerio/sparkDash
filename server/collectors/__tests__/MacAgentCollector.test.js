@@ -68,7 +68,7 @@ test("vitals come from one agent read and keep the existing shapes", async () =>
     collector.collectGpu(),
   ]);
   assert.equal(cpu.usage, 37.5);
-  assert.equal(cpu.temperature, 0, "Apple Silicon reports no CPU temperature");
+  assert.equal(cpu.temperature, null, "Apple Silicon reports no CPU temperature");
   assert.equal(ram.total, 131072);
   assert.equal(ram.used, 110103);
   assert.deepEqual(ram.swap, { total: 10240, used: 8607, free: 1633 });
@@ -172,4 +172,28 @@ test("agent down: SSH answers the vitals and the gap says the agent is gone", as
       `${mode}: expected an SSH fallback read`
     );
   }
+});
+
+
+test("reachable agent owns every system read even when optional metadata is missing", async () => {
+  const execCalls = [];
+  const data = { schema: "sparkdash.mac-agent/1", thermal: { pressureState: "slow", lastRecordedEvents: ["Thermal Warning Level = 100"], source: "pmset -g therm" } };
+  const collector = new MacAgentCollector(spark, {
+    fetchImpl: async () => ({ ok: true, json: async () => data }),
+    exec: async (_spark, cmd) => { execCalls.push(cmd); throw new Error("SSH must not run"); },
+  });
+  const results = await Promise.all([
+    collector.collectCpu(), collector.collectGpu(), collector.collectRam(),
+    collector.collectUnifiedMemory(), collector.collectNetwork(), collector.collectStorage(),
+    collector.readBootTime(), collector.detectHardware(), collector.pingHost(), collector.collectRuntimes(),
+  ]);
+  assert.equal(results[0].temperature, null);
+  assert.equal(results[1].temperature, null);
+  assert.equal(results[1].thermalPressure, "slow");
+  assert.deepEqual(results[1].thermal, data.thermal);
+  assert.equal(results[6], null);
+  assert.equal(results[7], null);
+  assert.equal(results[9].agentOnline, true);
+  assert.ok(isUnavailable(results[9].unavailable, "cpu.temperature"));
+  assert.deepEqual(execCalls, []);
 });
