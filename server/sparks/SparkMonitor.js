@@ -30,6 +30,7 @@ import {
 } from "../config.js";
 
 const ONLINE_GRACE_MS = 10000;
+const POLL_INTERVAL_RUNTIMES = 30_000;
 
 function sameConversationRows(a, b) {
   if (a === b) return true;
@@ -161,6 +162,8 @@ export class SparkMonitor {
     this._hermesIntervalId = null;
     /** @type {ReturnType<typeof setInterval> | null} */
     this._tailscaleIntervalId = null;
+    /** @type {ReturnType<typeof setInterval> | null} */
+    this._runtimesIntervalId = null;
     this._running = false;
     this._runGeneration = 0;
     /** @type {Record<string, boolean | symbol>} in-flight domain guards */
@@ -189,11 +192,15 @@ export class SparkMonitor {
     this.spark = spark;
     if (kindChanged || transportChanged) {
       this.collector = createCollector(spark);
+      this._metrics.runtimes = null;
+      this._metrics.unavailable = null;
+      this._metrics.agentOnline = null;
       this._hardwareSummary = this._staticHardwareSummary(spark);
       this._detectHardwareInBackground();
     } else {
       this.collector.spark = spark;
     }
+    if (kindChanged || transportChanged) this._restartRuntimesPollInterval();
 
     // Rebuild LLM probe map — add new ports, remove stale ones, update existing
     const ports = this._llmMonitoringEnabled() ? this._llmPorts() : [];
@@ -471,6 +478,7 @@ export class SparkMonitor {
     this._restartComfyPollInterval();
     this._restartHermesPollInterval();
     this._restartTailscalePollInterval();
+    this._restartRuntimesPollInterval();
     // Liveness on a slightly slower cadence
     this._intervals.push(setInterval(() => this._checkOnline(), POLL_INTERVAL_LIVENESS));
     console.log(`[SparkMonitor] ${this.spark.id} started`);
@@ -489,6 +497,7 @@ export class SparkMonitor {
     this._comfyIntervalId = null;
     this._hermesIntervalId = null;
     this._tailscaleIntervalId = null;
+    this._runtimesIntervalId = null;
     this._inflight = {};
     if (this.comfyProbe) {
       try {
@@ -646,6 +655,23 @@ export class SparkMonitor {
   }
 
   // ─── Polling ──────────────────────────────────────────────
+  /** Keep agent inventory fresh, including recovery after startup probes fail. */
+  _restartRuntimesPollInterval() {
+    if (this._runtimesIntervalId != null) {
+      clearInterval(this._runtimesIntervalId);
+      this._intervals = this._intervals.filter((id) => id !== this._runtimesIntervalId);
+      this._runtimesIntervalId = null;
+    }
+    if (this._running && this.collector instanceof MacAgentCollector) {
+      this._runtimesIntervalId = setInterval(
+        () => this._pollDomain("runtimes"),
+        POLL_INTERVAL_RUNTIMES
+      );
+      this._intervals.push(this._runtimesIntervalId);
+      void this._pollDomain("runtimes");
+    }
+  }
+
   async _poll() {
     if (!this._running) return;
     await Promise.all([
@@ -782,6 +808,11 @@ export class SparkMonitor {
       }
       this._lastUpdate[domain] = Date.now();
     } catch (err) {
+      if (domain === "runtimes" && this._running && this._runGeneration === runGeneration) {
+        this._metrics.runtimes = [];
+        this._metrics.unavailable = [{ metric: "agent", reason: "mac agent runtimes probe failed" }];
+        this._metrics.agentOnline = false;
+      }
       if (
         this._running &&
         this._runGeneration === runGeneration &&
