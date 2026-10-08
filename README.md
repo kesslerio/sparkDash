@@ -521,6 +521,14 @@ adds runtime inventory and explicit metric availability:
   gets a **Model runtimes** panel. See the agent guide's
   [inventory rules](agents/macos/README.md#runtime-inventory) and
   [elevated-process privacy rules](agents/macos/README.md#opt-in-root-temperatures).
+- **Runtime launcher (Mac node only).** The Mac page also has a launcher tile:
+  runtime picker, model picker, and one Launch or Stop action. It talks to the
+  agent `/control` endpoint and stays unavailable until
+  `SPARKDASH_MAC_CONTROL_TOKEN` is set on both the agent and the dashboard.
+  Nothing is started just to refresh the tile. A failed action shows the
+  command's error, and the serving line comes from a live probe. Other unit
+  types do not get this control. See
+  [Runtime control](agents/macos/README.md#runtime-control).
 - **Honest availability.** Missing metrics render as **unavailable** with the
   node's reason in the tooltip; CPU and GPU temperature rows also show the reason
   inline. See the [agent guide](agents/macos/README.md) for metric sources and

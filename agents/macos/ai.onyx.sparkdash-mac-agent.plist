@@ -21,10 +21,12 @@
         <string>/Users/PLACEHOLDER/REPOS/sparkDash/agents/macos/runtimes.json</string>
     </array>
 
-    <!-- Bind 0.0.0.0 so the sparkDash host can reach it. The endpoint is
-         read-only metrics with no credentials, so keep it on a trusted
-         network (LAN or tailnet); use --host 127.0.0.1 when something on this
-         Mac scrapes it instead. -->
+    <!-- Bind 0.0.0.0 so the sparkDash host can reach it. /metrics and
+         /health stay read-only and unauthenticated. /control start and stop
+         stay refused until SPARKDASH_MAC_CONTROL_TOKEN is set here; do not
+         put a placeholder token in this template. Keep the listener on a
+         trusted network (LAN or tailnet); use --host 127.0.0.1 when something
+         on this Mac scrapes it instead. -->
     <key>RunAtLoad</key>
     <true/>
 

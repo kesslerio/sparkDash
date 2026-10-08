@@ -24,6 +24,9 @@ python3 agents/macos/sparkdash_mac_agent.py --once --config my-runtimes.json
 ```
 
 `GET /metrics` returns the snapshot; `GET /health` is a cheap liveness answer.
+`GET /control` lists launch targets and the serving probe. `POST /control/start`
+and `POST /control/stop` are the only paths that run a command, and only when
+`SPARKDASH_MAC_CONTROL_TOKEN` matches. See [Runtime control](#runtime-control).
 Samples are shared for two seconds (`SAMPLE_TTL_S`) so a fast poll loop costs one
 `iostat` + one `lsof`, not one per request.
 While the first sample is pending, `/metrics` returns HTTP 503 without telemetry.
@@ -128,6 +131,34 @@ The shipped file is seeded from the captain's `model-start()` shell functions
 (`omlx`, `qflash`, `splash` + `-27b`/`-35b`, `ds4`, `ds4-serve`, `mtplx` +
 `-27b`/`-35b`/`-flash`, the `:8200` MTPLX mux, and `tensorfold`). Copy it, edit
 it, and point `--config` at your own — the agent has no built-in engine names.
+
+## Runtime control
+
+The user agent can start and stop a catalogued runtime. It does not grow a second
+daemon: the same `--serve` process answers `/control`. The privileged root
+collector refuses these routes (`python3 -I` does not even load the control
+module; if it did, uid 0 still returns permission denied).
+
+Control is **off** until both sides share a token. Set
+`SPARKDASH_MAC_CONTROL_TOKEN` in the user agent's LaunchAgent environment and
+in the sparkDash server environment. Until then the dashboard tile says
+unavailable and does not offer a launch button. A wrong token is permission
+denied, and the command is not run.
+
+| method | path | effect |
+| ------ | ---- | ------ |
+| GET | `/control` | catalog plus what a process/port probe sees serving. Runs no start command. |
+| POST | `/control/start` | runs that target's catalog `start` argv. Body: `{"runtime","model"}`. |
+| POST | `/control/stop` | runs that target's catalog `stop` argv. |
+
+The request names a catalog entry. It is not interpolated into the command.
+The shipped [`control.json`](control.json) mirrors `model-start` / `model-stop`
+on the captain's Mac by sourcing `~/.zshrc` and calling those functions, including
+their mutual exclusion. A machine without those functions gets the shell's real
+error on the tile; the tile does not turn green because a command exited.
+
+`/metrics` is unchanged. A control request does not refresh or rewrite the
+metrics sample, and a slow start command does not hold `/metrics`.
 
 ## Tests
 
