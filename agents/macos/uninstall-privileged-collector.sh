@@ -4,6 +4,7 @@
 # not stopped or removed.
 set -eu
 
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 LABEL=ai.onyx.sparkdash-mac-agent.privileged
 DEST="/Library/LaunchDaemons/${LABEL}.plist"
 USER_AGENT="${HOME:-}/Library/LaunchAgents/ai.onyx.sparkdash-mac-agent.plist"
@@ -13,12 +14,16 @@ if [ -n "${HOME:-}" ] && [ -f "$USER_AGENT" ]; then
   echo "Leaving $USER_AGENT in place."
 fi
 
-if sudo launchctl print "system/${LABEL}" >/dev/null 2>&1; then
-  sudo launchctl bootout "system/${LABEL}"
+sudo -v
+. "$SCRIPT_DIR/privileged-service-state.sh"
+privileged_service_state "$LABEL"
+if [ "$SERVICE_STATE" = loaded ]; then
+  sudo -n launchctl bootout "system/${LABEL}"
 fi
-if sudo launchctl print "system/${LABEL}" >/dev/null 2>&1; then
+privileged_service_state "$LABEL"
+if [ "$SERVICE_STATE" = loaded ]; then
   echo "Privileged collector is still loaded; refusing to remove its plist." >&2
   exit 1
 fi
-sudo rm -f "$DEST"
+sudo -n rm -f "$DEST"
 echo "Privileged collector removed. The user agent, if installed, is unchanged."

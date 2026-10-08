@@ -583,13 +583,15 @@ class CommandTimeoutTests(unittest.TestCase):
             self.assertEqual(cache.get()["cpu"]["temperature"], 47)
 
     def test_smc_wait_timeout_does_not_start_a_second_reader(self):
-        release = threading.Event()
+        releases = [threading.Event(), threading.Event()]
+        results = ["CPU die temperature: 46 C\nGPU die temperature: 42 C", "CPU die temperature: 51 C\nGPU die temperature: 48 C"]
         calls = []
 
         def read():
+            index = len(calls)
             calls.append(1)
-            release.wait(2)
-            return "CPU die temperature: 46 C"
+            releases[index].wait(2)
+            return results[index]
 
         with patch.object(agent, "_smc_temperature_text_from_reader", side_effect=read):
             try:
@@ -598,12 +600,24 @@ class CommandTimeoutTests(unittest.TestCase):
                 for _ in range(4):
                     self.assertEqual(agent.read_smc_temperature_text(0.01), "")
                 self.assertEqual(len(calls), 1)
-                release.set()
+                releases[0].set()
                 worker.join(2)
-                self.assertEqual(agent.read_smc_temperature_text(0.1), "CPU die temperature: 46 C")
+                self.assertFalse(worker.is_alive())
+                temps = agent.resolve_die_temperatures("", elevated=True)
+                self.assertEqual(temps["cpuCelsius"], 46)
+                self.assertEqual(temps["gpuCelsius"], 42)
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(agent.read_smc_temperature_text(0.01), "")
+                self.assertEqual(len(calls), 2)
+                worker = agent._SMC_READ[0]
+                releases[1].set()
+                worker.join(2)
+                self.assertFalse(worker.is_alive())
+                self.assertEqual(agent.read_smc_temperature_text(0.01), results[1])
                 self.assertEqual(len(calls), 2)
             finally:
-                release.set()
+                for release in releases:
+                    release.set()
                 if agent._SMC_READ:
                     agent._SMC_READ[0].join(2)
 

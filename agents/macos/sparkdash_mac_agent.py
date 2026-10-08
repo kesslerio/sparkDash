@@ -684,7 +684,7 @@ def read_smc_temperature_text(timeout: float = 4.0) -> str:
     """
     global _SMC_READ
     with _SMC_READ_LOCK:
-        if _SMC_READ is None or not _SMC_READ[0].is_alive():
+        if _SMC_READ is None:
             box: dict[str, str] = {}
 
             def work() -> None:
@@ -699,7 +699,12 @@ def read_smc_temperature_text(timeout: float = 4.0) -> str:
         else:
             thread, box = _SMC_READ
     thread.join(_bounded_timeout(timeout))
-    return box.get("text", "") if not thread.is_alive() else ""
+    with _SMC_READ_LOCK:
+        if thread.is_alive():
+            return ""
+        if _SMC_READ is not None and _SMC_READ[0] is thread:
+            _SMC_READ = None
+        return box.get("text", "")
 
 
 def resolve_die_temperatures(powermetrics_text: str, *, elevated: bool,
