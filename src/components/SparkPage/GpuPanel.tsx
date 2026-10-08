@@ -186,8 +186,10 @@ export function GpuPanel({
     nonDgx: macUnmeasured,
   });
 
+  const hasTemperature =
+    typeof gpu?.temperature === "number" && Number.isFinite(gpu.temperature) && gpu.temperature > 0;
   const tempView = honestGap(gaps, "gpu.temperature", tempLabel, {
-    nonDgx: mac || gpu?.temperature == null,
+    nonDgx: !hasTemperature && (mac || gpu?.temperature == null),
   });
   const tempColor =
     temperature > 85

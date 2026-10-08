@@ -175,6 +175,25 @@ test("agent down: SSH answers the vitals and the gap says the agent is gone", as
 });
 
 
+test("a privileged agent temperature reaches the dashboard metrics", async () => {
+  const data = structuredClone(snapshot);
+  data.cpu.temperature = 46.23;
+  data.cpu.temperatureUnit = "celsius";
+  data.gpu.temperature = 42.11;
+  data.gpu.temperatureUnit = "celsius";
+  data.unavailable = (data.unavailable || []).filter((row) => !String(row.metric).endsWith(".temperature"));
+  const collector = new MacAgentCollector(spark, {
+    fetchImpl: async () => ({ ok: true, json: async () => data }),
+    exec: async () => { throw new Error("SSH must not run"); },
+  });
+  const cpu = await collector.collectCpu();
+  const gpu = await collector.collectGpu();
+  assert.equal(cpu.temperature, 46.23);
+  assert.equal(gpu.temperature, 42.11);
+  assert.equal(isUnavailable(gpu.unavailable, "cpu.temperature"), false);
+  assert.equal(isUnavailable(gpu.unavailable, "gpu.temperature"), false);
+});
+
 test("reachable agent owns every system read even when optional metadata is missing", async () => {
   const execCalls = [];
   const data = { schema: "sparkdash.mac-agent/1", thermal: { pressureState: "slow", lastRecordedEvents: ["Thermal Warning Level = 100"], source: "pmset -g therm" } };
