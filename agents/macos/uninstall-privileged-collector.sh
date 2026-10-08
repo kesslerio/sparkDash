@@ -14,7 +14,11 @@ if [ -n "${HOME:-}" ] && [ -f "$USER_AGENT" ]; then
 fi
 
 if sudo launchctl print "system/${LABEL}" >/dev/null 2>&1; then
-  sudo launchctl bootout "system/${LABEL}" || true
+  sudo launchctl bootout "system/${LABEL}"
+fi
+if sudo launchctl print "system/${LABEL}" >/dev/null 2>&1; then
+  echo "Privileged collector is still loaded; refusing to remove its plist." >&2
+  exit 1
 fi
 sudo rm -f "$DEST"
 echo "Privileged collector removed. The user agent, if installed, is unchanged."

@@ -485,6 +485,8 @@ _DIE_TEMPERATURE_RE = re.compile(
 _SMC_CPU_PREFIXES = ("Tp", "Te", "Ts")
 _SMC_GPU_PREFIX = "Tg"
 _SMC_KEYS: tuple[list[str], list[str]] | None = None
+_SMC_READ_LOCK = threading.Lock()
+_SMC_READ = None
 
 
 def parse_powermetrics_temperatures(text: str) -> dict[str, object]:
@@ -680,16 +682,22 @@ def read_smc_temperature_text(timeout: float = 4.0) -> str:
     The first sample enumerates keys and can take a couple of seconds. Later
     samples reuse the key list and stay inside the same collection cadence.
     """
-    box: dict[str, str] = {}
+    global _SMC_READ
+    with _SMC_READ_LOCK:
+        if _SMC_READ is None or not _SMC_READ[0].is_alive():
+            box: dict[str, str] = {}
 
-    def work() -> None:
-        try:
-            box["text"] = _smc_temperature_text_from_reader()
-        except Exception:
-            box["text"] = ""
+            def work() -> None:
+                try:
+                    box["text"] = _smc_temperature_text_from_reader()
+                except Exception:
+                    box["text"] = ""
 
-    thread = threading.Thread(target=work, name="smc-temp", daemon=True)
-    thread.start()
+            thread = threading.Thread(target=work, name="smc-temp", daemon=True)
+            _SMC_READ = (thread, box)
+            thread.start()
+        else:
+            thread, box = _SMC_READ
     thread.join(_bounded_timeout(timeout))
     return box.get("text", "") if not thread.is_alive() else ""
 
@@ -793,21 +801,22 @@ def load_inventory(path: Path) -> dict[str, object]:
 
 def list_processes() -> dict[int, dict[str, object]]:
     """pid -> process identity, from `ps` (argv survives, unlike lsof's 16-char command)."""
-    text = run(["ps", "-Ao", "pid=,ppid=,args="], timeout=3.0)
+    text = run(["ps", "-Ao", "pid=,ppid=,uid=,args="], timeout=3.0)
     procs: dict[int, dict[str, object]] = {}
     for line in text.splitlines():
-        parts = line.strip().split(None, 2)
-        if len(parts) < 3:
+        parts = line.strip().split(None, 3)
+        if len(parts) < 4:
             continue
         try:
-            pid, ppid = int(parts[0]), int(parts[1])
+            pid, ppid, uid = int(parts[0]), int(parts[1]), int(parts[2])
         except ValueError:
             continue
-        argv_text = parts[2]
+        argv_text = parts[3]
         argv = argv_text.split()
         procs[pid] = {
             "pid": pid,
             "ppid": ppid,
+            "uid": uid,
             "argv": argv,
             "argvText": argv_text,
             "comm": _basename(argv[0]) if argv else "",
@@ -924,6 +933,20 @@ def health_check(port: int, path: str, timeout_ms: int) -> dict[str, object]:
 
 def detect_runtimes(inventory: dict[str, object], procs: dict[int, dict[str, object]],
                     listeners: dict[int, list[dict[str, object]]]) -> list[dict[str, object]]:
+    if os.geteuid() == 0:
+        try:
+            console_uid = os.stat("/dev/console").st_uid
+        except OSError:
+            return []
+        if console_uid == 0:
+            return []
+        procs = {pid: proc for pid, proc in procs.items() if proc.get("uid") == console_uid}
+    procs = {
+        pid: proc for pid, proc in procs.items()
+        if pid != os.getpid() and not any(
+            os.path.basename(token) == "sparkdash_mac_agent.py" for token in proc["argv"]
+        )
+    }
     defaults = inventory.get("defaults") or {}
     default_health = defaults.get("health") or {"path": "/v1/models", "timeoutMs": 750}
     default_model = defaults.get("model") or {"flags": ["--model"], "positional": False}
@@ -976,7 +999,7 @@ def detect_runtimes(inventory: dict[str, object], procs: dict[int, dict[str, obj
         interpreter = str(other.get("interpreter") or "^(python|python3)$")
         serve_hint = str(other.get("serveArgv") or "")
         for pid, owned in listeners.items():
-            if pid in claimed or pid == os.getpid():
+            if pid in claimed:
                 continue
             proc = procs.get(pid)
             if not proc:
@@ -1155,47 +1178,10 @@ def collect_snapshot(inventory: dict[str, object], *, allow_powermetrics: bool,
 # ─── serving ─────────────────────────────────────────────────────────────────
 
 def collecting_snapshot() -> dict[str, object]:
-    """A schema-valid answer used when no sample exists yet and one is in flight."""
     return {
-        "schema": SCHEMA,
-        "agentVersion": AGENT_VERSION,
-        "collectedAt": int(time.time()),
-        "collectMs": 0,
-        "uptimeSeconds": None,
-        "bootTime": None,
-        "host": {},
-        "cpu": {
-            "usagePercent": None,
-            "temperature": None,
-            "temperatureUnit": None,
-            "perCorePercent": None,
-            "loadAverage": [None, None, None],
-            "source": None,
-        },
-        "memory": {},
-        "disks": [],
-        "network": None,
-        "gpu": {"powermetrics": "not-attempted", "temperature": None, "temperatureUnit": None},
-        "thermal": {"pressureState": "unknown", "lastRecordedEvents": [], "source": "pmset -g therm"},
-        "runtimes": [],
-        "unavailable": [{"metric": "agent.sample", "reason": "metrics collection still running"}],
+        "status": "pending",
+        "reason": "metrics collection still running or unavailable",
     }
-
-
-def _call_with_deadline(fn, seconds: float):
-    """Run fn on a daemon thread and do not wait past the deadline."""
-    box: dict[str, object] = {}
-
-    def work() -> None:
-        try:
-            box["value"] = fn()
-        except Exception:
-            box["error"] = True
-
-    thread = threading.Thread(target=work, name="metrics-collect", daemon=True)
-    thread.start()
-    thread.join(seconds)
-    return box.get("value")
 
 
 class SampleCache:
@@ -1215,36 +1201,51 @@ class SampleCache:
         self._lock = threading.Lock()
         self._sample: dict[str, object] | None = None
         self._at = 0.0
-        self._refreshing = False
-        self._generation = 0
+        self._worker = None
 
-    def get(self, force: bool = False) -> dict[str, object]:
-        with self._lock:
-            now = time.time()
-            fresh = self._sample is not None and now - self._at < self._ttl
-            if not force and fresh:
-                return self._sample  # type: ignore[return-value]
-            if self._refreshing:
-                return self._sample if self._sample is not None else collecting_snapshot()
-            self._refreshing = True
-            self._generation += 1
-            generation = self._generation
+    def _response(self) -> dict[str, object]:
+        if self._sample is None:
+            return collecting_snapshot()
+        age = max(0, time.monotonic() - self._at)
+        stale = age >= self._ttl
+        response = {**self._sample, "sampleAgeSeconds": age, "sampleStale": stale}
+        if stale:
+            response["unavailable"] = [
+                *self._sample.get("unavailable", []),
+                {"metric": "agent.sample", "reason": "last sample is stale; refresh running or unavailable"},
+            ]
+        return response
 
-        sample = _call_with_deadline(
-            lambda: collect_snapshot(
+    def _collect(self) -> None:
+        try:
+            sample = collect_snapshot(
                 self._inventory,
                 allow_powermetrics=self._allow_powermetrics,
                 cpu_probe=self._cpu_probe,
-            ),
-            COLLECT_DEADLINE_S,
-        )
+            )
+        except Exception:
+            sample = None
         with self._lock:
-            if generation == self._generation:
-                if isinstance(sample, dict):
-                    self._sample = sample
-                    self._at = time.time()
-                self._refreshing = False
-            return self._sample if self._sample is not None else collecting_snapshot()
+            if isinstance(sample, dict):
+                self._sample = sample
+                self._at = time.monotonic()
+            self._worker = None
+
+    def get(self, force: bool = False) -> dict[str, object]:
+        with self._lock:
+            now = time.monotonic()
+            fresh = self._sample is not None and now - self._at < self._ttl
+            if not force and fresh:
+                return self._response()
+            if self._worker is not None:
+                return self._response()
+            worker = threading.Thread(target=self._collect, name="metrics-collect", daemon=True)
+            self._worker = worker
+            worker.start()
+
+        worker.join(COLLECT_DEADLINE_S)
+        with self._lock:
+            return self._response()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1254,15 +1255,16 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler API
         path = self.path.split("?", 1)[0]
         if path == "/metrics":
-            self._json(self.cache.get())
+            payload = self.cache.get()
+            self._json(payload, status=200 if payload.get("schema") == SCHEMA else 503)
         elif path == "/health":
             self._json({"ok": True, "schema": SCHEMA, "agentVersion": AGENT_VERSION})
         else:
             self.send_error(404, "unknown path")
 
-    def _json(self, payload: dict[str, object]) -> None:
+    def _json(self, payload: dict[str, object], status: int = 200) -> None:
         body = json.dumps(payload).encode("utf-8")
-        self.send_response(200)
+        self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")

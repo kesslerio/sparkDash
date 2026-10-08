@@ -32,12 +32,14 @@ function collectorWith(mode, { execCalls = [] } = {}) {
     if (mode === "down") throw new Error("ECONNREFUSED");
     if (mode === "garbage") return { ok: true, json: async () => ({ hello: "world" }) };
     if (mode === "http500") return { ok: false, status: 503, json: async () => ({}) };
+    if (mode === "pending") return { ok: false, status: 503, json: async () => ({ status: "pending", reason: "metrics collection still running" }) };
+    if (mode === "pending200") return { ok: true, json: async () => ({ status: "pending", reason: "metrics collection still running" }) };
     return { ok: true, json: async () => structuredClone(snapshot) };
   };
   const exec = async (_spark, cmd) => {
     execCalls.push(cmd);
     // SSH fallback answers look like the batched Mac snapshot read.
-    return "sysctl hw.memsize: 274877906944\n";
+    return "__SPARKDASH_SECTION__sysctl\nhw.memsize: 274877906944\n";
   };
   const collector = new MacAgentCollector({ ...spark }, { fetchImpl, exec });
   return { collector, requested, execCalls };
@@ -156,7 +158,7 @@ test("uptime and hardware come from the agent too", async () => {
 });
 
 test("agent down: SSH answers the vitals and the gap says the agent is gone", async () => {
-  for (const mode of ["down", "garbage", "http500"]) {
+  for (const mode of ["down", "garbage", "http500", "pending", "pending200"]) {
     const execCalls = [];
     const { collector } = collectorWith(mode, { execCalls });
     const runtimes = await collector.collectRuntimes();
@@ -171,6 +173,26 @@ test("agent down: SSH answers the vitals and the gap says the agent is gone", as
       execCalls.some((cmd) => cmd.includes("vm_stat") || cmd.includes("sysctl")),
       `${mode}: expected an SSH fallback read`
     );
+  }
+});
+
+test("pending responses cannot become telemetry or cached hardware", async () => {
+  for (const mode of ["pending", "pending200"]) {
+    const { collector, execCalls } = collectorWith(mode);
+    assert.equal(await collector._agentSnapshot(), null);
+    assert.equal(collector._agentCache, null);
+    const ram = await collector.collectRam();
+    assert.equal(ram.total, 262144);
+    await Promise.all([
+      collector.collectCpu(), collector.collectGpu(), collector.collectUnifiedMemory(),
+      collector.collectStorage(), collector.collectNetwork(), collector.readBootTime(),
+      collector.detectHardware(), collector.pingHost(),
+    ]);
+    assert.equal(collector._agentCache, null);
+    assert.ok(execCalls.length > 0);
+    const runtimes = await collector.collectRuntimes();
+    assert.equal(runtimes.agentOnline, false);
+    assert.ok(isUnavailable(runtimes.unavailable, "agent"));
   }
 });
 
