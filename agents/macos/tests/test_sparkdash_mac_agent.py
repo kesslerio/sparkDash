@@ -7,8 +7,15 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import plistlib
+import stat
+import tempfile
 import threading
+import time
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -20,6 +27,9 @@ FIXTURES = ROOT / "server" / "collectors" / "__tests__" / "fixtures" / "mac"
 spec = importlib.util.spec_from_file_location("mac_agent", HERE / "sparkdash_mac_agent.py")
 agent = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(agent)
+install_spec = importlib.util.spec_from_file_location("privileged_install", HERE / "privileged_collector_install.py")
+installer = importlib.util.module_from_spec(install_spec)
+install_spec.loader.exec_module(installer)
 
 INVENTORY = json.loads((HERE / "runtimes.json").read_text("utf-8"))
 
@@ -134,6 +144,51 @@ class InventoryDetectionTests(unittest.TestCase):
                          "ds4-serve", "mtplx", "mtplx-27b", "mtplx-35b", "mtplx-flash",
                          "tensorfold"):
             self.assertIn(expected, names)
+
+    def test_agent_processes_are_excluded_from_both_matching_paths(self):
+        procs = {
+            500: proc(500, "/usr/bin/python3 /Users/dev/sparkdash_mac_agent.py --serve --port 8790"),
+            501: proc(501, "/usr/bin/python3 -I /Library/Application Support/ai.onyx.sparkdash-mac-agent/sparkdash_mac_agent.py --serve --port 8791"),
+            502: proc(502, "/usr/bin/python3 /opt/infer.py --port 9099 --model private/model"),
+        }
+        listeners = {**owned(500, 8790), **owned(501, 8791), **owned(502, 9099)}
+        self.assertEqual([row["pid"] for row in self.detect(procs, listeners)], [502])
+        inventory = {"runtimes": [{"name": "agent", "exe": "sparkdash_mac_agent", "role": "watchdog"}]}
+        self.assertEqual([row["pid"] for row in agent.detect_runtimes(inventory, procs, listeners)], [502])
+
+    def test_elevated_runtime_scope_covers_inventory_watchdogs_and_unknowns(self):
+        procs = {}
+        listeners = {}
+        for uid in (501, 502):
+            for offset, argv, port in (
+                (0, "/usr/bin/python3 /opt/infer.py --port 9099 --model private/model", 9099),
+                (1, "/usr/bin/python /opt/tensorfold serve model/id --port 8300", 8300),
+                (2, "/bin/zsh /opt/ds4-serve.sh", None),
+            ):
+                pid = uid * 10 + offset
+                procs[pid] = {**proc(pid, argv), "uid": uid}
+                if port:
+                    listeners.update(owned(pid, port))
+        with patch.object(agent.os, "geteuid", return_value=0), patch.object(
+            agent.os, "stat", return_value=SimpleNamespace(st_uid=501)
+        ):
+            found = self.detect(procs, listeners)
+        self.assertEqual({row["pid"] for row in found}, {5010, 5011, 5012})
+        with patch.object(agent.os, "geteuid", return_value=501):
+            self.assertEqual(len(self.detect(procs, listeners)), 6)
+        for console in (SimpleNamespace(st_uid=0), OSError("no console")):
+            with patch.object(agent.os, "geteuid", return_value=0), patch.object(
+                agent.os, "stat", **({"side_effect": console} if isinstance(console, OSError) else {"return_value": console})
+            ):
+                self.assertEqual(self.detect(procs, listeners), [])
+
+    def test_process_ownership_is_parsed_with_the_full_command(self):
+        with patch.object(agent, "run", return_value="10 1 501 /usr/bin/python3 /opt/infer.py --model one/two\n11 1 502 /bin/zsh /opt/ds4-serve.sh\n"):
+            procs = agent.list_processes()
+        self.assertEqual(procs[10]["uid"], 501)
+        self.assertEqual(procs[11]["uid"], 502)
+        self.assertEqual(procs[10]["script"], "infer.py")
+        self.assertEqual(agent.extract_model(procs[10]["argv"], {"flags": ["--model"]}), "one/two")
 
 
 class ModelExtractionTests(unittest.TestCase):
@@ -309,6 +364,315 @@ class AvailabilityTests(unittest.TestCase):
             self.assertIsNone(snap[component]["temperature"])
             self.assertIn({"metric": f"{component}.temperature", "reason": "requires root for powermetrics"}, snap["unavailable"])
         self.assertEqual(snap["thermal"]["pressureState"], "unknown")
+
+
+class TemperatureTests(unittest.TestCase):
+    def test_parser_reads_the_powermetrics_fixture(self):
+        text = (HERE / "tests" / "fixtures" / "powermetrics-die-temperature.txt").read_text("utf-8")
+        parsed = agent.parse_powermetrics_temperatures(text)
+        self.assertEqual(parsed["cpuCelsius"], 46.23)
+        self.assertEqual(parsed["gpuCelsius"], 42.11)
+        self.assertEqual(parsed["unit"], "celsius")
+
+    def test_parser_ignores_a_suffix_and_rejects_missing_or_absurd_lines(self):
+        parsed = agent.parse_powermetrics_temperatures(
+            "CPU die temperature: 51.50 C (simulated:1)\nGPU die temperature: 400.00 C\n"
+        )
+        self.assertEqual(parsed["cpuCelsius"], 51.5)
+        self.assertIsNone(parsed["gpuCelsius"])
+        self.assertEqual(agent.parse_powermetrics_temperatures("")["unit"], None)
+        self.assertIsNone(agent.parse_powermetrics_temperatures("unrecognized sampler: smc\n")["cpuCelsius"])
+
+    def test_ordinary_user_stays_unavailable_even_if_smc_text_is_supplied(self):
+        called = []
+        original = agent.read_smc_temperature_text
+        agent.read_smc_temperature_text = lambda timeout=1.5: called.append(1) or "CPU die temperature: 1.00 C"
+        original_run = agent.run
+        agent.run = lambda cmd, timeout=1: "Note: No thermal warning level has been recorded\n" if cmd[0] == "pmset" else ""
+        try:
+            snap = agent.collect_snapshot(
+                {"defaults": {}, "runtimes": []},
+                allow_powermetrics=False,
+                cpu_probe=None,
+                procs={},
+                listeners={},
+                elevated=False,
+                smc_temperature_text=(HERE / "tests" / "fixtures" / "powermetrics-die-temperature.txt").read_text("utf-8"),
+            )
+        finally:
+            agent.read_smc_temperature_text = original
+            agent.run = original_run
+        self.assertEqual(called, [])
+        self.assertIsNone(snap["cpu"]["temperature"])
+        self.assertIsNone(snap["gpu"]["temperature"])
+        self.assertIsNone(snap["cpu"]["temperatureUnit"])
+        for component in ("cpu", "gpu"):
+            self.assertIn(
+                {"metric": f"{component}.temperature", "reason": "requires root for powermetrics"},
+                snap["unavailable"],
+            )
+        self.assertEqual(snap["thermal"]["pressureState"], "nominal")
+
+    def test_elevated_collector_publishes_parsed_temperatures_with_units(self):
+        die = (HERE / "tests" / "fixtures" / "powermetrics-die-temperature.txt").read_text("utf-8")
+        calls = []
+
+        def fake_run(cmd, timeout=1):
+            calls.append(cmd)
+            if "powermetrics" in cmd:
+                return die
+            if cmd and cmd[0] == "pmset":
+                return "Note: No thermal warning level has been recorded\n"
+            return ""
+
+        original_run = agent.run
+        original_smc = agent.read_smc_temperature_text
+        agent.run = fake_run
+        agent.read_smc_temperature_text = lambda timeout=1.5: (_ for _ in ()).throw(AssertionError("SMC should not run"))
+        try:
+            snap = agent.collect_snapshot(
+                {"defaults": {}, "runtimes": []},
+                allow_powermetrics=True,
+                cpu_probe=None,
+                procs={},
+                listeners={},
+                elevated=True,
+                smc_temperature_text="",
+            )
+        finally:
+            agent.run = original_run
+            agent.read_smc_temperature_text = original_smc
+        self.assertEqual(snap["cpu"]["temperature"], 46.23)
+        self.assertEqual(snap["gpu"]["temperature"], 42.11)
+        self.assertEqual(snap["cpu"]["temperatureUnit"], "celsius")
+        self.assertEqual(snap["gpu"]["temperatureUnit"], "celsius")
+        self.assertEqual(snap["cpu"]["temperatureSource"], "powermetrics")
+        self.assertEqual(snap["gpu"]["temperatureSource"], "powermetrics")
+        self.assertEqual(snap["thermal"]["pressureState"], "nominal")
+        metrics = {row["metric"] for row in snap["unavailable"]}
+        self.assertNotIn("cpu.temperature", metrics)
+        self.assertNotIn("gpu.temperature", metrics)
+        self.assertNotIn("_powermetricsText", snap["gpu"])
+        self.assertEqual(sum(1 for cmd in calls if "powermetrics" in cmd), 1)
+
+    def test_elevated_collector_uses_smc_text_when_powermetrics_has_no_die_line(self):
+        die = (HERE / "tests" / "fixtures" / "powermetrics-die-temperature.txt").read_text("utf-8")
+        original_run = agent.run
+        agent.run = lambda cmd, timeout=1: "CPU Power: 1000 mW\nGPU Power: 2000 mW\nCombined Power (CPU + GPU + ANE): 3000 mW\n" if "powermetrics" in cmd else ""
+        try:
+            snap = agent.collect_snapshot(
+                {"defaults": {}, "runtimes": []},
+                allow_powermetrics=True,
+                cpu_probe=None,
+                procs={},
+                listeners={},
+                elevated=True,
+                smc_temperature_text=die,
+            )
+        finally:
+            agent.run = original_run
+        self.assertEqual(snap["cpu"]["temperatureSource"], "smc")
+        self.assertEqual(snap["gpu"]["temperatureSource"], "smc")
+        self.assertEqual(snap["cpu"]["temperature"], 46.23)
+        self.assertEqual(snap["gpu"]["temperature"], 42.11)
+
+
+class CommandTimeoutTests(unittest.TestCase):
+    def test_run_returns_when_the_command_does_not_exit(self):
+        started = time.monotonic()
+        text = agent.run(["sleep", "30"], timeout=0.3)
+        elapsed = time.monotonic() - started
+        self.assertEqual(text, "")
+        self.assertLess(elapsed, 3.0, f"run waited {elapsed:.2f}s for a command that ignores the clock")
+
+    def test_metrics_does_not_wait_on_an_in_flight_collection(self):
+        started = threading.Event()
+        release = threading.Event()
+
+        def blocked(inventory, **kwargs):
+            started.set()
+            release.wait(5)
+            return {"schema": agent.SCHEMA, "ok": True}
+
+        original = agent.collect_snapshot
+        agent.collect_snapshot = blocked
+        httpd = None
+        try:
+            cache = agent.SampleCache({"runtimes": []}, allow_powermetrics=False, ttl=0)
+            httpd = agent.ThreadingHTTPServer(("127.0.0.1", 0), agent.make_handler(cache))
+            port = httpd.server_address[1]
+            server = threading.Thread(target=httpd.serve_forever, daemon=True)
+            server.start()
+
+            def first():
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/metrics", timeout=5) as resp:
+                    resp.read()
+
+            worker = threading.Thread(target=first)
+            worker.start()
+            self.assertTrue(started.wait(2), "collector never started")
+            began = time.monotonic()
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                urllib.request.urlopen(f"http://127.0.0.1:{port}/metrics", timeout=2)
+            self.assertEqual(ctx.exception.code, 503)
+            body = json.loads(ctx.exception.read())
+            ctx.exception.close()
+            self.assertLess(time.monotonic() - began, 1.0)
+            self.assertEqual(body["status"], "pending")
+            self.assertNotIn("schema", body)
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=2) as resp:
+                self.assertTrue(json.loads(resp.read())["ok"])
+        finally:
+            release.set()
+            if "worker" in locals():
+                worker.join(2)
+            if httpd is not None:
+                httpd.shutdown()
+                httpd.server_close()
+            agent.collect_snapshot = original
+
+    def test_late_sample_is_published_and_only_one_worker_owns_refresh(self):
+        release = threading.Event()
+        entered = threading.Event()
+        calls = []
+
+        def collect(inventory, **kwargs):
+            calls.append(1)
+            entered.set()
+            release.wait(2)
+            return {"schema": agent.SCHEMA, "cpu": {"temperature": 46}, "unavailable": []}
+
+        with patch.object(agent, "collect_snapshot", side_effect=collect), patch.object(agent, "COLLECT_DEADLINE_S", 0.02):
+            cache = agent.SampleCache({}, False, ttl=60)
+            try:
+                self.assertEqual(cache.get()["status"], "pending")
+                self.assertTrue(entered.is_set())
+                worker = cache._worker
+                for _ in range(4):
+                    self.assertEqual(cache.get(force=True)["status"], "pending")
+                self.assertEqual(len(calls), 1)
+                release.set()
+                worker.join(2)
+                self.assertEqual(cache.get()["cpu"]["temperature"], 46)
+                self.assertFalse(cache.get()["sampleStale"])
+                self.assertEqual(len(calls), 1)
+
+                release.clear()
+                entered.clear()
+                with patch.object(agent.time, "monotonic", return_value=cache._at + 61):
+                    response = cache.get()
+                    self.assertTrue(response["sampleStale"])
+                    self.assertEqual(response["sampleAgeSeconds"], 61)
+                    self.assertEqual(response["cpu"]["temperature"], 46)
+                    self.assertEqual(response["unavailable"][0]["metric"], "agent.sample")
+                    worker = cache._worker
+                    cache.get(force=True)
+                    self.assertEqual(len(calls), 2)
+                release.set()
+                worker.join(2)
+                self.assertFalse(cache.get()["sampleStale"])
+            finally:
+                release.set()
+                if cache._worker:
+                    cache._worker.join(2)
+
+    def test_failed_collection_releases_ownership_for_next_sample(self):
+        with patch.object(agent, "collect_snapshot", side_effect=[RuntimeError("probe failed"), {"schema": agent.SCHEMA, "cpu": {"temperature": 47}}]):
+            cache = agent.SampleCache({}, False, ttl=60)
+            self.assertEqual(cache.get()["status"], "pending")
+            self.assertEqual(cache.get()["cpu"]["temperature"], 47)
+
+    def test_smc_wait_timeout_does_not_start_a_second_reader(self):
+        releases = [threading.Event(), threading.Event()]
+        results = ["CPU die temperature: 46 C\nGPU die temperature: 42 C", "CPU die temperature: 51 C\nGPU die temperature: 48 C"]
+        calls = []
+
+        def read():
+            index = len(calls)
+            calls.append(1)
+            releases[index].wait(2)
+            return results[index]
+
+        with patch.object(agent, "_smc_temperature_text_from_reader", side_effect=read):
+            try:
+                self.assertEqual(agent.read_smc_temperature_text(0.01), "")
+                worker = agent._SMC_READ[0]
+                for _ in range(4):
+                    self.assertEqual(agent.read_smc_temperature_text(0.01), "")
+                self.assertEqual(len(calls), 1)
+                releases[0].set()
+                worker.join(2)
+                self.assertFalse(worker.is_alive())
+                temps = agent.resolve_die_temperatures("", elevated=True)
+                self.assertEqual(temps["cpuCelsius"], 46)
+                self.assertEqual(temps["gpuCelsius"], 42)
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(agent.read_smc_temperature_text(0.01), "")
+                self.assertEqual(len(calls), 2)
+                worker = agent._SMC_READ[0]
+                releases[1].set()
+                worker.join(2)
+                self.assertFalse(worker.is_alive())
+                self.assertEqual(agent.read_smc_temperature_text(0.01), results[1])
+                self.assertEqual(len(calls), 2)
+            finally:
+                for release in releases:
+                    release.set()
+                if agent._SMC_READ:
+                    agent._SMC_READ[0].join(2)
+
+
+class PrivilegedInstallationTests(unittest.TestCase):
+    def test_plist_round_trip_escapes_paths_and_uses_isolated_protected_copy(self):
+        dest = Path('/Library/Application Support/R&D "collector"')
+        data = plistlib.loads(installer.build_plist(HERE / "ai.onyx.sparkdash-mac-agent.privileged.plist", dest))
+        args = data["ProgramArguments"]
+        self.assertEqual(args[:3], ["/usr/bin/python3", "-I", str(dest / "sparkdash_mac_agent.py")])
+        self.assertEqual(args[args.index("--config") + 1], str(dest / "runtimes.json"))
+        self.assertEqual(args[args.index("--host") + 1], "127.0.0.1")
+
+    def test_all_installation_parents_must_be_root_owned_protected_directories(self):
+        path = Path("/Library/Application Support/collector")
+        safe = SimpleNamespace(st_uid=0, st_mode=stat.S_IFDIR | 0o755)
+        with patch.object(Path, "lstat", return_value=safe):
+            installer.protected_directory(path)
+        for parent in (path, *path.parents):
+            for uid, mode in ((501, stat.S_IFDIR | 0o755), (0, stat.S_IFDIR | 0o775), (0, stat.S_IFLNK | 0o755)):
+                def info(value):
+                    return SimpleNamespace(st_uid=uid, st_mode=mode) if value == parent else safe
+                with patch.object(Path, "lstat", autospec=True, side_effect=info), self.assertRaises(PermissionError):
+                    installer.protected_directory(path)
+
+    def test_install_copies_only_payload_and_atomically_replaces_symlinks(self):
+        with tempfile.TemporaryDirectory(dir=HERE / "tests") as directory:
+            root = Path(directory)
+            source = root / "R&D checkout"
+            source.mkdir()
+            for name, contents in (("sparkdash_mac_agent.py", b"print('collector')"), ("runtimes.json", b'{"runtimes": []}'), ("unrelated.py", b"extra")):
+                (source / name).write_bytes(contents)
+            dest = root / "installed"
+            dest.mkdir()
+            victim = root / "user-file"
+            victim.write_bytes(b"untouched")
+            (dest / "sparkdash_mac_agent.py").symlink_to(victim)
+            plist = root / "candidate.plist"
+            plist.write_bytes(installer.build_plist(HERE / "ai.onyx.sparkdash-mac-agent.privileged.plist", dest))
+            output = root / "daemon.plist"
+            with patch.object(installer, "protected_directory"), patch.object(installer.os, "chown"), patch.object(installer.os, "fchown") as owner:
+                installer.install_payload(source, dest, plist, output)
+            self.assertEqual(set(p.name for p in dest.iterdir()), {"sparkdash_mac_agent.py", "runtimes.json"})
+            for name in ("sparkdash_mac_agent.py", "runtimes.json"):
+                self.assertEqual((dest / name).read_bytes(), (source / name).read_bytes())
+                self.assertEqual(stat.S_IMODE((dest / name).stat().st_mode), 0o644)
+                self.assertFalse((dest / name).is_symlink())
+            self.assertEqual(victim.read_bytes(), b"untouched")
+            self.assertEqual(plistlib.loads(output.read_bytes()), plistlib.loads(plist.read_bytes()))
+            self.assertEqual(owner.call_count, 3)
+            self.assertTrue(all(call.args[1:] == (0, 0) for call in owner.call_args_list))
+            with patch.object(installer, "protected_directory", side_effect=PermissionError("unprotected")):
+                with self.assertRaises(PermissionError):
+                    installer.install_payload(source, dest, plist, output)
+            self.assertEqual(victim.read_bytes(), b"untouched")
 
 
 class ThermalTests(unittest.TestCase):
