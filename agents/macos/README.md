@@ -6,11 +6,12 @@ vitals plus an honest picture of which local model runtime, if any, is serving.
 - **stdlib only.** Runs on the system `python3`. `psutil` is used when present
   (per-core CPU detail) and never required, so there is nothing to `pip install`.
 - **Nothing invented.** GPU busy-ness and GPU/CPU/ANE power
-  need `powermetrics`, which requires root. Temperature stays null with an
-  explicit reason. Thermal pressure is read without root from `pmset -g therm`
-  as nominal, slow, trapped, or unknown, preserving the last recorded event lines. Without it the agent
-  reports those metrics in `unavailable` with a reason, and the dashboard renders
-  "unavailable" instead of a convincing zero.
+  need `powermetrics`, which requires root. An ordinary user keeps CPU and GPU
+  temperature null, with the reason, and still reports thermal pressure from
+  `pmset -g therm` (nominal, slow, trapped, or unknown, plus the last recorded
+  event lines). A root LaunchDaemon can publish real die temperatures in
+  celsius. Without a reading the dashboard renders "unavailable" instead of a
+  convincing zero.
 - **Nothing hardcoded about the engines.** Which runtimes exist, their ports, how
   to recognise them, and how to read the served model out of argv all come from
   [`runtimes.json`](runtimes.json). A Python server that is not in the inventory
@@ -44,11 +45,39 @@ Stop it with `launchctl bootout gui/$(id -u)/ai.onyx.sparkdash-mac-agent`.
 
 ### Unlocking GPU and ANE power
 
-Run the agent as root and it samples `powermetrics` itself — copy the plist to
-`/Library/LaunchDaemons/` (a system daemon), or run `sudo python3 … --serve` and
-grant `powermetrics` NOPASSWD in `sudoers` and pass `--powermetrics`. Until then
-`gpu.utilization`, `gpu.power` and `ane.power` stay declared-unavailable, which
-is what the dashboard is built to show.
+Run the agent as root and it samples `powermetrics` itself. The opt-in
+LaunchDaemon below does that. Until then `gpu.utilization`, `gpu.power` and
+`ane.power` stay declared-unavailable, which is what the dashboard is built to
+show. `--powermetrics` still attempts `sudo -n powermetrics` from a user
+process for those power counters only; it does not publish temperatures.
+
+### Opt-in root temperatures
+
+Installing the privileged collector is a deliberate step. It is not started by
+the user-agent install, and that install is left untouched.
+
+```bash
+agents/macos/install-privileged-collector.sh
+agents/macos/uninstall-privileged-collector.sh
+```
+
+An ordinary user runs either command. `sudo` prompts to copy the LaunchDaemon
+plist to `/Library/LaunchDaemons/` and to bootstrap or bootout
+`ai.onyx.sparkdash-mac-agent.privileged`. The user LaunchAgent
+(`ai.onyx.sparkdash-mac-agent`, port 8790) is not modified, stopped, or
+replaced. The daemon listens on `127.0.0.1:8791` so the install does not open
+another LAN port. Point the sparkDash Mac node agent port at 8791 to read
+temperatures. Edit the installed plist's `--host` only if a remote dashboard
+must scrape it; that is the same unauthenticated `/metrics` trust model as the
+user agent.
+
+Security: the daemon runs as root so it can read hardware counters. It reads
+`powermetrics` text and, when that text has no die-temperature lines (Apple
+Silicon `powermetrics` does not print them), AppleSMC temperature keys
+(`Tp`/`Te`/`Ts` for CPU, `Tg` for GPU). It does not write hardware state and
+does not add a network service beyond the agent's existing read-only metrics
+listener. Every external command the agent runs has a hard timeout, so one
+stuck probe cannot wedge `/metrics`.
 
 ## Runtime inventory
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -309,6 +310,164 @@ class AvailabilityTests(unittest.TestCase):
             self.assertIsNone(snap[component]["temperature"])
             self.assertIn({"metric": f"{component}.temperature", "reason": "requires root for powermetrics"}, snap["unavailable"])
         self.assertEqual(snap["thermal"]["pressureState"], "unknown")
+
+
+class TemperatureTests(unittest.TestCase):
+    def test_parser_reads_the_powermetrics_fixture(self):
+        text = (HERE / "tests" / "fixtures" / "powermetrics-die-temperature.txt").read_text("utf-8")
+        parsed = agent.parse_powermetrics_temperatures(text)
+        self.assertEqual(parsed["cpuCelsius"], 46.23)
+        self.assertEqual(parsed["gpuCelsius"], 42.11)
+        self.assertEqual(parsed["unit"], "celsius")
+
+    def test_parser_ignores_a_suffix_and_rejects_missing_or_absurd_lines(self):
+        parsed = agent.parse_powermetrics_temperatures(
+            "CPU die temperature: 51.50 C (simulated:1)\nGPU die temperature: 400.00 C\n"
+        )
+        self.assertEqual(parsed["cpuCelsius"], 51.5)
+        self.assertIsNone(parsed["gpuCelsius"])
+        self.assertEqual(agent.parse_powermetrics_temperatures("")["unit"], None)
+        self.assertIsNone(agent.parse_powermetrics_temperatures("unrecognized sampler: smc\n")["cpuCelsius"])
+
+    def test_ordinary_user_stays_unavailable_even_if_smc_text_is_supplied(self):
+        called = []
+        original = agent.read_smc_temperature_text
+        agent.read_smc_temperature_text = lambda timeout=1.5: called.append(1) or "CPU die temperature: 1.00 C"
+        original_run = agent.run
+        agent.run = lambda cmd, timeout=1: "Note: No thermal warning level has been recorded\n" if cmd[0] == "pmset" else ""
+        try:
+            snap = agent.collect_snapshot(
+                {"defaults": {}, "runtimes": []},
+                allow_powermetrics=False,
+                cpu_probe=None,
+                procs={},
+                listeners={},
+                elevated=False,
+                smc_temperature_text=(HERE / "tests" / "fixtures" / "powermetrics-die-temperature.txt").read_text("utf-8"),
+            )
+        finally:
+            agent.read_smc_temperature_text = original
+            agent.run = original_run
+        self.assertEqual(called, [])
+        self.assertIsNone(snap["cpu"]["temperature"])
+        self.assertIsNone(snap["gpu"]["temperature"])
+        self.assertIsNone(snap["cpu"]["temperatureUnit"])
+        for component in ("cpu", "gpu"):
+            self.assertIn(
+                {"metric": f"{component}.temperature", "reason": "requires root for powermetrics"},
+                snap["unavailable"],
+            )
+        self.assertEqual(snap["thermal"]["pressureState"], "nominal")
+
+    def test_elevated_collector_publishes_parsed_temperatures_with_units(self):
+        die = (HERE / "tests" / "fixtures" / "powermetrics-die-temperature.txt").read_text("utf-8")
+        calls = []
+
+        def fake_run(cmd, timeout=1):
+            calls.append(cmd)
+            if "powermetrics" in cmd:
+                return die
+            if cmd and cmd[0] == "pmset":
+                return "Note: No thermal warning level has been recorded\n"
+            return ""
+
+        original_run = agent.run
+        original_smc = agent.read_smc_temperature_text
+        agent.run = fake_run
+        agent.read_smc_temperature_text = lambda timeout=1.5: (_ for _ in ()).throw(AssertionError("SMC should not run"))
+        try:
+            snap = agent.collect_snapshot(
+                {"defaults": {}, "runtimes": []},
+                allow_powermetrics=True,
+                cpu_probe=None,
+                procs={},
+                listeners={},
+                elevated=True,
+                smc_temperature_text="",
+            )
+        finally:
+            agent.run = original_run
+            agent.read_smc_temperature_text = original_smc
+        self.assertEqual(snap["cpu"]["temperature"], 46.23)
+        self.assertEqual(snap["gpu"]["temperature"], 42.11)
+        self.assertEqual(snap["cpu"]["temperatureUnit"], "celsius")
+        self.assertEqual(snap["gpu"]["temperatureUnit"], "celsius")
+        self.assertEqual(snap["cpu"]["temperatureSource"], "powermetrics")
+        self.assertEqual(snap["gpu"]["temperatureSource"], "powermetrics")
+        self.assertEqual(snap["thermal"]["pressureState"], "nominal")
+        metrics = {row["metric"] for row in snap["unavailable"]}
+        self.assertNotIn("cpu.temperature", metrics)
+        self.assertNotIn("gpu.temperature", metrics)
+        self.assertNotIn("_powermetricsText", snap["gpu"])
+        self.assertEqual(sum(1 for cmd in calls if "powermetrics" in cmd), 1)
+
+    def test_elevated_collector_uses_smc_text_when_powermetrics_has_no_die_line(self):
+        die = (HERE / "tests" / "fixtures" / "powermetrics-die-temperature.txt").read_text("utf-8")
+        original_run = agent.run
+        agent.run = lambda cmd, timeout=1: "CPU Power: 1000 mW\nGPU Power: 2000 mW\nCombined Power (CPU + GPU + ANE): 3000 mW\n" if "powermetrics" in cmd else ""
+        try:
+            snap = agent.collect_snapshot(
+                {"defaults": {}, "runtimes": []},
+                allow_powermetrics=True,
+                cpu_probe=None,
+                procs={},
+                listeners={},
+                elevated=True,
+                smc_temperature_text=die,
+            )
+        finally:
+            agent.run = original_run
+        self.assertEqual(snap["cpu"]["temperatureSource"], "smc")
+        self.assertEqual(snap["gpu"]["temperatureSource"], "smc")
+        self.assertEqual(snap["cpu"]["temperature"], 46.23)
+        self.assertEqual(snap["gpu"]["temperature"], 42.11)
+
+
+class CommandTimeoutTests(unittest.TestCase):
+    def test_run_returns_when_the_command_does_not_exit(self):
+        started = time.monotonic()
+        text = agent.run(["sleep", "30"], timeout=0.3)
+        elapsed = time.monotonic() - started
+        self.assertEqual(text, "")
+        self.assertLess(elapsed, 3.0, f"run waited {elapsed:.2f}s for a command that ignores the clock")
+
+    def test_metrics_does_not_wait_on_an_in_flight_collection(self):
+        started = threading.Event()
+        release = threading.Event()
+
+        def blocked(inventory, **kwargs):
+            started.set()
+            release.wait(5)
+            return {"schema": agent.SCHEMA, "ok": True}
+
+        original = agent.collect_snapshot
+        agent.collect_snapshot = blocked
+        httpd = None
+        try:
+            cache = agent.SampleCache({"runtimes": []}, allow_powermetrics=False, ttl=0)
+            httpd = agent.ThreadingHTTPServer(("127.0.0.1", 0), agent.make_handler(cache))
+            port = httpd.server_address[1]
+            server = threading.Thread(target=httpd.serve_forever, daemon=True)
+            server.start()
+
+            def first():
+                urllib.request.urlopen(f"http://127.0.0.1:{port}/metrics", timeout=5)
+
+            worker = threading.Thread(target=first)
+            worker.start()
+            self.assertTrue(started.wait(2), "collector never started")
+            began = time.monotonic()
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/metrics", timeout=2) as resp:
+                body = json.loads(resp.read())
+            self.assertLess(time.monotonic() - began, 1.0)
+            self.assertEqual(body["schema"], agent.SCHEMA)
+            self.assertIn("metrics collection still running", json.dumps(body))
+        finally:
+            release.set()
+            if httpd is not None:
+                httpd.shutdown()
+                httpd.server_close()
+            agent.collect_snapshot = original
 
 
 class ThermalTests(unittest.TestCase):

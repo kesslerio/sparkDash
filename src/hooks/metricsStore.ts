@@ -118,8 +118,8 @@ export function ingestSnapshots(sparks: SparkSnapshot[], at = Date.now()): void 
     const m = s.metrics;
     if (m.gpu) {
       pushHistory(`${s.id}:gpu.usage`, m.gpu.usage, at);
-      // Macs expose no GPU temperature; a 0 would chart as a real reading.
-      if (s.kind !== "mac" && m.gpu.temperature != null) pushHistory(`${s.id}:gpu.temp`, m.gpu.temperature, at);
+      // Skip a missing or zero reading. A privileged Mac collector can supply a real one.
+      if (m.gpu.temperature != null && m.gpu.temperature > 0) pushHistory(`${s.id}:gpu.temp`, m.gpu.temperature, at);
       // Per-card series for multi-GPU hosts (keyed by nvidia-smi index).
       if (Array.isArray(m.gpu.gpus) && m.gpu.gpus.length > 1) {
         for (const d of m.gpu.gpus) {

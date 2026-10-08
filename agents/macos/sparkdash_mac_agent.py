@@ -9,8 +9,11 @@ Design rules this file lives by
   * stdlib first. `psutil` is used when present (per-core CPU, interface
     addresses) and never required, so the agent runs on a stock macOS python3.
   * no invented numbers. Anything macOS only hands to root (`powermetrics`
-    for GPU/ANE/CPU power) is reported in `unavailable` with a reason instead
-    of being guessed or zeroed.
+    for GPU/ANE/CPU power, die temperature when the process is elevated) is
+    reported in `unavailable` with a reason instead of being guessed or zeroed.
+    An ordinary user still reports temperature unavailable plus pmset thermal
+    pressure. Every external command has a hard timeout so one stuck probe
+    cannot wedge /metrics.
   * data-driven runtime detection. Which engines exist, their ports, how to
     recognise them, and how to read the served model out of argv all come from
     the runtime inventory JSON (default: runtimes.json next to this file).
@@ -29,6 +32,7 @@ import json
 import os
 import platform
 import re
+import signal
 import socket
 import subprocess
 import sys
@@ -47,6 +51,8 @@ DEFAULT_INVENTORY = Path(__file__).resolve().with_name("runtimes.json")
 
 SAMPLE_TTL_S = 2.0            # share one sample across close-together requests
 CMD_TIMEOUT_S = 4.0
+MAX_CMD_TIMEOUT_S = 8.0    # one probe may be slow; it may not be unbounded
+COLLECT_DEADLINE_S = 12.0  # /metrics must answer even if a probe ignores its timeout
 MB = 1024 * 1024
 
 # Cheap reachability probes: TCP connect only, no DNS, no external service
@@ -61,14 +67,73 @@ POWERMETRICS_CMD = [
 
 # ─── small helpers ───────────────────────────────────────────────────────────
 
-def run(cmd: list[str], timeout: float = CMD_TIMEOUT_S) -> str:
-    """Run a command, return stdout ('' on any failure). Never raises."""
+def _bounded_timeout(timeout: float | None) -> float:
+    """Every external command gets a finite timeout. None and huge values do not wait."""
     try:
-        proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout, check=False
-        )
-        return proc.stdout or ""
+        value = float(CMD_TIMEOUT_S if timeout is None else timeout)
+    except (TypeError, ValueError):
+        value = CMD_TIMEOUT_S
+    if value != value or value <= 0:  # NaN or non-positive
+        value = CMD_TIMEOUT_S
+    return min(value, MAX_CMD_TIMEOUT_S)
+
+
+def _kill_command(proc: subprocess.Popen) -> None:
+    """Kill the command and anything it spawned. Do not wait here."""
+    if proc.poll() is not None:
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (OSError, ProcessLookupError):
+        try:
+            proc.kill()
+        except (OSError, ProcessLookupError):
+            pass
+
+
+def _abandon(proc: subprocess.Popen) -> None:
+    """Reap briefly, then drop the pipes. A stuck child must not block the caller."""
+    try:
+        proc.communicate(timeout=0.2)
     except (OSError, subprocess.SubprocessError):
+        for stream in (proc.stdout, proc.stderr, proc.stdin):
+            if stream is None:
+                continue
+            try:
+                stream.close()
+            except OSError:
+                pass
+
+
+def run(cmd: list[str], timeout: float | None = CMD_TIMEOUT_S) -> str:
+    """Run a command, return stdout ('' on any failure). Never raises or waits forever.
+
+    The timeout is a hard bound: the process group is killed, and a child that
+    does not reap (a stuck `df`, a `top` with no tty) is abandoned. One probe
+    cannot wedge the metrics handler.
+    """
+    limit = _bounded_timeout(timeout)
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            start_new_session=True,
+        )
+    except (OSError, ValueError):
+        return ""
+    try:
+        stdout, _stderr = proc.communicate(timeout=limit)
+        return stdout or ""
+    except subprocess.TimeoutExpired:
+        _kill_command(proc)
+        _abandon(proc)
+        return ""
+    except (OSError, subprocess.SubprocessError):
+        _kill_command(proc)
+        _abandon(proc)
         return ""
 
 
@@ -412,6 +477,256 @@ def parse_powermetrics(text: str) -> dict[str, object]:
     }
 
 
+# powermetrics text format, from the tool itself: `CPU die temperature: %.2f C%s`.
+_DIE_TEMPERATURE_RE = re.compile(
+    r"^(CPU|GPU) die temperature:\s*([\d.]+)\s*°?\s*C\b",
+    re.IGNORECASE | re.MULTILINE,
+)
+_SMC_CPU_PREFIXES = ("Tp", "Te", "Ts")
+_SMC_GPU_PREFIX = "Tg"
+_SMC_KEYS: tuple[list[str], list[str]] | None = None
+
+
+def parse_powermetrics_temperatures(text: str) -> dict[str, object]:
+    """Parse CPU and GPU die temperatures from powermetrics text.
+
+    This is the only interpreter of that text. Missing lines stay None; nothing
+    is invented. Units are celsius when a line is present. The optional suffix
+    after `C` (the tool's `%s`) is ignored.
+    """
+    cpu = gpu = None
+    unit = None
+    for match in _DIE_TEMPERATURE_RE.finditer(text or ""):
+        try:
+            value = round(float(match.group(2)), 2)
+        except ValueError:
+            continue
+        if not 0 < value <= 150:
+            continue
+        unit = "celsius"
+        if match.group(1).lower() == "cpu":
+            cpu = value
+        else:
+            gpu = value
+    return {"cpuCelsius": cpu, "gpuCelsius": gpu, "unit": unit}
+
+
+def _smc_temperature_text_from_reader() -> str:
+    """Read AppleSMC float keys and render them as powermetrics die lines.
+
+    Apple Silicon powermetrics has no die-temperature format strings. The same
+    OS power controller still exposes Tp/Te/Ts (CPU) and Tg (GPU) floats. Those
+    averages are printed in the powermetrics text shape so
+    `parse_powermetrics_temperatures` remains the only parser. Failures return
+    "" — never a guessed number.
+    """
+    global _SMC_KEYS
+    try:
+        import ctypes
+        import ctypes.util
+    except ImportError:
+        return ""
+    try:
+        iokit_path = ctypes.util.find_library("IOKit")
+        if not iokit_path:
+            return ""
+        iokit = ctypes.cdll.LoadLibrary(iokit_path)
+    except OSError:
+        return ""
+
+    class KeyDataVer(ctypes.Structure):
+        _fields_ = [
+            ("major", ctypes.c_uint8), ("minor", ctypes.c_uint8),
+            ("build", ctypes.c_uint8), ("reserved", ctypes.c_uint8),
+            ("release", ctypes.c_uint16),
+        ]
+
+    class PLimitData(ctypes.Structure):
+        _fields_ = [
+            ("version", ctypes.c_uint16), ("length", ctypes.c_uint16),
+            ("cpu_p_limit", ctypes.c_uint32), ("gpu_p_limit", ctypes.c_uint32),
+            ("mem_p_limit", ctypes.c_uint32),
+        ]
+
+    class KeyInfo(ctypes.Structure):
+        _fields_ = [
+            ("data_size", ctypes.c_uint32), ("data_type", ctypes.c_uint32),
+            ("data_attributes", ctypes.c_uint8),
+        ]
+
+    class KeyData(ctypes.Structure):
+        _fields_ = [
+            ("key", ctypes.c_uint32), ("vers", KeyDataVer), ("p_limit_data", PLimitData),
+            ("key_info", KeyInfo), ("result", ctypes.c_uint8), ("status", ctypes.c_uint8),
+            ("data8", ctypes.c_uint8), ("data32", ctypes.c_uint32),
+            ("bytes", ctypes.c_uint8 * 32),
+        ]
+
+    iokit.IOServiceMatching.argtypes = [ctypes.c_char_p]
+    iokit.IOServiceMatching.restype = ctypes.c_void_p
+    iokit.IOServiceGetMatchingService.argtypes = [ctypes.c_uint, ctypes.c_void_p]
+    iokit.IOServiceGetMatchingService.restype = ctypes.c_uint
+    iokit.IOServiceOpen.argtypes = [ctypes.c_uint, ctypes.c_uint, ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint)]
+    iokit.IOServiceOpen.restype = ctypes.c_int
+    iokit.IOServiceClose.argtypes = [ctypes.c_uint]
+    iokit.IOServiceClose.restype = ctypes.c_int
+    iokit.IOObjectRelease.argtypes = [ctypes.c_uint]
+    iokit.IOConnectCallStructMethod.argtypes = [
+        ctypes.c_uint, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_size_t,
+        ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t),
+    ]
+    iokit.IOConnectCallStructMethod.restype = ctypes.c_int
+    try:
+        task = ctypes.c_uint.in_dll(iokit, "mach_task_self_")
+        task_port = task.value
+    except ValueError:
+        return ""
+
+    service = iokit.IOServiceGetMatchingService(0, iokit.IOServiceMatching(b"AppleSMC"))
+    if not service:
+        return ""
+    conn = ctypes.c_uint(0)
+    if iokit.IOServiceOpen(service, task_port, 0, ctypes.byref(conn)) != 0:
+        iokit.IOObjectRelease(service)
+        return ""
+
+    def call(data: KeyData) -> KeyData | None:
+        out = KeyData()
+        olen = ctypes.c_size_t(ctypes.sizeof(KeyData))
+        err = iokit.IOConnectCallStructMethod(
+            conn.value, 2, ctypes.byref(data), ctypes.sizeof(data), ctypes.byref(out), ctypes.byref(olen)
+        )
+        if err or out.result:
+            return None
+        return out
+
+    def key_id(name: str) -> int:
+        return int.from_bytes(name.encode("ascii"), "big")
+
+    def read_info(name: str) -> KeyInfo | None:
+        out = call(KeyData(data8=9, key=key_id(name)))
+        return None if out is None else out.key_info
+
+    def read_bytes(name: str, info: KeyInfo) -> bytes | None:
+        out = call(KeyData(data8=5, key=key_id(name), key_info=info))
+        if out is None:
+            return None
+        return bytes(out.bytes[: info.data_size])
+
+    try:
+        cpu_keys, gpu_keys = _SMC_KEYS or ([], [])
+        if not cpu_keys and not gpu_keys:
+            count_info = read_info("#KEY")
+            raw_count = read_bytes("#KEY", count_info) if count_info else None
+            count = int.from_bytes(raw_count, "big") if raw_count else 0
+            found_cpu: list[str] = []
+            found_gpu: list[str] = []
+            for index in range(count):
+                named = call(KeyData(data8=8, data32=index))
+                if named is None:
+                    continue
+                name = named.key.to_bytes(4, "big").decode("latin1")
+                if len(name) != 4:
+                    continue
+                info = read_info(name)
+                if info is None or info.data_size != 4 or info.data_type.to_bytes(4, "big") != b"flt ":
+                    continue
+                if name.startswith(_SMC_CPU_PREFIXES):
+                    found_cpu.append(name)
+                elif name.startswith(_SMC_GPU_PREFIX):
+                    found_gpu.append(name)
+            cpu_keys, gpu_keys = found_cpu, found_gpu
+            if cpu_keys or gpu_keys:
+                _SMC_KEYS = (cpu_keys, gpu_keys)
+
+        import struct
+
+        def average_floats(keys: list[str]) -> float | None:
+            values: list[float] = []
+            for name in keys:
+                info = read_info(name)
+                raw = read_bytes(name, info) if info is not None else None
+                if raw is None or len(raw) < 4:
+                    continue
+                value = struct.unpack("<f", raw[:4])[0]
+                if 0 < value <= 150:
+                    values.append(value)
+            if not values:
+                return None
+            return round(sum(values) / len(values), 2)
+
+        cpu = average_floats(cpu_keys)
+        gpu = average_floats(gpu_keys)
+    except Exception:
+        cpu = gpu = None
+    finally:
+        try:
+            iokit.IOServiceClose(conn.value)
+            iokit.IOObjectRelease(service)
+        except OSError:
+            pass
+
+    lines = []
+    if cpu is not None:
+        lines.append(f"CPU die temperature: {cpu:.2f} C")
+    if gpu is not None:
+        lines.append(f"GPU die temperature: {gpu:.2f} C")
+    return "\n".join(lines)
+
+
+def read_smc_temperature_text(timeout: float = 4.0) -> str:
+    """Bound the SMC read so a stuck controller cannot wedge collection.
+
+    The first sample enumerates keys and can take a couple of seconds. Later
+    samples reuse the key list and stay inside the same collection cadence.
+    """
+    box: dict[str, str] = {}
+
+    def work() -> None:
+        try:
+            box["text"] = _smc_temperature_text_from_reader()
+        except Exception:
+            box["text"] = ""
+
+    thread = threading.Thread(target=work, name="smc-temp", daemon=True)
+    thread.start()
+    thread.join(_bounded_timeout(timeout))
+    return box.get("text", "") if not thread.is_alive() else ""
+
+
+def resolve_die_temperatures(powermetrics_text: str, *, elevated: bool,
+                             smc_text: str | None = None) -> dict[str, object]:
+    """Publish die temperatures only for an elevated collector.
+
+    An ordinary user keeps nulls. Root uses powermetrics text first, then SMC
+    text rendered in that same shape. Both paths go through
+    `parse_powermetrics_temperatures`.
+    """
+    empty = {
+        "cpuCelsius": None, "gpuCelsius": None, "unit": None,
+        "cpuSource": None, "gpuSource": None,
+    }
+    if not elevated:
+        return empty
+    parsed = parse_powermetrics_temperatures(powermetrics_text)
+    cpu_source = "powermetrics" if parsed["cpuCelsius"] is not None else None
+    gpu_source = "powermetrics" if parsed["gpuCelsius"] is not None else None
+    if parsed["cpuCelsius"] is None or parsed["gpuCelsius"] is None:
+        fallback_text = smc_text if smc_text is not None else read_smc_temperature_text()
+        fallback = parse_powermetrics_temperatures(fallback_text)
+        if parsed["cpuCelsius"] is None and fallback["cpuCelsius"] is not None:
+            parsed["cpuCelsius"] = fallback["cpuCelsius"]
+            cpu_source = "smc"
+        if parsed["gpuCelsius"] is None and fallback["gpuCelsius"] is not None:
+            parsed["gpuCelsius"] = fallback["gpuCelsius"]
+            gpu_source = "smc"
+        if parsed["unit"] is None:
+            parsed["unit"] = fallback["unit"]
+    parsed["cpuSource"] = cpu_source
+    parsed["gpuSource"] = gpu_source
+    return parsed
+
+
 def gpu_stats(allow_powermetrics: bool) -> tuple[dict[str, object], list[dict[str, str]]]:
     """GPU/ANE/power block plus explicit `unavailable` entries for what we can't read.
 
@@ -439,6 +754,9 @@ def gpu_stats(allow_powermetrics: bool) -> tuple[dict[str, object], list[dict[st
 
     command = POWERMETRICS_CMD if os.geteuid() == 0 else ["sudo", "-n"] + POWERMETRICS_CMD
     text = run(command, timeout=8.0)
+    # Kept off the published snapshot. collect_snapshot parses temperatures from
+    # this same call so a root sample does not shell out a second time.
+    block["_powermetricsText"] = text
     parsed = parse_powermetrics(text)
     if parsed["gpuActivePct"] is None and parsed["combinedW"] is None:
         reason = "powermetrics returned no samples (not permitted, or unsupported on this Mac)"
@@ -734,7 +1052,9 @@ def parse_pmset_therm(text: str) -> dict[str, object]:
 def collect_snapshot(inventory: dict[str, object], *, allow_powermetrics: bool,
                      cpu_probe: CpuProbe | None = None,
                      procs: dict[int, dict[str, object]] | None = None,
-                     listeners: dict[int, list[dict[str, object]]] | None = None) -> dict[str, object]:
+                     listeners: dict[int, list[dict[str, object]]] | None = None,
+                     elevated: bool | None = None,
+                     smc_temperature_text: str | None = None) -> dict[str, object]:
     unavailable: list[dict[str, str]] = []
     started = time.time()
 
@@ -766,9 +1086,25 @@ def collect_snapshot(inventory: dict[str, object], *, allow_powermetrics: bool,
 
     gpu, gpu_unavailable = gpu_stats(allow_powermetrics)
     unavailable.extend(gpu_unavailable)
-    temperature_reason = "requires root for powermetrics" if not allow_powermetrics else "temperature is not reported by powermetrics"
-    for metric in ("cpu.temperature", "gpu.temperature"):
-        unavailable.append({"metric": metric, "reason": temperature_reason})
+    power_text = str(gpu.pop("_powermetricsText", "") or "")
+    if elevated is None:
+        elevated = os.geteuid() == 0
+    # Ordinary users stay on the honesty path even if SMC is readable without
+    # root. Only an elevated process (the LaunchDaemon) publishes die temperatures.
+    temps = resolve_die_temperatures(
+        power_text, elevated=elevated, smc_text=smc_temperature_text,
+    )
+    cpu_temp = temps["cpuCelsius"] if elevated else None
+    gpu_temp = temps["gpuCelsius"] if elevated else None
+    if not elevated:
+        temperature_reason = "requires root for powermetrics" if not allow_powermetrics else "temperature is not reported by powermetrics"
+        for metric in ("cpu.temperature", "gpu.temperature"):
+            unavailable.append({"metric": metric, "reason": temperature_reason})
+    else:
+        if cpu_temp is None:
+            unavailable.append({"metric": "cpu.temperature", "reason": "temperature is not reported by powermetrics"})
+        if gpu_temp is None:
+            unavailable.append({"metric": "gpu.temperature", "reason": "temperature is not reported by powermetrics"})
     thermal = parse_pmset_therm(run(["pmset", "-g", "therm"], timeout=3.0))
     if thermal["pressureState"] == "unknown":
         unavailable.append({"metric": "thermal.pressureState", "reason": "pmset returned no recognized thermal state"})
@@ -794,7 +1130,9 @@ def collect_snapshot(inventory: dict[str, object], *, allow_powermetrics: bool,
         "host": host_info(),
         "cpu": {
             "usagePercent": usage,
-            "temperature": None,
+            "temperature": cpu_temp,
+            "temperatureUnit": "celsius" if cpu_temp is not None else None,
+            "temperatureSource": temps["cpuSource"] if cpu_temp is not None else None,
             "perCorePercent": per_core,
             "loadAverage": [load1, load5, load15],
             "source": cpu.get("source"),
@@ -802,7 +1140,12 @@ def collect_snapshot(inventory: dict[str, object], *, allow_powermetrics: bool,
         "memory": memory,
         "disks": disk_stats(),
         "network": network,
-        "gpu": {**gpu, "temperature": None},
+        "gpu": {
+            **gpu,
+            "temperature": gpu_temp,
+            "temperatureUnit": "celsius" if gpu_temp is not None else None,
+            "temperatureSource": temps["gpuSource"] if gpu_temp is not None else None,
+        },
         "thermal": thermal,
         "runtimes": runtimes,
         "unavailable": unavailable,
@@ -811,8 +1154,57 @@ def collect_snapshot(inventory: dict[str, object], *, allow_powermetrics: bool,
 
 # ─── serving ─────────────────────────────────────────────────────────────────
 
+def collecting_snapshot() -> dict[str, object]:
+    """A schema-valid answer used when no sample exists yet and one is in flight."""
+    return {
+        "schema": SCHEMA,
+        "agentVersion": AGENT_VERSION,
+        "collectedAt": int(time.time()),
+        "collectMs": 0,
+        "uptimeSeconds": None,
+        "bootTime": None,
+        "host": {},
+        "cpu": {
+            "usagePercent": None,
+            "temperature": None,
+            "temperatureUnit": None,
+            "perCorePercent": None,
+            "loadAverage": [None, None, None],
+            "source": None,
+        },
+        "memory": {},
+        "disks": [],
+        "network": None,
+        "gpu": {"powermetrics": "not-attempted", "temperature": None, "temperatureUnit": None},
+        "thermal": {"pressureState": "unknown", "lastRecordedEvents": [], "source": "pmset -g therm"},
+        "runtimes": [],
+        "unavailable": [{"metric": "agent.sample", "reason": "metrics collection still running"}],
+    }
+
+
+def _call_with_deadline(fn, seconds: float):
+    """Run fn on a daemon thread and do not wait past the deadline."""
+    box: dict[str, object] = {}
+
+    def work() -> None:
+        try:
+            box["value"] = fn()
+        except Exception:
+            box["error"] = True
+
+    thread = threading.Thread(target=work, name="metrics-collect", daemon=True)
+    thread.start()
+    thread.join(seconds)
+    return box.get("value")
+
+
 class SampleCache:
-    """One sample shared by all requests inside the TTL, so a poll storm costs one `top`."""
+    """One sample shared by all requests inside the TTL, so a poll storm costs one `top`.
+
+    Collection does not hold the request lock. A probe that is still running
+    serves the previous sample (or a short collecting snapshot) so /metrics
+    cannot wedge behind one blocked command.
+    """
 
     def __init__(self, inventory: dict[str, object], allow_powermetrics: bool,
                  cpu_probe: CpuProbe | None = None, ttl: float = SAMPLE_TTL_S):
@@ -823,19 +1215,36 @@ class SampleCache:
         self._lock = threading.Lock()
         self._sample: dict[str, object] | None = None
         self._at = 0.0
+        self._refreshing = False
+        self._generation = 0
 
     def get(self, force: bool = False) -> dict[str, object]:
         with self._lock:
             now = time.time()
-            if not force and self._sample is not None and now - self._at < self._ttl:
-                return self._sample
-            self._sample = collect_snapshot(
+            fresh = self._sample is not None and now - self._at < self._ttl
+            if not force and fresh:
+                return self._sample  # type: ignore[return-value]
+            if self._refreshing:
+                return self._sample if self._sample is not None else collecting_snapshot()
+            self._refreshing = True
+            self._generation += 1
+            generation = self._generation
+
+        sample = _call_with_deadline(
+            lambda: collect_snapshot(
                 self._inventory,
                 allow_powermetrics=self._allow_powermetrics,
                 cpu_probe=self._cpu_probe,
-            )
-            self._at = now
-            return self._sample
+            ),
+            COLLECT_DEADLINE_S,
+        )
+        with self._lock:
+            if generation == self._generation:
+                if isinstance(sample, dict):
+                    self._sample = sample
+                    self._at = time.time()
+                self._refreshing = False
+            return self._sample if self._sample is not None else collecting_snapshot()
 
 
 class Handler(BaseHTTPRequestHandler):
