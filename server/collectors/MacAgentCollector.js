@@ -20,7 +20,74 @@ import { llmProbeHost } from "./llmHost.js";
 
 export const MAC_AGENT_DEFAULT_PORT = 8790;
 const SNAPSHOT_TTL_MS = 1500;
-const FETCH_TIMEOUT_MS = 4000;
+
+/**
+ * Warm `/metrics` budget. Metric polls keep this and fall back to SSH.
+ * A cold agent does not answer inside it: the first collect after the agent
+ * or its privileged collector starts takes 7–10s, and the agent joins that
+ * collect for up to 12s before it will say "pending".
+ */
+export const FETCH_TIMEOUT_MS = 4000;
+
+/**
+ * First runtimes probe budget. Covers the observed 7–10s cold response and
+ * the agent's 12s collect deadline, so that response is not aborted.
+ */
+export const COLD_FETCH_TIMEOUT_MS = 12_000;
+
+/** In-call retries after the cold probe. Backoff doubles from the base and is capped. */
+export const COLD_RETRY_MAX_ATTEMPTS = 4;
+export const COLD_RETRY_BASE_MS = 1_000;
+export const COLD_RETRY_MAX_BACKOFF_MS = 2_000;
+
+/**
+ * Runtimes has no monitor interval (SparkMonitor collects that domain once, at
+ * start). A failed first collect keeps probing on this cadence, inside the
+ * same call, so a cold miss self-heals without a container restart. Bounded
+ * so a dead agent still reports unreachable.
+ */
+export const RUNTIMES_POLL_INTERVAL_MS = 5_000;
+export const RUNTIMES_POLL_MAX_ATTEMPTS = 4;
+
+const AGENT_SCHEMA = "sparkdash.mac-agent/1";
+
+function delay(ms) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
+}
+
+function isPendingBody(data) {
+  return Boolean(data)
+    && typeof data === "object"
+    && data.status === "pending"
+    && data.schema !== AGENT_SCHEMA;
+}
+
+/**
+ * Probe plan for one `collectRuntimes()` call.
+ * Cold attempt first (long budget, no delay), then backoff retries, then the
+ * runtimes poll. `delayBeforeMs` is the wait before that attempt.
+ */
+export function runtimesProbeSchedule() {
+  const steps = [
+    { phase: "cold", timeoutMs: COLD_FETCH_TIMEOUT_MS, delayBeforeMs: 0 },
+  ];
+  let backoff = COLD_RETRY_BASE_MS;
+  for (let i = 1; i < COLD_RETRY_MAX_ATTEMPTS; i++) {
+    steps.push({ phase: "retry", timeoutMs: FETCH_TIMEOUT_MS, delayBeforeMs: backoff });
+    backoff = Math.min(backoff * 2, COLD_RETRY_MAX_BACKOFF_MS);
+  }
+  for (let i = 0; i < RUNTIMES_POLL_MAX_ATTEMPTS; i++) {
+    steps.push({
+      phase: "poll",
+      timeoutMs: FETCH_TIMEOUT_MS,
+      delayBeforeMs: RUNTIMES_POLL_INTERVAL_MS,
+    });
+  }
+  return steps;
+}
 
 /** Resolve where the agent lives for this unit. */
 export function macAgentBaseUrl(spark) {
@@ -50,16 +117,31 @@ export class MacAgentCollector extends MacSystemCollector {
    * @param {object} spark
    * @param {{ fetchImpl?: typeof fetch, exec?: Function }} [options]
    */
-  constructor(spark, { fetchImpl = globalThis.fetch, exec } = {}) {
+  constructor(spark, {
+    fetchImpl = globalThis.fetch,
+    exec,
+    sleep = delay,
+    createTimeoutSignal = (ms) => AbortSignal.timeout(ms),
+  } = {}) {
     super(spark, exec ? { exec } : {});
     this._fetch = fetchImpl;
+    this._sleep = sleep;
+    this._createTimeoutSignal = createTimeoutSignal;
     this.baseUrl = macAgentBaseUrl(spark);
     /** @type {{ at: number, data: object } | null} */
     this._agentCache = null;
     /** @type {Promise<object|null>|null} */
     this._inflight = null;
+    /** @type {Promise<object>|null} */
+    this._runtimesInflight = null;
+    this._probeGeneration = 0;
     this._agentDown = false;
     this._lastNet = null;
+  }
+
+  invalidatePendingCollections() {
+    super.invalidatePendingCollections();
+    this._probeGeneration += 1;
   }
 
   /**
@@ -79,7 +161,7 @@ export class MacAgentCollector extends MacSystemCollector {
       .then(async (response) => {
         if (!response.ok) throw new Error(`agent responded ${response.status}`);
         const data = await response.json();
-        if (!data || typeof data !== "object" || data.schema !== "sparkdash.mac-agent/1") {
+        if (!data || typeof data !== "object" || data.schema !== AGENT_SCHEMA) {
           throw new Error("unexpected agent payload");
         }
         this._agentCache = { at: Date.now(), data };
@@ -241,23 +323,51 @@ export class MacAgentCollector extends MacSystemCollector {
   }
 
   /**
-   * Runtime inventory + honest availability for this Mac.
-   * @returns {Promise<{runtimes: object[], unavailable: object[], agentOnline: boolean}>}
+   * One `/metrics` read that does not join the warm in-flight fetch.
+   * A parallel GPU poll uses the 4s budget; sharing that fetch would abort a
+   * cold runtimes probe before the agent answered.
+   * @returns {Promise<{ok: true, data: object} | {ok: false, retryable: boolean, reason: string}>}
    */
-  async collectRuntimes() {
-    const snapshot = await this._agentSnapshot(true);
-    if (!snapshot) {
-      return {
-        runtimes: [],
-        agentOnline: false,
-        unavailable: [
-          {
-            metric: "agent",
-            reason: `mac agent unreachable at ${this.baseUrl} (system vitals are read over SSH instead)`,
-          },
-        ],
-      };
+  async _probeAgentOnce(timeoutMs) {
+    let response;
+    try {
+      response = await this._fetch(`${this.baseUrl}/metrics`, {
+        signal: this._createTimeoutSignal(timeoutMs),
+      });
+    } catch {
+      return { ok: false, retryable: true, reason: "unreachable" };
     }
+    let data = null;
+    try {
+      data = await response.json();
+    } catch {
+      return { ok: false, retryable: false, reason: "json" };
+    }
+    if (isPendingBody(data)) return { ok: false, retryable: true, reason: "pending" };
+    if (!response.ok) return { ok: false, retryable: false, reason: "http" };
+    if (!data || typeof data !== "object" || data.schema !== AGENT_SCHEMA) {
+      return { ok: false, retryable: false, reason: "schema" };
+    }
+    this._agentCache = { at: Date.now(), data };
+    this._agentDown = false;
+    return { ok: true, data };
+  }
+
+  _offlineRuntimes() {
+    this._agentDown = true;
+    return {
+      runtimes: [],
+      agentOnline: false,
+      unavailable: [
+        {
+          metric: "agent",
+          reason: `mac agent unreachable at ${this.baseUrl} (system vitals are read over SSH instead)`,
+        },
+      ],
+    };
+  }
+
+  _onlineRuntimes(snapshot) {
     return {
       runtimes: Array.isArray(snapshot.runtimes) ? snapshot.runtimes : [],
       agentOnline: true,
@@ -265,6 +375,37 @@ export class MacAgentCollector extends MacSystemCollector {
       collectedAt: snapshot.collectedAt ?? null,
       unavailable: this._agentEntries(snapshot),
     };
+  }
+
+  async _collectRuntimes() {
+    const generation = this._probeGeneration;
+    let retryable = false;
+    for (const step of runtimesProbeSchedule()) {
+      if (this._probeGeneration !== generation) return this._offlineRuntimes();
+      if (step.phase === "poll" && !retryable) break;
+      if (step.delayBeforeMs > 0) await this._sleep(step.delayBeforeMs);
+      if (this._probeGeneration !== generation) return this._offlineRuntimes();
+      const probe = await this._probeAgentOnce(step.timeoutMs);
+      if (probe.ok) return this._onlineRuntimes(probe.data);
+      retryable = probe.retryable;
+      if (!retryable) break;
+    }
+    return this._offlineRuntimes();
+  }
+
+  /**
+   * Runtime inventory + honest availability for this Mac.
+   * `agentOnline` is the latest probe in the bounded cold-start schedule, never
+   * a stale first timeout. SparkMonitor collects this domain once, so the
+   * retry and the runtimes poll both finish before this promise resolves.
+   * @returns {Promise<{runtimes: object[], unavailable: object[], agentOnline: boolean}>}
+   */
+  async collectRuntimes() {
+    if (this._runtimesInflight) return this._runtimesInflight;
+    this._runtimesInflight = this._collectRuntimes().finally(() => {
+      this._runtimesInflight = null;
+    });
+    return this._runtimesInflight;
   }
 
   /** Boot epoch seconds from the agent (SSH fallback via the parent class). */
