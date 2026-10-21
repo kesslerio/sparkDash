@@ -1,0 +1,214 @@
+import type { ComponentProps } from "react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { flush, render } from "../../testing/render";
+import {
+  DEEPSEEK_MODEL_ID,
+  DEEPSEEK_PORT,
+  LLM_PREVIEW_SPARK_ID,
+  makeDeepSeekActive,
+  makeDeepSeekUnavailable,
+  makeLlmDailyDays,
+  makeLlmTokenSeries,
+  makeSessionRows,
+  seedLlmHistory,
+} from "../../testing/llmFixtures";
+import { _resetStore, getMetricHistorySamples } from "../../hooks/metricsStore";
+import { LlmPanel } from "./LlmPanel";
+
+const NOW = Date.now();
+const SPARK = LLM_PREVIEW_SPARK_ID;
+
+function jsonResponse(body: unknown) {
+  return { ok: true, status: 200, json: async () => body } as Response;
+}
+
+/** Deterministic daily and token responses; records every call for write checks. */
+function mockApi() {
+  const calls: { url: string; method: string }[] = [];
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    const url = String(input);
+    calls.push({ url, method: init?.method ?? "GET" });
+    if (url.includes("/llm/daily")) {
+      return jsonResponse({ sparkId: SPARK, port: DEEPSEEK_PORT, days: makeLlmDailyDays() });
+    }
+    if (url.startsWith("/api/llm-token-totals")) {
+      return jsonResponse({ range: "all", series: makeLlmTokenSeries(SPARK, NOW) });
+    }
+    if (url.includes("/llm/bench")) {
+      return jsonResponse({
+        active: null,
+        last: null,
+        history: [],
+        defaults: {
+          allowedConcurrencies: [1],
+          defaultMaxTokens: 128,
+          minMaxTokens: 16,
+          maxMaxTokens: 512,
+          promptTypes: ["prose"],
+          defaultPromptType: "prose",
+        },
+      });
+    }
+    throw new Error(`unexpected request ${url}`);
+  });
+  return calls;
+}
+
+async function renderPanel(props: Partial<ComponentProps<typeof LlmPanel>> = {}) {
+  const rendered = render(
+    <LlmPanel
+      llm={makeDeepSeekActive(NOW)}
+      sparkId={SPARK}
+      sparkName="Preview unit"
+      llmPort={DEEPSEEK_PORT}
+      conversations={[]}
+      llmPorts={[DEEPSEEK_PORT, 8000]}
+      {...props}
+    />,
+  );
+  await flush();
+  return rendered;
+}
+
+describe("LlmPanel layout", () => {
+  beforeEach(() => {
+    _resetStore();
+  });
+
+  it("keeps a long model name as a readable heading apart from badges and port", async () => {
+    mockApi();
+    const longName =
+      "DeepSeek-V4.1-Flash-oQ2.5e-mtp-quantized-checkpoint-with-a-deliberately-long-name-for-regression-coverage";
+    await renderPanel({ llm: { ...makeDeepSeekActive(NOW), modelId: longName } });
+
+    const heading = screen.getByRole("heading", { level: 3, name: longName });
+    const port = screen.getByText(":8010");
+    const backend = screen.getByText("oMLX");
+    expect(heading.contains(port)).toBe(false);
+    expect(heading.contains(backend)).toBe(false);
+    expect(port.closest(".llm-badge")).toBeNull();
+    expect(backend.closest(".llm-badge")).not.toBeNull();
+  });
+
+  it("shows the active metrics, trend, daily peaks, and token totals", async () => {
+    mockApi();
+    _resetStore();
+    seedLlmHistory(SPARK, NOW);
+    await renderPanel();
+
+    expect(screen.getByRole("heading", { level: 3, name: DEEPSEEK_MODEL_ID })).toBeInTheDocument();
+    expect(screen.getByText("Generation tok/s")).toBeInTheDocument();
+    expect(screen.getByText("60.3")).toBeInTheDocument();
+    expect(screen.getByText("Prefill tok/s")).toBeInTheDocument();
+    expect(screen.getByText("Last observation just now")).toBeInTheDocument();
+    const trend = screen.getByRole("img", {
+      name: /Generation and prefill tokens per second over the last 30 minutes/,
+    });
+    const drawn = trend.querySelector("polyline")?.getAttribute("points")?.trim().split(/\s+/) ?? [];
+    expect(drawn.length).toBeGreaterThan(2);
+    expect(
+      await screen.findByRole("img", { name: /Daily peak decode and prefill tokens per second/ }),
+    ).toBeInTheDocument();
+    expect(await screen.findByText("Total tokens by model")).toBeInTheDocument();
+    expect(
+      document.querySelector('[title^="745,000 prompt · 680,000 cached"]'),
+    ).not.toBeNull();
+  });
+
+  it("does not warn about a missing observation while the telemetry is active", async () => {
+    mockApi();
+    await renderPanel();
+
+    expect(screen.queryByText(/Telemetry has not produced a fresh observation/)).toBeNull();
+  });
+
+  it("keys the seeded history by LLM port", () => {
+    seedLlmHistory(SPARK, NOW);
+
+    expect(getMetricHistorySamples(SPARK, "llm:8010.tps").length).toBeGreaterThan(0);
+    expect(getMetricHistorySamples(SPARK, "llm:8000.tps").length).toBeGreaterThan(0);
+  });
+
+  it("shows the reason and historical daily and totals without a fake zero when unavailable", async () => {
+    mockApi();
+    await renderPanel({ llm: makeDeepSeekUnavailable(NOW) });
+
+    expect(screen.getByRole("heading", { level: 3, name: DEEPSEEK_MODEL_ID })).toBeInTheDocument();
+    expect(screen.getByText("unavailable")).toBeInTheDocument();
+    expect(
+      screen.getByText("Telemetry source did not answer in the last 15 minutes."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Generation tok/s")).toBeNull();
+    expect(screen.queryByText("0.0")).toBeNull();
+    expect(
+      await screen.findByRole("img", { name: /Daily peak decode and prefill tokens per second/ }),
+    ).toBeInTheDocument();
+    expect(await screen.findByText("Total tokens by model")).toBeInTheDocument();
+  });
+
+  it.each(["stale", "unknown"] as const)("keeps the %s model heading and reason readable", async (status) => {
+    mockApi();
+    await renderPanel({
+      llm: { ...makeDeepSeekActive(NOW), status, statusReason: "Telemetry older than two minutes." },
+    });
+
+    expect(screen.getByRole("heading", { level: 3, name: DEEPSEEK_MODEL_ID })).toBeInTheDocument();
+    expect(screen.getAllByText(status).length).toBeGreaterThan(0);
+    expect(screen.getByText("Telemetry older than two minutes.")).toBeInTheDocument();
+  });
+
+  it("offers the harness action for an empty session list without dropping the copy", async () => {
+    mockApi();
+    const user = userEvent.setup();
+    const onOpenHarnessWizard = vi.fn();
+    await renderPanel({ conversations: [], onOpenHarnessWizard });
+
+    expect(screen.getByText(/No sessions on this LLM/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "+ Harness" }));
+    expect(onOpenHarnessWizard).toHaveBeenCalledTimes(1);
+  });
+
+  it("lists populated sessions with long handles and keeps the add action reachable", async () => {
+    mockApi();
+    const user = userEvent.setup();
+    const onOpenHarnessWizard = vi.fn();
+    await renderPanel({ conversations: makeSessionRows(NOW), onOpenHarnessWizard });
+
+    const list = screen.getByLabelText("Harness sessions on this LLM");
+    expect(within(list).getByText("main")).toBeInTheDocument();
+    expect(
+      within(list).getByText("research-thread-with-a-deliberately-long-handle-for-overflow-checks"),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Add harness" }));
+    expect(onOpenHarnessWizard).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns to the model display after settings are cancelled", async () => {
+    mockApi();
+    const user = userEvent.setup();
+    await renderPanel();
+
+    await user.click(screen.getByRole("button", { name: "Settings" }));
+    expect(screen.getByRole("spinbutton")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { level: 3, name: DEEPSEEK_MODEL_ID })).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.getByRole("heading", { level: 3, name: DEEPSEEK_MODEL_ID })).toBeInTheDocument();
+    expect(screen.getByText("Generation tok/s")).toBeInTheDocument();
+  });
+
+  it("opens and closes the benchmark dialog without starting a run", async () => {
+    const calls = mockApi();
+    const user = userEvent.setup();
+    await renderPanel();
+
+    await user.click(screen.getByRole("button", { name: "Run decode benchmark" }));
+    const dialog = screen.getByRole("dialog");
+    expect(dialog).toBeInTheDocument();
+    await user.click(within(dialog).getAllByRole("button", { name: "Close" })[0]);
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(calls.filter((call) => call.method !== "GET")).toEqual([]);
+  });
+});
