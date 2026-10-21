@@ -676,6 +676,19 @@ Paste the printed URL (`http://<that-ip>:8788/occupancy`) and token into Occupan
 | `npm run docker:dev:build` | Dev Compose with rebuild |
 | `./deploy.sh` | Recreate container; `--build`, `--frontend` flags |
 
+### LLM layout preview (dev only)
+
+`llm-layout-preview.html` renders the real LLM card against illustrative fixtures. It is not part of `npm run build`, and it never connects to a live Spark: every request is answered locally, and anything other than a GET returns 403.
+
+```sh
+PREVIEW_DIR=$(mktemp -d /tmp/llm-layout-preview.XXXXXX)
+node scripts/build-llm-layout-preview.mjs "$PREVIEW_DIR"
+mv "$PREVIEW_DIR/llm-layout-preview.html" "$PREVIEW_DIR/index.html"
+python3 -m http.server 8765 --bind 127.0.0.1 --directory "$PREVIEW_DIR"
+```
+
+The build refuses a non-empty directory and any path inside the repository, so it never overwrites files. Then open `http://127.0.0.1:8765/`. The fixtures live in `src/testing/llmFixtures.ts`.
+
 ---
 
 ## How it works

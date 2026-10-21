@@ -328,9 +328,79 @@ function LlmOperate({
   children: ReactNode;
 }) {
   return (
-    <div className="llm-operate">
-      <div className="llm-operate-metrics space-y-3">{children}</div>
+    <div className={`llm-operate${conversations.length === 0 ? " llm-operate--empty" : ""}`}>
+      <div className="llm-operate-metrics min-w-0 space-y-3">{children}</div>
       <ConversationList conversations={conversations} onAddHarness={onAddHarness} />
+    </div>
+  );
+}
+
+/** Model identity on its own full-width heading row; badges and port wrap beneath it. */
+function LlmIdentity({
+  name,
+  port,
+  badges,
+  observationAge,
+  reason,
+}: {
+  name: string;
+  port: number;
+  badges: ReactNode;
+  observationAge: string;
+  reason: string | null;
+}) {
+  return (
+    <div className="space-y-1.5">
+      <h3
+        className="text-sm font-semibold leading-snug text-text [overflow-wrap:anywhere]"
+        title={name}
+      >
+        {name}
+      </h3>
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        {badges}
+        <span className="font-tabular text-[10px] text-muted">:{port}</span>
+      </div>
+      <p className="text-[10px] text-muted">Last observation {observationAge}</p>
+      {reason && <p className="text-[10px] text-warning [overflow-wrap:anywhere]">{reason}</p>}
+    </div>
+  );
+}
+
+function formatAvg(avg: number): string {
+  return avg >= 100 ? avg.toFixed(0) : avg.toFixed(1);
+}
+
+/** Label above the rate; sparkline and busy-sample average sit beside it. */
+function RateMetric({
+  label,
+  value,
+  valueClass,
+  avg,
+  history,
+  color,
+  title,
+}: {
+  label: string;
+  value: string;
+  valueClass: string;
+  avg: number | null;
+  history: readonly number[];
+  color: string;
+  title?: string;
+}) {
+  return (
+    <div className="min-w-0 space-y-1" title={title}>
+      <div className="text-xs text-muted">{label}</div>
+      <div className="flex min-w-0 items-end justify-between gap-2">
+        <div className="min-w-0">
+          <div className={`font-tabular text-lg font-semibold ${valueClass}`}>{value}</div>
+          {avg != null && <div className="font-tabular text-[9px] text-muted">avg {formatAvg(avg)}</div>}
+        </div>
+        <div className="llm-rate-spark min-w-0 max-w-[50%]">
+          <Sparkline data={history} color={color} width={64} height={24} />
+        </div>
+      </div>
     </div>
   );
 }
@@ -508,7 +578,7 @@ export function LlmPanel({
   const statusReason =
     llm?.statusReason ||
     llm?.error ||
-    (status === "idle" ? null : "Telemetry has not produced a fresh observation.");
+    (status === "idle" || status === "active" ? null : "Telemetry has not produced a fresh observation.");
   const observationAge = formatObservationAge(llm?.lastObservedAt);
 
   // Keep draft in sync when server pushes a different port (other tab / reload)
@@ -718,20 +788,22 @@ export function LlmPanel({
       ) : !available ? (
         <LlmOperate conversations={conversations} onAddHarness={openHarnessSettings}>
           <div className="space-y-3">
-            <div className="flex flex-wrap items-center gap-2 py-1">
-              {llm?.posture ? (
-                <PostureBadge posture={llm.posture} />
-              ) : (
-                <span className="h-1.5 w-1.5 rounded-full bg-muted" />
-              )}
-              <div className="min-w-0 text-xs text-muted">
-                <p className="font-medium text-text">{statusLabel(status)}</p>
-                <p className="break-words [overflow-wrap:anywhere]">
-                  {modelLabel} · observed {observationAge} on :{llmPort}
-                </p>
-                {statusReason && <p className="mt-0.5 text-[10px] text-warning">{statusReason}</p>}
-              </div>
-            </div>
+            <LlmIdentity
+              name={modelLabel}
+              port={llmPort}
+              badges={
+                <>
+                  {llm?.posture ? (
+                    <PostureBadge posture={llm.posture} />
+                  ) : (
+                    <span className="h-1.5 w-1.5 rounded-full bg-muted" />
+                  )}
+                  <span className="llm-badge capitalize">{statusLabel(status)}</span>
+                </>
+              }
+              observationAge={observationAge}
+              reason={statusReason}
+            />
             <LlmLaunchers
               sparkId={sparkId}
               llmPort={llmPort}
@@ -747,24 +819,19 @@ export function LlmPanel({
         </LlmOperate>
       ) : (
         <LlmOperate conversations={conversations} onAddHarness={openHarnessSettings}>
-          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-            <BackendBadge backend={llm?.backend ?? null} />
-            {llm?.posture && <PostureBadge posture={llm.posture} />}
-            <span className="llm-badge capitalize">{statusLabel(status)}</span>
-            {llm?.modelId && (
-              <span
-                className="min-w-0 flex-1 whitespace-normal break-words text-xs leading-snug text-text [overflow-wrap:anywhere]"
-                title={llm.modelId}
-              >
-                {llm.modelId}
-              </span>
-            )}
-            <span className="shrink-0 font-tabular text-[10px] text-muted">:{llmPort}</span>
-          </div>
-          <div className="-mt-1 text-[10px] text-muted">
-            Last observation {observationAge}
-            {statusReason && ` · ${statusReason}`}
-          </div>
+          <LlmIdentity
+            name={modelLabel}
+            port={llmPort}
+            badges={
+              <>
+                <BackendBadge backend={llm?.backend ?? null} />
+                {llm?.posture && <PostureBadge posture={llm.posture} />}
+                <span className="llm-badge capitalize">{statusLabel(status)}</span>
+              </>
+            }
+            observationAge={observationAge}
+            reason={statusReason}
+          />
           {llm?.modelPath &&
             llm.modelPath !== llm.modelId &&
             !llm.modelPath.includes("models--") && (
@@ -773,88 +840,54 @@ export function LlmPanel({
             </div>
           )}
 
-          <div className="flex items-center justify-between">
-            <span className="text-xs text-muted">Generation tok/s</span>
-            <div className="flex items-center gap-2">
-              <Sparkline data={genHistory} color="var(--color-accent)" height={24} />
-              <div className="text-right">
-                <div className="font-tabular text-sm font-semibold text-accent">
-                  {formatRate(generationTps)}
-                </div>
-                {genAvg != null && (
-                  <div className="font-tabular text-[9px] text-muted">
-                    avg {genAvg >= 100 ? genAvg.toFixed(0) : genAvg.toFixed(1)}
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-          <div
-            className="flex items-center justify-between"
-            title="Tokens/sec while the engine is reading the prompt and building KV cache — before the first output token. Opening a saved chat in the UI does not hit the GPU; send (or regenerate) so the history is sent as the prompt. Prefix-cache hits do little compute, so this can stay ~0. Long cold prefills show here until decode starts."
-          >
-            <span className="text-xs text-muted">Prefill tok/s</span>
-            <div className="flex items-center gap-2">
-              <Sparkline data={prefillHistory} color="var(--color-text)" height={24} />
-              <div className="text-right">
-                <div className="font-tabular text-sm font-semibold text-text">
-                  {formatRate(prefillTps)}
-                </div>
-                {prefillAvg != null && (
-                  <div className="font-tabular text-[9px] text-muted">
-                    avg {prefillAvg >= 100 ? prefillAvg.toFixed(0) : prefillAvg.toFixed(1)}
-                  </div>
-                )}
-              </div>
-            </div>
+          <div className="llm-rate-band">
+            <RateMetric
+              label="Generation tok/s"
+              value={formatRate(generationTps)}
+              valueClass="text-accent"
+              avg={genAvg}
+              history={genHistory}
+              color="var(--color-accent)"
+            />
+            <RateMetric
+              label="Prefill tok/s"
+              value={formatRate(prefillTps)}
+              valueClass="text-text"
+              avg={prefillAvg}
+              history={prefillHistory}
+              color="var(--color-text)"
+              title="Tokens/sec while the engine is reading the prompt and building KV cache — before the first output token. Opening a saved chat in the UI does not hit the GPU; send (or regenerate) so the history is sent as the prompt. Prefix-cache hits do little compute, so this can stay ~0. Long cold prefills show here until decode starts."
+            />
           </div>
           {showPrefillSplit && (
-            <>
-              <div
-                className="flex items-center justify-between"
+            <div className="llm-rate-band">
+              <RateMetric
+                label="Cached prefill tok/s"
+                value={formatRate(cachedPrefillTps)}
+                valueClass="text-muted"
+                avg={cachedPrefillAvg}
+                history={cachedPrefillHistory}
+                color="var(--color-muted)"
                 title="Prefill tokens served from prefix cache (little GPU work). High values mean prompt reuse, not a faster cold prefill."
-              >
-                <span className="text-xs text-muted">Cached prefill tok/s</span>
-                <div className="flex items-center gap-2">
-                  <Sparkline data={cachedPrefillHistory} color="var(--color-muted)" height={24} />
-                  <div className="text-right">
-                    <div className="font-tabular text-sm font-semibold text-muted">
-                      {formatRate(cachedPrefillTps)}
-                    </div>
-                    {cachedPrefillAvg != null && (
-                      <div className="font-tabular text-[9px] text-muted">
-                        avg {cachedPrefillAvg >= 100 ? cachedPrefillAvg.toFixed(0) : cachedPrefillAvg.toFixed(1)}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </div>
-              <div
-                className="flex items-center justify-between"
+              />
+              <RateMetric
+                label="Uncached prefill tok/s"
+                value={formatRate(uncachedPrefillTps)}
+                valueClass="text-text"
+                avg={uncachedPrefillAvg}
+                history={uncachedPrefillHistory}
+                color="var(--color-text)"
                 title="Uncached (computed) prefill — tokens that actually build KV cache on the GPU."
-              >
-                <span className="text-xs text-muted">Uncached prefill tok/s</span>
-                <div className="flex items-center gap-2">
-                  <Sparkline data={uncachedPrefillHistory} color="var(--color-text)" height={24} />
-                  <div className="text-right">
-                    <div className="font-tabular text-sm font-semibold text-text">
-                      {formatRate(uncachedPrefillTps)}
-                    </div>
-                    {uncachedPrefillAvg != null && (
-                      <div className="font-tabular text-[9px] text-muted">
-                        avg {uncachedPrefillAvg >= 100 ? uncachedPrefillAvg.toFixed(0) : uncachedPrefillAvg.toFixed(1)}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </div>
-            </>
+              />
+            </div>
           )}
 
-          <LlmTrendChart sparkId={sparkId} llmPort={llmPort} />
-          <LlmDailyChart sparkId={sparkId} llmPort={llmPort} />
+          <div className="llm-chart-stack space-y-4">
+            <LlmTrendChart sparkId={sparkId} llmPort={llmPort} />
+            <LlmDailyChart sparkId={sparkId} llmPort={llmPort} />
+          </div>
 
-          <div className="grid grid-cols-4 gap-2 border-t border-border pt-3">
+          <div className="llm-stat-grid border-t border-border pt-3">
             <div className="space-y-0.5">
               <div className="text-[10px] uppercase tracking-wide text-muted">Slots</div>
               <div className="font-tabular text-sm text-text">

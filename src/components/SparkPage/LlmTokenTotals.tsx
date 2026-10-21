@@ -62,11 +62,11 @@ export function LlmTokenTotals({ sparkId, llmPort }: { sparkId: string; llmPort:
 
   return (
     <div className="border-t border-border pt-3 space-y-1.5">
-      <div className="flex items-center justify-between gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
         <span className="text-[10px] uppercase tracking-wide text-muted">
           Total tokens by model
         </span>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center justify-end gap-2">
           <select
             value={range}
             onChange={(e) => setRange(e.target.value as LlmTokenRange)}
