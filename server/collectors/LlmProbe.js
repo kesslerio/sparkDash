@@ -176,6 +176,8 @@ export class LlmProbe {
     this._omlxAdminCookie = null;
     this._omlxAdminRetryAt = 0;
     this._omlxPrevGen = new Map();
+    /** Last mlx-serve live token sums ({ gen, prefill }); null until first sample. */
+    this._mlxServeLive = null;
     this.serverIsOpenAI = null; // true = OpenAI-compatible
     /** Whether /v1/models (or /slots) answered without credentials. null = unknown. */
     this.authOpen = null;
@@ -457,6 +459,7 @@ export class LlmProbe {
     this.lastTokenCounts = { input: 0, output: 0 };
     this.lastPrefillKinds = null;
     this._prefillSplitSource = null;
+    this._mlxServeLive = null;
     this.lastTtftSum = null;
     this.lastTtftCount = null;
     this.lastIterSum = null;
@@ -481,6 +484,7 @@ export class LlmProbe {
     this.slotState.clear();
     this.lastTokenCounts = { input: 0, output: 0 };
     this.lastPrefillKinds = null;
+    this._mlxServeLive = null;
     this.lastTtftSum = null;
     this.lastIterSum = null;
     this._sglangStickyTps = null;
@@ -754,6 +758,31 @@ export class LlmProbe {
     );
   }
 
+  static _metricsLookLikeMlxServe(body) {
+    return /(?:^|\n)mlx_serve:prefill_tokens_live(?:\{|\s)/m.test(String(body || ""));
+  }
+
+  /**
+   * mlx-serve exports vLLM token counters but bumps them only when a request
+   * finishes, so mid-request deltas are 0 and completion spikes. Its own series
+   * move live: generation_tokens_live is cumulative including in-flight tokens,
+   * and prefill_tokens_live is the in-flight prefill progress that
+   * prefill_tokens_total absorbs at completion.
+   */
+  _applyMlxServeLiveRates(txt, dtSec) {
+    const gen = this._getPromMetric(txt, "mlx_serve:generation_tokens_live");
+    const prefillDone = this._getPromMetric(txt, "mlx_serve:prefill_tokens_total");
+    const prefillLive = this._getPromMetric(txt, "mlx_serve:prefill_tokens_live");
+    if (gen == null || prefillDone == null || prefillLive == null) return;
+    const prev = this._mlxServeLive;
+    const cur = { gen, prefill: prefillDone + prefillLive };
+    this._mlxServeLive = cur;
+    if (!prev || !(dtSec > 0 && dtSec < 10)) return;
+    const rate = (d) => Math.max(0, Math.round((d / dtSec) * 100) / 100);
+    this.generationTps = rate(cur.gen - prev.gen);
+    this.prefillTps = rate(cur.prefill - prev.prefill);
+  }
+
   // ─── OpenAI-compatible path (vLLM/sglang/ds4) ────────────
   async _probeOpenAICompatible() {
     const now = Date.now();
@@ -934,6 +963,7 @@ export class LlmProbe {
         } else {
           this.backendType = "vllm";
           this._applyVllmMetrics(txt, dtSec);
+          if (LlmProbe._metricsLookLikeMlxServe(txt)) this._applyMlxServeLiveRates(txt, dtSec);
         }
         this._noteFreshTelemetry(Date.now());
       } else {
