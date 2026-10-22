@@ -832,6 +832,19 @@ input[type="checkbox"] {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
 }
+/* Composition bar and total column need room; drop them on narrow cards. */
+.llm-token-bar,
+.llm-token-total {
+  display: none;
+}
+@container llm-panel (min-width: 700px) {
+  .llm-token-bar {
+    display: inline-flex;
+  }
+  .llm-token-total {
+    display: inline-block;
+  }
+}
 @container llm-panel (min-width: 560px) {
   .llm-stat-grid {
     grid-template-columns: repeat(4, minmax(0, 1fr));

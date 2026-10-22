@@ -29,6 +29,57 @@ function age(ms: number | null): string | null {
   return `${Math.floor(h / 24)}d`;
 }
 
+/** Column widths shared by the header and every row so they cannot drift. */
+const COL = {
+  bar: "llm-token-bar",
+  cached: "w-12",
+  prefill: "w-12",
+  generated: "w-16",
+  total: "llm-token-total",
+} as const;
+
+/**
+ * Composition bar for one model row: cached prompt, computed prefill and
+ * generated tokens in the same proportions as the token table's columns, so
+ * the cache-hit ratio is readable without doing the arithmetic.
+ */
+function CompositionBar({
+  cached,
+  prefill,
+  generated,
+}: {
+  cached: number;
+  prefill: number;
+  generated: number;
+}) {
+  const total = cached + prefill + generated;
+  if (total <= 0) return null;
+  const parts = [
+    { label: "cached", value: cached, color: "var(--color-muted)" },
+    { label: "prefill", value: prefill, color: "var(--color-text)" },
+    { label: "generated", value: generated, color: "var(--color-accent)" },
+  ];
+  return (
+    <span
+      className={`${COL.bar} inline-flex h-1.5 w-14 shrink-0 overflow-hidden rounded-full bg-surface-elevated align-middle`}
+      aria-hidden
+    >
+      {parts.map((part) => {
+        const pct = (part.value / total) * 100;
+        if (pct <= 0) return null;
+        return (
+          <span
+            key={part.label}
+            className="h-full"
+            style={{ width: `${pct}%`, background: part.color }}
+            title={`${part.label} ${pct.toFixed(0)}%`}
+          />
+        );
+      })}
+    </span>
+  );
+}
+
 export function LlmTokenTotals({ sparkId, llmPort }: { sparkId: string; llmPort: number }) {
   const [series, setSeries] = useState<LlmTokenSeriesTotals[] | null>(null);
   const [range, setRange] = useState<LlmTokenRange>("all");
@@ -81,11 +132,13 @@ export function LlmTokenTotals({ sparkId, llmPort }: { sparkId: string; llmPort:
             ))}
           </select>
           <span className="shrink-0 whitespace-nowrap text-[10px] text-muted">
-            <span className="inline-block w-14 text-right">Cached</span>
+            <span className="inline-block w-12 text-right">Cached</span>
 
-            <span className="inline-block w-14 text-right">Prefill</span>
+            <span className="inline-block w-12 text-right">Prefill</span>
 
             <span className="inline-block w-16 text-right">Generated</span>
+
+            <span className={`${COL.total} inline-block w-14 text-right`}>Total</span>
           </span>
         </div>
       </div>
@@ -95,11 +148,13 @@ export function LlmTokenTotals({ sparkId, llmPort }: { sparkId: string; llmPort:
         ) : (
           rows.map((row) => {
           const seen = age(row.lastSeenAt);
+          const prefillTokens = row.promptTokens - row.cachedTokens;
+          const totalTokens = row.promptTokens + row.completionTokens;
           return (
             <div
               key={row.modelId}
               className="flex items-center justify-between gap-2 text-[11px]"
-              title={`${row.promptTokens.toLocaleString()} prompt · ${row.cachedTokens.toLocaleString()} cached · ${(row.promptTokens - row.cachedTokens).toLocaleString()} prefill · ${row.completionTokens.toLocaleString()} generated${seen ? ` · ${seen} ago` : ""}`}
+              title={`${row.promptTokens.toLocaleString()} prompt · ${row.cachedTokens.toLocaleString()} cached · ${prefillTokens.toLocaleString()} prefill · ${row.completionTokens.toLocaleString()} generated${seen ? ` · ${seen} ago` : ""}`}
             >
               <span
                 className="min-w-0 flex-1 truncate text-text"
@@ -108,16 +163,26 @@ export function LlmTokenTotals({ sparkId, llmPort }: { sparkId: string; llmPort:
                 {row.modelId}
               </span>
               <span className="shrink-0 font-tabular text-muted">
-                <span className="inline-block w-14 text-right">
+                <CompositionBar
+                  cached={row.cachedTokens}
+                  prefill={prefillTokens}
+                  generated={row.completionTokens}
+                />
+
+                <span className="inline-block w-12 text-right">
                   {row.cachedTokens > 0 ? formatTokensCompact(row.cachedTokens) : "—"}
                 </span>
 
-                <span className="inline-block w-14 text-right">
-                  {formatTokensCompact(row.promptTokens - row.cachedTokens)}
+                <span className="inline-block w-12 text-right">
+                  {formatTokensCompact(prefillTokens)}
                 </span>
 
                 <span className="inline-block w-16 text-right text-text">
                   {formatTokensCompact(row.completionTokens)}
+                </span>
+
+                <span className={`${COL.total} inline-block w-14 text-right text-text`}>
+                  {formatTokensCompact(totalTokens)}
                 </span>
               </span>
             </div>

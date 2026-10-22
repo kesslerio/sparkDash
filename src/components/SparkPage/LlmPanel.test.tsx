@@ -8,6 +8,7 @@ import {
   DEEPSEEK_PORT,
   LLM_PREVIEW_SPARK_ID,
   makeDeepSeekActive,
+  makeDeepSeekIdle,
   makeDeepSeekUnavailable,
   makeLlmDailyDays,
   makeLlmTokenSeries,
@@ -124,6 +125,45 @@ describe("LlmPanel layout", () => {
     expect(screen.queryByText(/Telemetry has not produced a fresh observation/)).toBeNull();
   });
 
+  it("labels the history series and discloses that each is scaled to its own peak", async () => {
+    mockApi();
+    _resetStore();
+    seedLlmHistory(SPARK, NOW);
+    await renderPanel();
+
+    // Colour swatches alone cannot say which line is which; the legend names both.
+    expect(screen.getAllByText(/Gen avg/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/Prefill avg/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/peak \d/).length).toBeGreaterThan(0);
+    expect(
+      screen.getByText(/Each series is scaled to its own peak/),
+    ).toBeInTheDocument();
+  });
+
+  it("shows the cached share of prefill work instead of leaving it to arithmetic", async () => {
+    mockApi();
+    _resetStore();
+    seedLlmHistory(SPARK, NOW);
+    await renderPanel();
+
+    expect(screen.getAllByText(/cached \(avg\)/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/uncached \(avg\)/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/^\d+%$/).length).toBeGreaterThan(0);
+  });
+
+  it("totals each model's tokens and shows the composition bar", async () => {
+    mockApi();
+    _resetStore();
+    seedLlmHistory(SPARK, NOW);
+    await renderPanel();
+
+    // 745,000 prompt + 6,911 generated = 751,911 tokens.
+    expect(await screen.findByText("752k")).toBeInTheDocument();
+    const bar = document.querySelector(".llm-token-bar");
+    expect(bar).not.toBeNull();
+    expect(bar?.querySelectorAll("span").length).toBe(3);
+  });
+
   it("keys the seeded history by LLM port", () => {
     seedLlmHistory(SPARK, NOW);
 
@@ -131,7 +171,7 @@ describe("LlmPanel layout", () => {
     expect(getMetricHistorySamples(SPARK, "llm:8000.tps").length).toBeGreaterThan(0);
   });
 
-  it("shows the reason and historical daily and totals without a fake zero when unavailable", async () => {
+  it("folds an unavailable LLM to its identity and reveals the history on demand", async () => {
     mockApi();
     await renderPanel({ llm: makeDeepSeekUnavailable(NOW) });
 
@@ -140,12 +180,35 @@ describe("LlmPanel layout", () => {
     expect(
       screen.getByText("Telemetry source did not answer in the last 15 minutes."),
     ).toBeInTheDocument();
+    // Folded: no live rates and no fake zero, but the history is one click away.
     expect(screen.queryByText("Generation tok/s")).toBeNull();
     expect(screen.queryByText("0.0")).toBeNull();
+    expect(
+      screen.queryByRole("img", { name: /Daily peak decode and prefill tokens per second/ }),
+    ).toBeNull();
+
+    await userEvent.click(screen.getByRole("button", { name: "Expand LLM details" }));
+
     expect(
       await screen.findByRole("img", { name: /Daily peak decode and prefill tokens per second/ }),
     ).toBeInTheDocument();
     expect(await screen.findByText("Total tokens by model")).toBeInTheDocument();
+  });
+
+  it("folds an idle LLM but keeps an active one open", async () => {
+    mockApi();
+    await renderPanel({ llm: makeDeepSeekIdle(NOW) });
+
+    expect(screen.getByRole("button", { name: "Expand LLM details" })).toBeInTheDocument();
+    expect(screen.queryByText("Generation tok/s")).toBeNull();
+  });
+
+  it("keeps an active LLM expanded and offers to fold it", async () => {
+    mockApi();
+    await renderPanel({ llm: makeDeepSeekActive(NOW) });
+
+    expect(screen.getByText("Generation tok/s")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Collapse LLM details" })).toBeInTheDocument();
   });
 
   it.each(["stale", "unknown"] as const)("keeps the %s model heading and reason readable", async (status) => {

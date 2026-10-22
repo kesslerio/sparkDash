@@ -380,6 +380,57 @@ function formatAvg(avg: number): string {
   return avg >= 100 ? avg.toFixed(0) : avg.toFixed(1);
 }
 
+/** One part of a rate split (cached vs uncached prefill). */
+interface SplitSegment {
+  label: string;
+  value: number;
+  color: string;
+}
+
+/**
+ * Proportional bar for a split of one rate. Answers "how much of this work is
+ * cache hits?" at a glance — the absolute per-part rates alone need the reader
+ * to do the ratio arithmetic. Sourced from busy-sample averages so the bar
+ * stays stable while the current-rate tiles move.
+ */
+function SplitBar({ segments }: { segments: SplitSegment[] }) {
+  const total = segments.reduce((sum, s) => sum + Math.max(0, s.value), 0);
+  if (total <= 0) return null;
+  return (
+    <div className="space-y-1 pt-0.5">
+      <div className="flex h-1.5 w-full overflow-hidden rounded-full bg-surface-elevated">
+        {segments.map((s) => {
+          const pct = (Math.max(0, s.value) / total) * 100;
+          if (pct <= 0) return null;
+          return (
+            <span
+              key={s.label}
+              className="h-full"
+              style={{ width: `${pct}%`, background: s.color }}
+              title={`${s.label} ${pct.toFixed(0)}%`}
+            />
+          );
+        })}
+      </div>
+      <div className="flex flex-wrap gap-x-3 text-[9px] text-muted">
+        {segments.map((s) => (
+          <span key={s.label} className="inline-flex items-center gap-1">
+            <span
+              aria-hidden
+              className="inline-block h-1.5 w-1.5 rounded-full"
+              style={{ background: s.color }}
+            />
+            {s.label}
+            <span className="font-tabular text-text">
+              {((Math.max(0, s.value) / total) * 100).toFixed(0)}%
+            </span>
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 /** Label above the rate; sparkline and busy-sample average sit beside it. */
 function RateMetric({
   label,
@@ -389,6 +440,8 @@ function RateMetric({
   history,
   color,
   title,
+  numeric,
+  split,
 }: {
   label: string;
   value: string;
@@ -397,19 +450,37 @@ function RateMetric({
   history: readonly number[];
   color: string;
   title?: string;
+  /** Current value, used to show the gap against the busy-sample average. */
+  numeric?: number | null;
+  split?: SplitSegment[];
 }) {
+  const delta =
+    numeric != null && avg != null && numeric > 0 && avg > 0
+      ? (numeric - avg) / avg
+      : null;
   return (
     <div className="min-w-0 space-y-1" title={title}>
       <div className="text-xs text-muted">{label}</div>
       <div className="flex min-w-0 items-end justify-between gap-2">
         <div className="min-w-0">
           <div className={`font-tabular text-lg font-semibold ${valueClass}`}>{value}</div>
-          {avg != null && <div className="font-tabular text-[9px] text-muted">avg {formatAvg(avg)}</div>}
+          {avg != null && (
+            <div className="font-tabular text-[9px] text-muted">
+              avg {formatAvg(avg)}
+              {delta != null && (
+                <span className={delta >= 0 ? "text-accent" : "text-muted"}>
+                  {" "}
+                  {delta >= 0 ? "↑" : "↓"} {Math.abs(delta * 100).toFixed(0)}%
+                </span>
+              )}
+            </div>
+          )}
         </div>
         <div className="llm-rate-spark min-w-0 max-w-[50%]">
           <Sparkline data={history} color={color} width={64} height={24} />
         </div>
       </div>
+      {split && <SplitBar segments={split} />}
     </div>
   );
 }
@@ -581,6 +652,13 @@ export function LlmPanel({
   const uncachedPrefillTps = llm?.uncachedPrefillTps ?? null;
   const available = llm?.available ?? false;
   const status: LlmStatus = llm?.status ?? (available ? "active" : "unavailable");
+  /**
+   * An LLM that is not serving has nothing to show but zeros, so it starts
+   * folded to one line. `null` means "follow the status"; a manual toggle
+   * pins the user's choice and wins over the status.
+   */
+  const [collapseOverride, setCollapseOverride] = useState<boolean | null>(null);
+  const collapsed = collapseOverride ?? status !== "active";
   const modelLabel =
     llm?.modelId ||
     (llm?.models && llm.models.length > 0 ? `${llm.models.length} router models` : "No active model");
@@ -658,6 +736,26 @@ export function LlmPanel({
     }
   };
 
+  const identity = (
+    <LlmIdentity
+      name={modelLabel}
+      port={llmPort}
+      badges={
+        <>
+          {available && <BackendBadge backend={llm?.backend ?? null} />}
+          {llm?.posture ? (
+            <PostureBadge posture={llm.posture} />
+          ) : !available ? (
+            <span className="h-1.5 w-1.5 rounded-full bg-muted" />
+          ) : null}
+          <span className="llm-badge capitalize">{statusLabel(status)}</span>
+        </>
+      }
+      observationAge={observationAge}
+      reason={statusReason}
+    />
+  );
+
   return (
     <Panel
       title="LLM"
@@ -675,6 +773,24 @@ export function LlmPanel({
             >
               <span aria-hidden>×</span>
               <span>Remove</span>
+            </button>
+          )}
+          {!showSettings && (
+            <button
+              type="button"
+              title={collapsed ? "Expand LLM details" : "Collapse LLM details"}
+              aria-expanded={!collapsed}
+              aria-label={collapsed ? "Expand LLM details" : "Collapse LLM details"}
+              onClick={() => setCollapseOverride(!collapsed)}
+              className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted transition-colors hover:bg-surface-hover"
+            >
+              <span
+                aria-hidden
+                className={`inline-block transition-transform ${collapsed ? "" : "rotate-180"}`}
+              >
+                ▾
+              </span>
+              <span>{collapsed ? "Expand" : "Collapse"}</span>
             </button>
           )}
           <button
@@ -794,24 +910,11 @@ export function LlmPanel({
             </button>
           </div>
         </div>
+      ) : collapsed ? (
+        <div className="space-y-1.5">{identity}</div>
       ) : !available ? (
         <div className="space-y-3">
-          <LlmIdentity
-            name={modelLabel}
-            port={llmPort}
-            badges={
-              <>
-                {llm?.posture ? (
-                  <PostureBadge posture={llm.posture} />
-                ) : (
-                  <span className="h-1.5 w-1.5 rounded-full bg-muted" />
-                )}
-                <span className="llm-badge capitalize">{statusLabel(status)}</span>
-              </>
-            }
-            observationAge={observationAge}
-            reason={statusReason}
-          />
+          {identity}
           <LlmCockpit
             conversations={conversations}
             onAddHarness={openHarnessSettings}
@@ -838,19 +941,7 @@ export function LlmPanel({
         </div>
       ) : (
         <div className="space-y-3">
-          <LlmIdentity
-            name={modelLabel}
-            port={llmPort}
-            badges={
-              <>
-                <BackendBadge backend={llm?.backend ?? null} />
-                {llm?.posture && <PostureBadge posture={llm.posture} />}
-                <span className="llm-badge capitalize">{statusLabel(status)}</span>
-              </>
-            }
-            observationAge={observationAge}
-            reason={statusReason}
-          />
+          {identity}
           {llm?.modelPath &&
             llm.modelPath !== llm.modelId &&
             !llm.modelPath.includes("models--") && (
@@ -870,6 +961,7 @@ export function LlmPanel({
                     value={formatRate(generationTps)}
                     valueClass="text-accent"
                     avg={genAvg}
+                    numeric={generationTps}
                     history={genHistory}
                     color="var(--color-accent)"
                   />
@@ -878,9 +970,26 @@ export function LlmPanel({
                     value={formatRate(prefillTps)}
                     valueClass="text-text"
                     avg={prefillAvg}
+                    numeric={prefillTps}
                     history={prefillHistory}
                     color="var(--color-text)"
                     title="Tokens/sec while the engine is reading the prompt and building KV cache — before the first output token. Opening a saved chat in the UI does not hit the GPU; send (or regenerate) so the history is sent as the prompt. Prefix-cache hits do little compute, so this can stay ~0. Long cold prefills show here until decode starts."
+                    split={
+                      showPrefillSplit
+                        ? [
+                            {
+                              label: "cached (avg)",
+                              value: cachedPrefillAvg ?? 0,
+                              color: "var(--color-muted)",
+                            },
+                            {
+                              label: "uncached (avg)",
+                              value: uncachedPrefillAvg ?? 0,
+                              color: "var(--color-text)",
+                            },
+                          ]
+                        : undefined
+                    }
                   />
                 </div>
                 {showPrefillSplit && (
@@ -890,6 +999,7 @@ export function LlmPanel({
                       value={formatRate(cachedPrefillTps)}
                       valueClass="text-muted"
                       avg={cachedPrefillAvg}
+                      numeric={cachedPrefillTps}
                       history={cachedPrefillHistory}
                       color="var(--color-muted)"
                       title="Prefill tokens served from prefix cache (little GPU work). High values mean prompt reuse, not a faster cold prefill."
@@ -899,6 +1009,7 @@ export function LlmPanel({
                       value={formatRate(uncachedPrefillTps)}
                       valueClass="text-text"
                       avg={uncachedPrefillAvg}
+                      numeric={uncachedPrefillTps}
                       history={uncachedPrefillHistory}
                       color="var(--color-text)"
                       title="Uncached (computed) prefill — tokens that actually build KV cache on the GPU."
