@@ -54,8 +54,13 @@ function fmtStorage(mb: number, unit: boolean): string {
 
 function overviewLlm(llmArr: SparkSnapshot["metrics"]["llm"]) {
   if (!Array.isArray(llmArr) || llmArr.length === 0) return null;
+  // Prefer a serving engine over one that merely exists: "active" first, then
+  // "idle". A single find() over "active || idle" would let the first idle
+  // port win over a later active one, so a busy model stayed hidden behind an
+  // idle sibling.
   return (
-    llmArr.find((llm) => llm.status === "active" || llm.status === "idle") ||
+    llmArr.find((llm) => llm.status === "active") ||
+    llmArr.find((llm) => llm.status === "idle") ||
     llmArr.find((llm) => llm.modelId) ||
     llmArr[0]
   );
