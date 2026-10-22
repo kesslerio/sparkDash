@@ -786,57 +786,64 @@ input[type="checkbox"] {
 }
 
 
-/* ─── Occupancy (bound chats on an LLM port) ───────────── */
+/* ─── LLM Cockpit & Occupancy ──────────────────────────── */
 .panel-llm {
   container: llm-panel / inline-size;
 }
-.llm-operate {
+.llm-cockpit {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: 16px;
+}
+.llm-cockpit-vitals {
+  min-width: 0;
+}
+.llm-cockpit-deck {
+  min-width: 0;
 }
 .llm-rate-band {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px 16px;
 }
-@container llm-panel (min-width: 900px) {
-  .llm-operate:not(.llm-operate--empty) {
-    grid-template-columns: minmax(0, 1.15fr) minmax(280px, 0.85fr);
-    gap: 28px;
+@container llm-panel (min-width: 820px) {
+  .llm-cockpit {
+    grid-template-columns: minmax(290px, 330px) minmax(0, 1fr);
+    gap: 24px;
     align-items: start;
   }
-}
-.llm-operate--empty .occupancy {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px 12px;
-  padding-top: 12px;
-  border-top: 1px solid var(--color-border);
-}
-.llm-operate--empty .occupancy-head {
-  margin: 0;
-}
-.llm-operate--empty .occupancy-empty {
-  flex: 1 1 260px;
-  flex-direction: row;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px 12px;
-}
-.llm-operate--empty .occupancy-empty p {
-  flex: 1 1 200px;
-}
-.llm-operate--empty .occupancy-add-harness {
-  width: auto;
-  flex: none;
+  .llm-cockpit-vitals {
+    border-right: 1px solid var(--color-border);
+    padding-right: 20px;
+  }
+  .llm-cockpit-vitals .llm-rate-band {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+  }
+  .llm-cockpit-vitals .llm-rate-band > div {
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    padding: 10px 12px;
+  }
 }
 .llm-stat-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
+}
+/* Composition bar and total column need room; drop them on narrow cards. */
+.llm-token-bar,
+.llm-token-total {
+  display: none;
+}
+@container llm-panel (min-width: 700px) {
+  .llm-token-bar {
+    display: inline-flex;
+  }
+  .llm-token-total {
+    display: inline-block;
+  }
 }
 @container llm-panel (min-width: 560px) {
   .llm-stat-grid {
@@ -881,23 +888,28 @@ input[type="checkbox"] {
 }
 .occupancy-empty {
   display: flex;
-  flex-direction: column;
-  gap: 10px;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
 }
 .occupancy-empty p {
   margin: 0;
   font-size: 11px;
   line-height: 1.4;
   color: var(--color-muted);
+  flex: 1 1 200px;
 }
 .occupancy-add-harness {
-  width: 100%;
-  border-radius: 8px;
+  width: auto;
+  flex: none;
+  border-radius: 6px;
   border: 1px dashed var(--color-border);
   background: transparent;
-  padding: 10px 12px;
-  font-size: 12px;
-  color: var(--color-muted);
+  padding: 6px 12px;
+  font-size: 11px;
+  color: var(--color-muted-strong);
   transition: border-color 0.15s ease, color 0.15s ease;
 }
 .occupancy-add-harness:hover {

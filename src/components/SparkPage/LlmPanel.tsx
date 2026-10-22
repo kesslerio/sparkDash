@@ -318,19 +318,28 @@ function BackendBadge({ backend }: { backend: string | null }) {
   );
 }
 
-function LlmOperate({
+/** Dual-Zone Cockpit (Avenue A): partitions LLM telemetry vitals + launchers on the left,
+ *  and charts + stats + session occupancy on the right when container width allows. */
+function LlmCockpit({
   conversations,
   onAddHarness,
-  children,
+  vitals,
+  deck,
 }: {
   conversations: ConversationRow[];
   onAddHarness?: () => void;
-  children: ReactNode;
+  vitals: ReactNode;
+  deck: ReactNode;
 }) {
   return (
-    <div className={`llm-operate${conversations.length === 0 ? " llm-operate--empty" : ""}`}>
-      <div className="llm-operate-metrics min-w-0 space-y-3">{children}</div>
-      <ConversationList conversations={conversations} onAddHarness={onAddHarness} />
+    <div className="llm-cockpit">
+      <div className="llm-cockpit-vitals space-y-3">{vitals}</div>
+      <div className="llm-cockpit-deck space-y-3.5">
+        {deck}
+        <div className="border-t border-border pt-3">
+          <ConversationList conversations={conversations} onAddHarness={onAddHarness} />
+        </div>
+      </div>
     </div>
   );
 }
@@ -371,6 +380,57 @@ function formatAvg(avg: number): string {
   return avg >= 100 ? avg.toFixed(0) : avg.toFixed(1);
 }
 
+/** One part of a rate split (cached vs uncached prefill). */
+interface SplitSegment {
+  label: string;
+  value: number;
+  color: string;
+}
+
+/**
+ * Proportional bar for a split of one rate. Answers "how much of this work is
+ * cache hits?" at a glance — the absolute per-part rates alone need the reader
+ * to do the ratio arithmetic. Sourced from busy-sample averages so the bar
+ * stays stable while the current-rate tiles move.
+ */
+function SplitBar({ segments }: { segments: SplitSegment[] }) {
+  const total = segments.reduce((sum, s) => sum + Math.max(0, s.value), 0);
+  if (total <= 0) return null;
+  return (
+    <div className="space-y-1 pt-0.5">
+      <div className="flex h-1.5 w-full overflow-hidden rounded-full bg-surface-elevated">
+        {segments.map((s) => {
+          const pct = (Math.max(0, s.value) / total) * 100;
+          if (pct <= 0) return null;
+          return (
+            <span
+              key={s.label}
+              className="h-full"
+              style={{ width: `${pct}%`, background: s.color }}
+              title={`${s.label} ${pct.toFixed(0)}%`}
+            />
+          );
+        })}
+      </div>
+      <div className="flex flex-wrap gap-x-3 text-[9px] text-muted">
+        {segments.map((s) => (
+          <span key={s.label} className="inline-flex items-center gap-1">
+            <span
+              aria-hidden
+              className="inline-block h-1.5 w-1.5 rounded-full"
+              style={{ background: s.color }}
+            />
+            {s.label}
+            <span className="font-tabular text-text">
+              {((Math.max(0, s.value) / total) * 100).toFixed(0)}%
+            </span>
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 /** Label above the rate; sparkline and busy-sample average sit beside it. */
 function RateMetric({
   label,
@@ -380,6 +440,8 @@ function RateMetric({
   history,
   color,
   title,
+  numeric,
+  split,
 }: {
   label: string;
   value: string;
@@ -388,19 +450,37 @@ function RateMetric({
   history: readonly number[];
   color: string;
   title?: string;
+  /** Current value, used to show the gap against the busy-sample average. */
+  numeric?: number | null;
+  split?: SplitSegment[];
 }) {
+  const delta =
+    numeric != null && avg != null && numeric > 0 && avg > 0
+      ? (numeric - avg) / avg
+      : null;
   return (
     <div className="min-w-0 space-y-1" title={title}>
       <div className="text-xs text-muted">{label}</div>
       <div className="flex min-w-0 items-end justify-between gap-2">
         <div className="min-w-0">
           <div className={`font-tabular text-lg font-semibold ${valueClass}`}>{value}</div>
-          {avg != null && <div className="font-tabular text-[9px] text-muted">avg {formatAvg(avg)}</div>}
+          {avg != null && (
+            <div className="font-tabular text-[9px] text-muted">
+              avg {formatAvg(avg)}
+              {delta != null && (
+                <span className={delta >= 0 ? "text-accent" : "text-muted"}>
+                  {" "}
+                  {delta >= 0 ? "↑" : "↓"} {Math.abs(delta * 100).toFixed(0)}%
+                </span>
+              )}
+            </div>
+          )}
         </div>
         <div className="llm-rate-spark min-w-0 max-w-[50%]">
           <Sparkline data={history} color={color} width={64} height={24} />
         </div>
       </div>
+      {split && <SplitBar segments={split} />}
     </div>
   );
 }
@@ -572,6 +652,13 @@ export function LlmPanel({
   const uncachedPrefillTps = llm?.uncachedPrefillTps ?? null;
   const available = llm?.available ?? false;
   const status: LlmStatus = llm?.status ?? (available ? "active" : "unavailable");
+  /**
+   * An LLM that is not serving has nothing to show but zeros, so it starts
+   * folded to one line. `null` means "follow the status"; a manual toggle
+   * pins the user's choice and wins over the status.
+   */
+  const [collapseOverride, setCollapseOverride] = useState<boolean | null>(null);
+  const collapsed = collapseOverride ?? status !== "active";
   const modelLabel =
     llm?.modelId ||
     (llm?.models && llm.models.length > 0 ? `${llm.models.length} router models` : "No active model");
@@ -649,6 +736,26 @@ export function LlmPanel({
     }
   };
 
+  const identity = (
+    <LlmIdentity
+      name={modelLabel}
+      port={llmPort}
+      badges={
+        <>
+          {available && <BackendBadge backend={llm?.backend ?? null} />}
+          {llm?.posture ? (
+            <PostureBadge posture={llm.posture} />
+          ) : !available ? (
+            <span className="h-1.5 w-1.5 rounded-full bg-muted" />
+          ) : null}
+          <span className="llm-badge capitalize">{statusLabel(status)}</span>
+        </>
+      }
+      observationAge={observationAge}
+      reason={statusReason}
+    />
+  );
+
   return (
     <Panel
       title="LLM"
@@ -666,6 +773,24 @@ export function LlmPanel({
             >
               <span aria-hidden>×</span>
               <span>Remove</span>
+            </button>
+          )}
+          {!showSettings && (
+            <button
+              type="button"
+              title={collapsed ? "Expand LLM details" : "Collapse LLM details"}
+              aria-expanded={!collapsed}
+              aria-label={collapsed ? "Expand LLM details" : "Collapse LLM details"}
+              onClick={() => setCollapseOverride(!collapsed)}
+              className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted transition-colors hover:bg-surface-hover"
+            >
+              <span
+                aria-hidden
+                className={`inline-block transition-transform ${collapsed ? "" : "rotate-180"}`}
+              >
+                ▾
+              </span>
+              <span>{collapsed ? "Expand" : "Collapse"}</span>
             </button>
           )}
           <button
@@ -785,53 +910,38 @@ export function LlmPanel({
             </button>
           </div>
         </div>
+      ) : collapsed ? (
+        <div className="space-y-1.5">{identity}</div>
       ) : !available ? (
-        <LlmOperate conversations={conversations} onAddHarness={openHarnessSettings}>
-          <div className="space-y-3">
-            <LlmIdentity
-              name={modelLabel}
-              port={llmPort}
-              badges={
-                <>
-                  {llm?.posture ? (
-                    <PostureBadge posture={llm.posture} />
-                  ) : (
-                    <span className="h-1.5 w-1.5 rounded-full bg-muted" />
-                  )}
-                  <span className="llm-badge capitalize">{statusLabel(status)}</span>
-                </>
-              }
-              observationAge={observationAge}
-              reason={statusReason}
-            />
-            <LlmLaunchers
-              sparkId={sparkId}
-              llmPort={llmPort}
-              modelId={llm?.modelId}
-              onDecode={openLocalDecode}
-              onPrefill={openLocalPrefill}
-              onRemoteDecode={openRemoteDecode}
-              onRemotePrefill={openRemotePrefill}
-            />
-            <LlmDailyChart sparkId={sparkId} llmPort={llmPort} />
-            <LlmTokenTotals sparkId={sparkId} llmPort={llmPort} />
-          </div>
-        </LlmOperate>
-      ) : (
-        <LlmOperate conversations={conversations} onAddHarness={openHarnessSettings}>
-          <LlmIdentity
-            name={modelLabel}
-            port={llmPort}
-            badges={
+        <div className="space-y-3">
+          {identity}
+          <LlmCockpit
+            conversations={conversations}
+            onAddHarness={openHarnessSettings}
+            vitals={
+              <div className="llm-cockpit-launchers">
+                <LlmLaunchers
+                  sparkId={sparkId}
+                  llmPort={llmPort}
+                  modelId={llm?.modelId}
+                  onDecode={openLocalDecode}
+                  onPrefill={openLocalPrefill}
+                  onRemoteDecode={openRemoteDecode}
+                  onRemotePrefill={openRemotePrefill}
+                />
+              </div>
+            }
+            deck={
               <>
-                <BackendBadge backend={llm?.backend ?? null} />
-                {llm?.posture && <PostureBadge posture={llm.posture} />}
-                <span className="llm-badge capitalize">{statusLabel(status)}</span>
+                <LlmDailyChart sparkId={sparkId} llmPort={llmPort} />
+                <LlmTokenTotals sparkId={sparkId} llmPort={llmPort} />
               </>
             }
-            observationAge={observationAge}
-            reason={statusReason}
           />
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {identity}
           {llm?.modelPath &&
             llm.modelPath !== llm.modelId &&
             !llm.modelPath.includes("models--") && (
@@ -840,306 +950,339 @@ export function LlmPanel({
             </div>
           )}
 
-          <div className="llm-rate-band">
-            <RateMetric
-              label="Generation tok/s"
-              value={formatRate(generationTps)}
-              valueClass="text-accent"
-              avg={genAvg}
-              history={genHistory}
-              color="var(--color-accent)"
-            />
-            <RateMetric
-              label="Prefill tok/s"
-              value={formatRate(prefillTps)}
-              valueClass="text-text"
-              avg={prefillAvg}
-              history={prefillHistory}
-              color="var(--color-text)"
-              title="Tokens/sec while the engine is reading the prompt and building KV cache — before the first output token. Opening a saved chat in the UI does not hit the GPU; send (or regenerate) so the history is sent as the prompt. Prefix-cache hits do little compute, so this can stay ~0. Long cold prefills show here until decode starts."
-            />
-          </div>
-          {showPrefillSplit && (
-            <div className="llm-rate-band">
-              <RateMetric
-                label="Cached prefill tok/s"
-                value={formatRate(cachedPrefillTps)}
-                valueClass="text-muted"
-                avg={cachedPrefillAvg}
-                history={cachedPrefillHistory}
-                color="var(--color-muted)"
-                title="Prefill tokens served from prefix cache (little GPU work). High values mean prompt reuse, not a faster cold prefill."
-              />
-              <RateMetric
-                label="Uncached prefill tok/s"
-                value={formatRate(uncachedPrefillTps)}
-                valueClass="text-text"
-                avg={uncachedPrefillAvg}
-                history={uncachedPrefillHistory}
-                color="var(--color-text)"
-                title="Uncached (computed) prefill — tokens that actually build KV cache on the GPU."
-              />
-            </div>
-          )}
+          <LlmCockpit
+            conversations={conversations}
+            onAddHarness={openHarnessSettings}
+            vitals={
+              <>
+                <div className="llm-rate-band">
+                  <RateMetric
+                    label="Generation tok/s"
+                    value={formatRate(generationTps)}
+                    valueClass="text-accent"
+                    avg={genAvg}
+                    numeric={generationTps}
+                    history={genHistory}
+                    color="var(--color-accent)"
+                  />
+                  <RateMetric
+                    label="Prefill tok/s"
+                    value={formatRate(prefillTps)}
+                    valueClass="text-text"
+                    avg={prefillAvg}
+                    numeric={prefillTps}
+                    history={prefillHistory}
+                    color="var(--color-text)"
+                    title="Tokens/sec while the engine is reading the prompt and building KV cache — before the first output token. Opening a saved chat in the UI does not hit the GPU; send (or regenerate) so the history is sent as the prompt. Prefix-cache hits do little compute, so this can stay ~0. Long cold prefills show here until decode starts."
+                    split={
+                      showPrefillSplit
+                        ? [
+                            {
+                              label: "cached (avg)",
+                              value: cachedPrefillAvg ?? 0,
+                              color: "var(--color-muted)",
+                            },
+                            {
+                              label: "uncached (avg)",
+                              value: uncachedPrefillAvg ?? 0,
+                              color: "var(--color-text)",
+                            },
+                          ]
+                        : undefined
+                    }
+                  />
+                </div>
+                {showPrefillSplit && (
+                  <div className="llm-rate-band">
+                    <RateMetric
+                      label="Cached prefill tok/s"
+                      value={formatRate(cachedPrefillTps)}
+                      valueClass="text-muted"
+                      avg={cachedPrefillAvg}
+                      numeric={cachedPrefillTps}
+                      history={cachedPrefillHistory}
+                      color="var(--color-muted)"
+                      title="Prefill tokens served from prefix cache (little GPU work). High values mean prompt reuse, not a faster cold prefill."
+                    />
+                    <RateMetric
+                      label="Uncached prefill tok/s"
+                      value={formatRate(uncachedPrefillTps)}
+                      valueClass="text-text"
+                      avg={uncachedPrefillAvg}
+                      numeric={uncachedPrefillTps}
+                      history={uncachedPrefillHistory}
+                      color="var(--color-text)"
+                      title="Uncached (computed) prefill — tokens that actually build KV cache on the GPU."
+                    />
+                  </div>
+                )}
+                <div className="llm-cockpit-launchers pt-1">
+                  <LlmLaunchers
+                    sparkId={sparkId}
+                    llmPort={llmPort}
+                    modelId={llm?.benchmarkModel ?? llm?.modelId}
+                    onDecode={openLocalDecode}
+                    onPrefill={openLocalPrefill}
+                    onRemoteDecode={openRemoteDecode}
+                    onRemotePrefill={openRemotePrefill}
+                  />
+                </div>
+              </>
+            }
+            deck={
+              <>
+                <div className="llm-chart-stack space-y-3">
+                  <LlmTrendChart sparkId={sparkId} llmPort={llmPort} />
+                  <LlmDailyChart sparkId={sparkId} llmPort={llmPort} />
+                </div>
 
-          <div className="llm-chart-stack space-y-4">
-            <LlmTrendChart sparkId={sparkId} llmPort={llmPort} />
-            <LlmDailyChart sparkId={sparkId} llmPort={llmPort} />
-          </div>
-
-          <div className="llm-stat-grid border-t border-border pt-3">
-            <div className="space-y-0.5">
-              <div className="text-[10px] uppercase tracking-wide text-muted">Slots</div>
-              <div className="font-tabular text-sm text-text">
-                {(llm?.slotsTotal ?? 0) > 0
-                  ? `${llm?.slotsActive ?? 0} / ${llm?.slotsTotal ?? 0}`
-                  : (llm?.slotsActive ?? 0) > 0
-                    ? `${llm?.slotsActive} running`
-                    : "—"}
-              </div>
-            </div>
-            <div className="space-y-0.5">
-              <div className="text-[10px] uppercase tracking-wide text-muted">Context</div>
-              <div className="font-tabular text-sm text-text">
-                {llm?.contextLength ? llm.contextLength.toLocaleString() : "—"}
-              </div>
-            </div>
-            <div className="space-y-0.5">
-              <div className="flex items-center gap-1 text-[10px] uppercase tracking-wide text-muted">
-                  <span>Status</span>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setEngineInfoOpen((v) => {
-                      if (!v) startEngineInfoTimer();
-                      return !v;
-                    });
-                  }}
-                  onMouseEnter={clearEngineInfoTimer}
-                  onMouseLeave={startEngineInfoTimer}
-                  className="relative cursor-pointer opacity-60 hover:opacity-100"
-                  aria-label="Telemetry status info"
-                >
-                  <svg
-                    width="10"
-                    height="10"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  >
-                    <circle cx="12" cy="12" r="10" />
-                    <path d="M12 16v-4" />
-                    <path d="M12 8h.01" />
-                  </svg>
-                  {engineInfoOpen && (
-                    <div
-                      onMouseEnter={clearEngineInfoTimer}
-                      onMouseLeave={startEngineInfoTimer}
-                      className="absolute left-0 top-full z-10 mt-1 w-56 rounded-md border border-border bg-surface-elevated px-3 py-2 text-left text-[11px] font-normal normal-case text-text shadow-lg"
-                    >
-                      Active means the telemetry source sees work in progress. Idle means a fresh source observation proves no work is running. Unknown, stale, and unavailable are not idle.
+                <div className="llm-stat-grid border-t border-border pt-3">
+                  <div className="space-y-0.5">
+                    <div className="text-[10px] uppercase tracking-wide text-muted">Slots</div>
+                    <div className="font-tabular text-sm text-text">
+                      {(llm?.slotsTotal ?? 0) > 0
+                        ? `${llm?.slotsActive ?? 0} / ${llm?.slotsTotal ?? 0}`
+                        : (llm?.slotsActive ?? 0) > 0
+                          ? `${llm?.slotsActive} running`
+                          : "—"}
                     </div>
-                  )}
-                </button>
-              </div>
-              <div className="font-tabular text-sm text-text">
-                {statusLabel(status)}
-              </div>
-            </div>
-            <div className="space-y-0.5">
-              <div className="text-[10px] uppercase tracking-wide text-muted">Process output</div>
-              <div className="font-tabular text-sm text-text">
-                {llm?.totalOutputTokens != null
-                  ? llm.totalOutputTokens.toLocaleString()
-                  : "—"}
-              </div>
-            </div>
-          </div>
+                  </div>
+                  <div className="space-y-0.5">
+                    <div className="text-[10px] uppercase tracking-wide text-muted">Context</div>
+                    <div className="font-tabular text-sm text-text">
+                      {llm?.contextLength ? llm.contextLength.toLocaleString() : "—"}
+                    </div>
+                  </div>
+                  <div className="space-y-0.5">
+                    <div className="flex items-center gap-1 text-[10px] uppercase tracking-wide text-muted">
+                      <span>Status</span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEngineInfoOpen((v) => {
+                            if (!v) startEngineInfoTimer();
+                            return !v;
+                          });
+                        }}
+                        onMouseEnter={clearEngineInfoTimer}
+                        onMouseLeave={startEngineInfoTimer}
+                        className="relative cursor-pointer opacity-60 hover:opacity-100"
+                        aria-label="Telemetry status info"
+                      >
+                        <svg
+                          width="10"
+                          height="10"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        >
+                          <circle cx="12" cy="12" r="10" />
+                          <path d="M12 16v-4" />
+                          <path d="M12 8h.01" />
+                        </svg>
+                        {engineInfoOpen && (
+                          <div
+                            onMouseEnter={clearEngineInfoTimer}
+                            onMouseLeave={startEngineInfoTimer}
+                            className="absolute left-0 top-full z-10 mt-1 w-56 rounded-md border border-border bg-surface-elevated px-3 py-2 text-left text-[11px] font-normal normal-case text-text shadow-lg"
+                          >
+                            Active means the telemetry source sees work in progress. Idle means a fresh source observation proves no work is running. Unknown, stale, and unavailable are not idle.
+                          </div>
+                        )}
+                      </button>
+                    </div>
+                    <div className="font-tabular text-sm text-text">
+                      {statusLabel(status)}
+                    </div>
+                  </div>
+                  <div className="space-y-0.5">
+                    <div className="text-[10px] uppercase tracking-wide text-muted">Process output</div>
+                    <div className="font-tabular text-sm text-text">
+                      {llm?.totalOutputTokens != null
+                        ? llm.totalOutputTokens.toLocaleString()
+                        : "—"}
+                    </div>
+                  </div>
+                </div>
 
-          <div className="grid grid-cols-2 gap-2 border-t border-border pt-3 sm:grid-cols-3">
-            <div className="space-y-0.5">
-              <div className="text-[10px] uppercase tracking-wide text-muted">Process prompt</div>
-              <div className="font-tabular text-sm text-text">
-                {llm?.totalPromptTokens != null ? llm.totalPromptTokens.toLocaleString() : "—"}
-              </div>
-            </div>
-            <div className="space-y-0.5">
-              <div className="text-[10px] uppercase tracking-wide text-muted">Completed requests</div>
-              <div className="font-tabular text-sm text-text">
-                {llm?.completedRequestsTotal != null
-                  ? llm.completedRequestsTotal.toLocaleString()
-                  : "—"}
-              </div>
-            </div>
-            <div className="space-y-0.5">
-              <div className="text-[10px] uppercase tracking-wide text-muted">Telemetry source</div>
-              <div className="font-tabular text-sm text-text">
-                {llm?.telemetrySource === "relay" ? "Mama relay" : llm?.telemetrySource === "direct" ? "Direct" : "—"}
-              </div>
-            </div>
-          </div>
+                <div className="grid grid-cols-2 gap-2 border-t border-border pt-3 sm:grid-cols-3">
+                  <div className="space-y-0.5">
+                    <div className="text-[10px] uppercase tracking-wide text-muted">Process prompt</div>
+                    <div className="font-tabular text-sm text-text">
+                      {llm?.totalPromptTokens != null ? llm.totalPromptTokens.toLocaleString() : "—"}
+                    </div>
+                  </div>
+                  <div className="space-y-0.5">
+                    <div className="text-[10px] uppercase tracking-wide text-muted">Completed requests</div>
+                    <div className="font-tabular text-sm text-text">
+                      {llm?.completedRequestsTotal != null
+                        ? llm.completedRequestsTotal.toLocaleString()
+                        : "—"}
+                    </div>
+                  </div>
+                  <div className="space-y-0.5">
+                    <div className="text-[10px] uppercase tracking-wide text-muted">Telemetry source</div>
+                    <div className="font-tabular text-sm text-text">
+                      {llm?.telemetrySource === "relay" ? "Mama relay" : llm?.telemetrySource === "direct" ? "Direct" : "—"}
+                    </div>
+                  </div>
+                </div>
 
-          {llm && (llm.backend === "vllm" || llm.backend === "q27") && (
-            <div className="grid grid-cols-2 gap-2 border-t border-border pt-3 sm:grid-cols-4">
-              <div className="space-y-0.5">
-                <MetricInfoTip
-                  id="kvCache"
-                  label="KV Cache"
-                  text={VLLM_METRIC_INFO.kvCache}
-                  openId={metricInfoId}
-                  setOpenId={setMetricInfoId}
-                />
-                <div
-                  className={`font-tabular text-sm ${
-                    llm.kvCacheUsage == null
-                      ? "text-text"
-                      : llm.kvCacheUsage >= 0.8
-                        ? "text-danger"
-                        : llm.kvCacheUsage >= 0.5
-                          ? "text-warning"
-                          : "text-success"
-                  }`}
-                >
-                  {llm.kvCacheUsage != null
-                    ? `${(llm.kvCacheUsage * 100).toFixed(1)}%`
-                    : "—"}
-                </div>
-              </div>
-              <div className="space-y-0.5">
-                <MetricInfoTip
-                  id="requests"
-                  label="Requests"
-                  text={VLLM_METRIC_INFO.requests}
-                  openId={metricInfoId}
-                  setOpenId={setMetricInfoId}
-                  align="right"
-                />
-                <div className="font-tabular text-sm text-text">
-                  {llm.requestsRunning != null
-                    ? `${Math.round(llm.requestsRunning)} run${
-                        llm.requestsWaiting != null
-                          ? ` / ${Math.round(llm.requestsWaiting)} wait`
-                          : ""
-                      }`
-                    : "—"}
-                </div>
-              </div>
-              <div className="space-y-0.5">
-                <MetricInfoTip
-                  id="ttftP95"
-                  label="TTFT p95"
-                  text={VLLM_METRIC_INFO.ttftP95}
-                  openId={metricInfoId}
-                  setOpenId={setMetricInfoId}
-                />
-                <div className="font-tabular text-sm text-text">
-                  {llm.ttftP95Seconds != null ? `${llm.ttftP95Seconds.toFixed(3)}s` : "—"}
-                </div>
-              </div>
-              <div className="space-y-0.5">
-                <MetricInfoTip
-                  id="preempts"
-                  label="Preempts"
-                  text={VLLM_METRIC_INFO.preempts}
-                  openId={metricInfoId}
-                  setOpenId={setMetricInfoId}
-                  align="right"
-                />
-                <div className="font-tabular text-sm text-text">
-                  {llm.preemptionsTotal != null
-                    ? Math.round(llm.preemptionsTotal).toLocaleString()
-                    : "—"}
-                </div>
-              </div>
-            </div>
-          )}
+                {llm && (llm.backend === "vllm" || llm.backend === "q27") && (
+                  <div className="grid grid-cols-2 gap-2 border-t border-border pt-3 sm:grid-cols-4">
+                    <div className="space-y-0.5">
+                      <MetricInfoTip
+                        id="kvCache"
+                        label="KV Cache"
+                        text={VLLM_METRIC_INFO.kvCache}
+                        openId={metricInfoId}
+                        setOpenId={setMetricInfoId}
+                      />
+                      <div
+                        className={`font-tabular text-sm ${
+                          llm.kvCacheUsage == null
+                            ? "text-text"
+                            : llm.kvCacheUsage >= 0.8
+                              ? "text-danger"
+                              : llm.kvCacheUsage >= 0.5
+                                ? "text-warning"
+                                : "text-success"
+                        }`}
+                      >
+                        {llm.kvCacheUsage != null
+                          ? `${(llm.kvCacheUsage * 100).toFixed(1)}%`
+                          : "—"}
+                      </div>
+                    </div>
+                    <div className="space-y-0.5">
+                      <MetricInfoTip
+                        id="requests"
+                        label="Requests"
+                        text={VLLM_METRIC_INFO.requests}
+                        openId={metricInfoId}
+                        setOpenId={setMetricInfoId}
+                        align="right"
+                      />
+                      <div className="font-tabular text-sm text-text">
+                        {llm.requestsRunning != null
+                          ? `${Math.round(llm.requestsRunning)} run${
+                              llm.requestsWaiting != null
+                                ? ` / ${Math.round(llm.requestsWaiting)} wait`
+                                : ""
+                            }`
+                          : "—"}
+                      </div>
+                    </div>
+                    <div className="space-y-0.5">
+                      <MetricInfoTip
+                        id="ttftP95"
+                        label="TTFT p95"
+                        text={VLLM_METRIC_INFO.ttftP95}
+                        openId={metricInfoId}
+                        setOpenId={setMetricInfoId}
+                      />
+                      <div className="font-tabular text-sm text-text">
+                        {llm.ttftP95Seconds != null ? `${llm.ttftP95Seconds.toFixed(3)}s` : "—"}
+                      </div>
+                    </div>
+                    <div className="space-y-0.5">
+                      <MetricInfoTip
+                        id="preempts"
+                        label="Preempts"
+                        text={VLLM_METRIC_INFO.preempts}
+                        openId={metricInfoId}
+                        setOpenId={setMetricInfoId}
+                        align="right"
+                      />
+                      <div className="font-tabular text-sm text-text">
+                        {llm.preemptionsTotal != null
+                          ? Math.round(llm.preemptionsTotal).toLocaleString()
+                          : "—"}
+                      </div>
+                    </div>
+                  </div>
+                )}
 
-          {llm && (llm.backend === "vllm" || llm.backend === "q27") && llm.kvCacheCapacityTokens != null && (
-            <div
-              className="border-t border-border pt-2 text-[10px] text-muted"
-              title="Engine-reported KV token pool. The 500K figure is theoretical: generation tokens, scheduler limits, and safety headroom reduce usable concurrency."
-            >
-              Engine KV pool: {Math.round(llm.kvCacheCapacityTokens).toLocaleString()} tokens · about{" "}
-              {Math.floor(llm.kvCacheCapacityTokens / LONG_CONTEXT_REFERENCE_TOKENS)} × 500K contexts theoretical
-              {llm.kvCacheMaxConcurrency != null
-                ? ` · ${llm.kvCacheMaxConcurrency.toFixed(2)}× at configured max length`
-                : ""}
-            </div>
-          )}
+                {llm && (llm.backend === "vllm" || llm.backend === "q27") && llm.kvCacheCapacityTokens != null && (
+                  <div
+                    className="border-t border-border pt-2 text-[10px] text-muted"
+                    title="Engine-reported KV token pool. The 500K figure is theoretical: generation tokens, scheduler limits, and safety headroom reduce usable concurrency."
+                  >
+                    Engine KV pool: {Math.round(llm.kvCacheCapacityTokens).toLocaleString()} tokens · about{" "}
+                    {Math.floor(llm.kvCacheCapacityTokens / LONG_CONTEXT_REFERENCE_TOKENS)} × 500K contexts theoretical
+                    {llm.kvCacheMaxConcurrency != null
+                      ? ` · ${llm.kvCacheMaxConcurrency.toFixed(2)}× at configured max length`
+                      : ""}
+                  </div>
+                )}
 
-          {llm && (llm.backend === "vllm" || llm.backend === "q27") && (
-            <div className="grid grid-cols-2 gap-2 border-t border-border pt-3 sm:grid-cols-4">
-              <div className="space-y-0.5">
-                <MetricInfoTip
-                  id="prefixCache"
-                  label="Prefix Cache"
-                  text={VLLM_METRIC_INFO.prefixCache}
-                  openId={metricInfoId}
-                  setOpenId={setMetricInfoId}
-                />
-                <div className="font-tabular text-sm text-text">
-                  {llm.prefixCacheHitRate != null
-                    ? `${(llm.prefixCacheHitRate * 100).toFixed(1)}%`
-                    : "—"}
-                </div>
-              </div>
-              <div className="space-y-0.5">
-                <MetricInfoTip
-                  id="e2eP95"
-                  label="E2E p95"
-                  text={VLLM_METRIC_INFO.e2eP95}
-                  openId={metricInfoId}
-                  setOpenId={setMetricInfoId}
-                  align="right"
-                />
-                <div className="font-tabular text-sm text-text">
-                  {llm.e2eP95Seconds != null ? `${llm.e2eP95Seconds.toFixed(3)}s` : "—"}
-                </div>
-              </div>
-              <div className="space-y-0.5">
-                <MetricInfoTip
-                  id="itlP95"
-                  label="ITL p95"
-                  text={VLLM_METRIC_INFO.itlP95}
-                  openId={metricInfoId}
-                  setOpenId={setMetricInfoId}
-                />
-                <div className="font-tabular text-sm text-text">
-                  {llm.itlP95Seconds != null ? `${llm.itlP95Seconds.toFixed(3)}s` : "—"}
-                </div>
-              </div>
-              <div className="space-y-0.5">
-                <MetricInfoTip
-                  id="mtpAccept"
-                  label="MTP Accept"
-                  text={VLLM_METRIC_INFO.mtpAccept}
-                  openId={metricInfoId}
-                  setOpenId={setMetricInfoId}
-                  align="right"
-                />
-                <div className="font-tabular text-sm text-text">
-                  {llm.mtpAcceptanceRate != null
-                    ? `${(llm.mtpAcceptanceRate * 100).toFixed(1)}%`
-                    : "—"}
-                </div>
-              </div>
-            </div>
-          )}
+                {llm && (llm.backend === "vllm" || llm.backend === "q27") && (
+                  <div className="grid grid-cols-2 gap-2 border-t border-border pt-3 sm:grid-cols-4">
+                    <div className="space-y-0.5">
+                      <MetricInfoTip
+                        id="prefixCache"
+                        label="Prefix Cache"
+                        text={VLLM_METRIC_INFO.prefixCache}
+                        openId={metricInfoId}
+                        setOpenId={setMetricInfoId}
+                      />
+                      <div className="font-tabular text-sm text-text">
+                        {llm.prefixCacheHitRate != null
+                          ? `${(llm.prefixCacheHitRate * 100).toFixed(1)}%`
+                          : "—"}
+                      </div>
+                    </div>
+                    <div className="space-y-0.5">
+                      <MetricInfoTip
+                        id="e2eP95"
+                        label="E2E p95"
+                        text={VLLM_METRIC_INFO.e2eP95}
+                        openId={metricInfoId}
+                        setOpenId={setMetricInfoId}
+                        align="right"
+                      />
+                      <div className="font-tabular text-sm text-text">
+                        {llm.e2eP95Seconds != null ? `${llm.e2eP95Seconds.toFixed(3)}s` : "—"}
+                      </div>
+                    </div>
+                    <div className="space-y-0.5">
+                      <MetricInfoTip
+                        id="itlP95"
+                        label="ITL p95"
+                        text={VLLM_METRIC_INFO.itlP95}
+                        openId={metricInfoId}
+                        setOpenId={setMetricInfoId}
+                      />
+                      <div className="font-tabular text-sm text-text">
+                        {llm.itlP95Seconds != null ? `${llm.itlP95Seconds.toFixed(3)}s` : "—"}
+                      </div>
+                    </div>
+                    <div className="space-y-0.5">
+                      <MetricInfoTip
+                        id="mtpAccept"
+                        label="MTP Accept"
+                        text={VLLM_METRIC_INFO.mtpAccept}
+                        openId={metricInfoId}
+                        setOpenId={setMetricInfoId}
+                        align="right"
+                      />
+                      <div className="font-tabular text-sm text-text">
+                        {llm.mtpAcceptanceRate != null
+                          ? `${(llm.mtpAcceptanceRate * 100).toFixed(1)}%`
+                          : "—"}
+                      </div>
+                    </div>
+                  </div>
+                )}
 
-          <LlmLaunchers
-            sparkId={sparkId}
-            llmPort={llmPort}
-            modelId={llm?.benchmarkModel ?? llm?.modelId}
-            onDecode={openLocalDecode}
-            onPrefill={openLocalPrefill}
-            onRemoteDecode={openRemoteDecode}
-            onRemotePrefill={openRemotePrefill}
+                <LlmTokenTotals sparkId={sparkId} llmPort={llmPort} />
+              </>
+            }
           />
-          <LlmTokenTotals sparkId={sparkId} llmPort={llmPort} />
-        </LlmOperate>
+        </div>
       )}
 
       <BenchmarkDialog

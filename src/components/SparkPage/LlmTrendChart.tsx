@@ -119,7 +119,12 @@ export function LlmTrendChart({
         <span className="text-[10px] text-muted">{historyLabel()}</span>
       </div>
       {!hasData ? (
-        <p className="text-[10px] text-muted">No samples yet.</p>
+        <div
+          className="flex h-16 items-center justify-center rounded border border-dashed border-border text-[10px] text-muted"
+          role="status"
+        >
+          Waiting for samples — the chart fills in once the engine reports tok/s.
+        </div>
       ) : (
         <svg
           viewBox={`0 0 ${VIEW_W} ${VIEW_H}`}
@@ -159,23 +164,38 @@ export function LlmTrendChart({
           ))}
         </svg>
       )}
-      <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-0.5 text-[10px] text-muted">
-        <span>
-          Gen avg{" "}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-muted">
+        <span className="inline-flex items-center gap-1.5">
+          <span
+            aria-hidden
+            className="inline-block h-[2px] w-3.5 rounded-full"
+            style={{ background: "var(--color-accent)" }}
+          />
+          Gen avg
           <span className="font-tabular text-xs text-accent">{fmt(genAvg)}</span>
+          <span className="font-tabular text-[9px]">peak {fmt(genMax)}</span>
         </span>
-        <span>
-          Prefill avg{" "}
+        <span className="inline-flex items-center gap-1.5">
+          <span
+            aria-hidden
+            className="inline-block h-[2px] w-3.5 rounded-full"
+            style={{ background: "var(--color-text)" }}
+          />
+          Prefill avg
           <span className="font-tabular text-xs text-text">{fmt(prefillAvg)}</span>
+          <span className="font-tabular text-[9px]">peak {fmt(prefillMax)}</span>
         </span>
-        <span>
-          TTFT avg{" "}
+        <span className="inline-flex items-center gap-1.5">
+          TTFT avg
           <span className="font-tabular text-xs text-muted">
             {ttftAvg != null ? `${ttftAvg.toFixed(3)}s` : "—"}
           </span>
         </span>
-        <span className="text-[9px]">avg over busy samples only</span>
       </div>
+      <p className="text-[9px] leading-snug text-muted/80">
+        Each series is scaled to its own peak, so line height is not comparable
+        across series. Averages use busy samples only.
+      </p>
     </div>
   );
 }

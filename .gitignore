@@ -39,3 +39,6 @@ test/
 # Python bytecode from the Mac node agent tests
 __pycache__/
 *.pyc
+
+# Captain-local compound-engineering config (local-only, not upstream)
+.compound-engineering/config.local.yaml
