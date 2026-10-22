@@ -1704,7 +1704,20 @@ app.post("/api/sparks/:id/wake", async (req, res) => {
 // ─── Static files (built frontend) ───────────────────────
 const distDir = path.join(ROOT, "dist");
 const indexHtml = path.join(distDir, "index.html");
-app.use(express.static(distDir));
+// The shell must never be cached: it names the hashed bundles, so a stale
+// copy pins the browser to a previous build. Hashed assets are immutable and
+// safe to cache forever.
+app.use(
+  express.static(distDir, {
+    setHeaders(res, filePath) {
+      if (filePath.endsWith("index.html")) {
+        res.setHeader("Cache-Control", "no-store");
+      } else if (filePath.includes(`${path.sep}assets${path.sep}`)) {
+        res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+      }
+    },
+  }),
+);
 
 // ─── SPA fallback (Express v5 wildcard) ───────────────────
 app.get("*splat", (_req, res) => {
@@ -1714,6 +1727,7 @@ app.get("*splat", (_req, res) => {
       .type("text")
       .send("Frontend not built. Run `npm run build` or use `npm run dev`.");
   }
+  res.setHeader("Cache-Control", "no-store");
   res.sendFile(indexHtml);
 });
 
