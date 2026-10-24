@@ -214,6 +214,8 @@ export class LlmProbe {
     this.lastTtftCount = null;
     /** Previous `vllm:iteration_tokens_total_sum` (engine-step tokens). */
     this.lastIterSum = null;
+    /** Previous `vllm:prompt_tokens_by_source_total{source="local_compute"}` (computed-only prefill counter). */
+    this.lastPromptCompute = null;
     this.lastProbeTime = 0;
     this._rateBaselineReady = false;
 
@@ -460,6 +462,7 @@ export class LlmProbe {
     this.lastTtftSum = null;
     this.lastTtftCount = null;
     this.lastIterSum = null;
+    this.lastPromptCompute = null;
     this._sglangStickyTps = null;
     this._sglangLoadGenTps = null;
     this._sglangRealtimeLast = null;
@@ -483,6 +486,7 @@ export class LlmProbe {
     this.lastPrefillKinds = null;
     this.lastTtftSum = null;
     this.lastIterSum = null;
+    this.lastPromptCompute = null;
     this._sglangStickyTps = null;
     this.totalPromptTokens = null;
     this.totalOutputTokens = 0;
@@ -1469,6 +1473,27 @@ export class LlmProbe {
       // is directly the cumulative cached share of the prompt.
       const cachedTok = this._getVllmMetric(txt, "prefix_cache_hits_total");
       if (cachedTok != null) this.totalCachedTokens = cachedTok;
+      // vLLM splits prompt tokens by source: local_compute is the share that
+      // actually ran prefill; the rest was served from prefix/external cache.
+      // prompt_tokens_total counts both, so prefill rates derived from it are
+      // inflated whenever the prefix cache hits.
+      const srcCompute = this._getPromMetricLabeled(
+        txt, "vllm:prompt_tokens_by_source_total", "source", "local_compute");
+      const srcHit = this._getPromMetricLabeled(
+        txt, "vllm:prompt_tokens_by_source_total", "source", "local_cache_hit");
+      const srcExternal = this._getPromMetricLabeled(
+        txt, "vllm:prompt_tokens_by_source_total", "source", "external_kv_transfer");
+      if (srcCompute != null && srcHit != null) {
+        this._setPrefillSplitRates(srcHit + (srcExternal ?? 0), srcCompute, dtSec, "cumulative");
+      } else {
+        this._setPrefillSplitRates(null, null, dtSec);
+      }
+      let deltaCompute = null;
+      if (srcCompute != null) {
+        deltaCompute =
+          this.lastPromptCompute != null ? Math.max(0, srcCompute - this.lastPromptCompute) : 0;
+        this.lastPromptCompute = srcCompute;
+      }
       this._promptCounterObserved = true;
       this._outputCounterObserved = true;
       const ttftSum = this._getVllmMetric(txt, "time_to_first_token_seconds_sum");
@@ -1489,11 +1514,14 @@ export class LlmProbe {
         const specNoise = deltaOut > 0 && prefillIter > 0 && prefillIter < deltaOut * 0.5;
         const livePrefill =
           prefillIter > 0 && !specNoise ? prefillIter / dtSec : 0;
+        // The computed-source delta is the real prefill work when vLLM reports
+        // it; a fully cached prompt then reads 0 instead of a fake burst.
+        const deltaWork = deltaCompute ?? deltaIn;
         const finishedPrefill =
-          deltaIn > 0 && deltaTtft > 0
-            ? deltaIn / deltaTtft
-            : deltaIn > 0 && livePrefill <= 0
-              ? deltaIn / dtSec
+          deltaWork > 0 && deltaTtft > 0
+            ? deltaWork / deltaTtft
+            : deltaWork > 0 && livePrefill <= 0
+              ? deltaWork / dtSec
               : 0;
         this.prefillTps = Math.max(
           0,
