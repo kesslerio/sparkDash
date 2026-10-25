@@ -1091,12 +1091,19 @@ export class LlmProbe {
   }
 
   /**
-   * Narrow an oMLX model catalog to the models /api/status reports as loaded
-   * (falling back to its default model). Returns the input when neither matches.
+   * An explicit loaded_models list is authoritative, including an empty list.
+   * Keep unloaded catalog entries discoverable without treating the configured
+   * default as resident. Older status responses may omit the loaded list.
    */
   static _omlxLoadedModels(models, st) {
-    const loaded = Array.isArray(st?.loaded_models) ? st.loaded_models.map(String) : [];
-    const wanted = loaded.length > 0 ? loaded : st?.default_model ? [String(st.default_model)] : [];
+    if (Array.isArray(st?.loaded_models)) {
+      const loaded = new Set(st.loaded_models.map(String));
+      return models.map((model) => ({
+        ...model,
+        status: loaded.has(String(model?.id)) ? "ready" : "unloaded",
+      }));
+    }
+    const wanted = st?.default_model ? [String(st.default_model)] : [];
     const picked = models.filter((m) => wanted.includes(String(m?.id)));
     return picked.length > 0 ? picked : models;
   }
