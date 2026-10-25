@@ -5,6 +5,7 @@
  * Uses execFile + argv arrays (no shell interpolation of user/host/cmd).
  * Password auth uses sshpass -e (password via env), not -p on the command line.
  */
+import { powershellCommand } from "./windowsMetrics.js";
 import { execFile } from "child_process";
 import crypto from "crypto";
 import fs from "fs";
@@ -14,7 +15,7 @@ import {
   SSH_CONNECT_TIMEOUT,
   SSH_MULTIPLEX,
 } from "../config.js";
-import { isAllowedTargetHost, isValidSshUser } from "../validate.js";
+import { isAllowedTargetHost, isValidSshUser, normalizeSshPort } from "../validate.js";
 import { llmProbeHost } from "./llmHost.js";
 
 // Detect sshpass without shelling out to `which` on every cold call —
@@ -49,13 +50,16 @@ function ensureControlDir() {
  * only in the digest so two password records cannot share an authenticated
  * transport; the secret itself is never exposed in argv or the socket path.
  */
-export function sshMultiplexConfig(spark, targetHost, user, auth, password) {
+export function sshMultiplexConfig(spark, targetHost, user, auth, password, port = 22) {
   const persistSeconds = controlPersistSeconds();
   if (persistSeconds === 0) return null;
 
   ensureControlDir();
   const identityFile = process.env.SSH_IDENTITY_FILE || "default";
-  const isolationKey = [spark.id, user, targetHost, auth || "key", identityFile, password || ""].join("\0");
+  const sshPort = normalizeSshPort(port) ?? 22;
+  const isolationKey = [spark.id, user, targetHost, String(sshPort), auth || "key", identityFile, password || ""].join(
+    "\0"
+  );
   const digest = crypto
     .createHash("sha256")
     .update(_controlSalt)
@@ -169,13 +173,14 @@ function sshpassAvailable() {
  *
  * @param {object} spark
  * @param {{ extraSshArgs?: string[], remoteArgv?: string[], multiplex?: boolean }} [opts]
- * @returns {{ file: string, args: string[], env: NodeJS.ProcessEnv, targetHost: string }}
+ * @returns {{ file: string, args: string[], env: NodeJS.ProcessEnv, targetHost: string, sshPort: number }}
  */
 export function sshCommandSpec(spark, opts = {}) {
   const extraSshArgs = Array.isArray(opts.extraSshArgs) ? opts.extraSshArgs : [];
   const remoteArgv = Array.isArray(opts.remoteArgv) ? opts.remoteArgv : [];
   const { host, user, auth, password } = spark?.ssh || {};
   const targetHost = host || spark?.lanIp;
+  const sshPort = normalizeSshPort(spark?.ssh?.port) ?? 22;
 
   if (!targetHost || !user) {
     throw new Error(`SSH config missing for ${spark?.id}: host=${targetHost}, user=${user}`);
@@ -195,13 +200,15 @@ export function sshCommandSpec(spark, opts = {}) {
     `ConnectTimeout=${SSH_CONNECT_TIMEOUT}`,
     "-o",
     "StrictHostKeyChecking=accept-new",
+    "-p",
+    String(sshPort),
   ];
 
   const remote = `${user}@${targetHost}`;
   const multiplex =
     opts.multiplex === false || !SSH_MULTIPLEX
       ? null
-      : sshMultiplexConfig(spark, targetHost, user, auth, password);
+      : sshMultiplexConfig(spark, targetHost, user, auth, password, sshPort);
   // The readiness gate and command must use the same socket and persistence.
   // Explicitly disable both creating and joining a master when reuse is off,
   // including when a user's ssh_config enables multiplexing independently.
@@ -257,7 +264,23 @@ export function sshCommandSpec(spark, opts = {}) {
     args.push(...extraSshArgs, "--", remote, ...remoteArgv);
   }
 
-  return { file, args, env, targetHost, multiplex };
+  return { file, args, env, targetHost, multiplex, sshPort };
+}
+
+/**
+ * A Windows OpenSSH server runs commands through cmd.exe, which has no `true`,
+ * `cat` or `/proc`. Say so instead of leaving a cmd.exe error as the whole story.
+ * On a Windows unit, a refused key gets the administrator-account gotcha: sshd ignores
+ * ~/.ssh/authorized_keys for administrators.
+ */
+export function explainSshFailure(message, { windows = false } = {}) {
+  if (/is not recognized as an internal or external command/i.test(message)) {
+    return `${message} (this looks like a Windows host: set the Unit type to "Windows PC with an NVIDIA GPU" in the unit's settings.)`;
+  }
+  if (windows && /permission denied \(.*publickey/i.test(message)) {
+    return `${message} (if this Windows user is an administrator, sshd ignores ~/.ssh/authorized_keys and reads C:\\ProgramData\\ssh\\administrators_authorized_keys, which only Administrators and SYSTEM may write.)`;
+  }
+  return message;
 }
 
 /**
@@ -296,6 +319,11 @@ export function sshExecOutcome({ error = null, stdout, allowNonZeroExit = false 
  * @param {{ timeoutMs?: number, allowNonZeroExit?: boolean }} [options]
  * @returns {Promise<string>} - Trimmed stdout
  */
+/** The single remote argv for a command: PowerShell-encoded on Windows units, as written elsewhere. */
+export function remoteArgvFor(spark, cmd) {
+  return [spark?.platform === "windows" ? powershellCommand(cmd) : cmd];
+}
+
 export async function sshExec(spark, cmd, options = {}) {
   const timeoutMs =
     Number.isFinite(options.timeoutMs) && options.timeoutMs > 0 ? options.timeoutMs : 10000;
@@ -304,13 +332,15 @@ export async function sshExec(spark, cmd, options = {}) {
     throw new Error("SSH command must be a non-empty string");
   }
 
-  const { file, args, env, targetHost, multiplex } = sshCommandSpec(spark, {
-    remoteArgv: [cmd],
+  // Windows OpenSSH hands the command to cmd.exe or PowerShell, never bash.
+  const isWindows = spark?.platform === "windows";
+  const { file, args, env, targetHost, multiplex, sshPort } = sshCommandSpec(spark, {
+    remoteArgv: remoteArgvFor(spark, cmd),
   });
 
   const execute = (execArgs) =>
     new Promise((resolve, reject) => {
-      execFile(file, execArgs, { timeout: timeoutMs, env, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+      const child = execFile(file, execArgs, { timeout: timeoutMs, env, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
         const outcome = sshExecOutcome({
           error: err,
           stdout,
@@ -318,16 +348,24 @@ export async function sshExec(spark, cmd, options = {}) {
         });
         if (outcome === null) {
           const msg = stderr?.trim() || err?.message || "command failed";
-          reject(new Error(`SSH to ${targetHost} failed: ${msg}`));
+          reject(new Error(`SSH to ${targetHost}:${sshPort} failed: ${explainSshFailure(msg, { windows: isWindows })}`));
         } else {
           resolve(outcome);
         }
       });
+      // Windows PowerShell can wait for stdin to close; nothing is ever sent on it.
+      if (isWindows) child.stdin?.end();
+      // `options.input` travels on stdin only (never argv, never the environment), e.g. a
+      // sudo password for one action. Ignored for the multiplex readiness probe.
+      else if (typeof options.input === "string" && execArgs === args) {
+        child.stdin?.on("error", () => {});
+        child.stdin?.end(options.input);
+      }
     });
 
   if (multiplex) {
     const probeArgs = [...args];
-    probeArgs[probeArgs.length - 1] = "true";
+    probeArgs[probeArgs.length - 1] = isWindows ? powershellCommand("exit 0") : "true";
     await ensureMultiplexReady(multiplex, () => execute(probeArgs));
   }
   try {

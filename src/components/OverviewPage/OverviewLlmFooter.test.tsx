@@ -9,7 +9,7 @@ const telemetry = vi.hoisted(() => ({
 import type { LlmMetrics, LlmTelemetryPoint } from "../../api/types";
 import { flush, render } from "../../testing/render";
 
-vi.mock("../../api/client", () => ({
+vi.mock("../../api/llmTelemetryClient", () => ({
   fetchLlmTelemetry: (...a: unknown[]) => {
     telemetry.calls.push(a);
     return telemetry.impl(...a);
@@ -58,7 +58,7 @@ describe("OverviewLlmFooter", () => {
     expect(text).toContain("77 tok/s");
     expect(text).toContain("p50 50");
     expect(text).toContain("p50 450");
-    expect(text).toContain("4 +1q · pk 6");
+    expect(text).toContain("4 running · 1 queued · peak 6");
     expect(container.querySelector("svg path")).not.toBeNull();
   });
 
@@ -90,6 +90,23 @@ describe("OverviewLlmFooter", () => {
     const { container } = render(<OverviewLlmFooter sparkId="john" port={8888} llm={llm} />);
     await flush();
     expect(container.textContent).toContain("p50 — · 60m —");
+  });
+
+  it("shows unknown live rates, not zeros, when the engine's stats could not be read", async () => {
+    const { container } = render(
+      <OverviewLlmFooter sparkId="john" port={8888} llm={{ ...llm, generationTps: 0, prefillTps: 0, measurementValid: false }} />
+    );
+    await flush();
+    expect(container.textContent).toContain("— tok/s");
+    expect(container.textContent).toContain("prefill — ·");
+  });
+
+  it("says a prompt is prefilling when the engine reports no live prefill rate", async () => {
+    const { container } = render(
+      <OverviewLlmFooter sparkId="john" port={8888} llm={{ ...llm, prefillTps: 0, prefillActive: true }} />
+    );
+    await flush();
+    expect(container.textContent).toContain("prefill prefilling");
   });
 
   it("skips the history read when the card has no port", async () => {

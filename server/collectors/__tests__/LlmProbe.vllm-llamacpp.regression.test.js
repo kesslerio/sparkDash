@@ -109,6 +109,13 @@ test("vLLM probe: counter diffs + tiles; skips get_server_info when known vllm",
   assert.equal(snap.slotsActive, 2);
   assert.equal(snap.requestsWaiting, 1);
   assert.equal(snap.kvCacheUsage, 0.42);
+  // vllm:cache_config_info also feeds kvCacheCapacityTokens below; both read
+  // the same Prometheus series, so the pool fields are populated too.
+  assert.equal(snap.kvCacheTokens, 1579516);
+  assert.equal(snap.kvCacheTokensAvailable, 916119);
+  assert.equal(snap.kvCacheMemoryBytes, null); // this fixture has no kv_cache_memory_bytes label
+  assert.equal(snap.kvCacheGb, null); // vLLM reports no GB-split pool size
+  assert.equal(snap.weightsGb, null);
   assert.equal(snap.preemptionsTotal, 3);
   assert.equal(snap.prefixCacheHitRate, 0.5);
   assert.equal(snap.totalCachedTokens, 10); // prefix_cache_hits_total is token-granular
@@ -117,6 +124,18 @@ test("vLLM probe: counter diffs + tiles; skips get_server_info when known vllm",
   assert.equal(snap.kvCacheMaxConcurrency, 1.5063438415527344);
   assert.equal(snap.available, true);
   assert.ok(!hits.some((h) => h.includes("get_server_info")));
+});
+
+test("vLLM: older gpu_cache_usage_perc stands in for kv_cache_usage_perc", () => {
+  const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 8000);
+  const legacy = VLLM_METRICS.replace("vllm:kv_cache_usage_perc", "vllm:gpu_cache_usage_perc");
+  probe._applyVllmMetrics(legacy, 2);
+  assert.equal(probe.kvCacheUsage, 0.42);
+  // The current name wins when both are exposed.
+  probe._applyVllmMetrics(VLLM_METRICS + 'vllm:gpu_cache_usage_perc{engine="0"} 0.99\n', 2);
+  assert.equal(probe.kvCacheUsage, 0.42);
+  probe._applyVllmMetrics(VLLM_METRICS.replace(/^vllm:kv_cache_usage_perc.*\n/m, ""), 2);
+  assert.equal(probe.kvCacheUsage, null);
 });
 
 test("vLLM idle: flat counters → 0 tok/s (not sticky gauge logic)", async () => {
@@ -461,4 +480,135 @@ test("known llama.cpp redetect still uses /slots (not forced OpenAI)", async () 
   assert.equal(probe.backendType, "llama.cpp");
   assert.equal(probe.serverIsOpenAI, false);
   assert.ok(hits.includes("/slots"));
+});
+
+test("vLLM cache_config_info: free tokens from pool size and usage", () => {
+  const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 8000);
+  const body = [
+    'vllm:kv_cache_usage_perc{engine="0",model_name="m"} 0.4',
+    'vllm:cache_config_info{block_size="64",kv_cache_dtype_skip_layers="[]",kv_cache_memory_bytes="15032385536",kv_cache_size_tokens="883552",num_cpu_blocks="None",num_gpu_blocks="553"} 1.0',
+  ].join("\n");
+  probe._applyVllmMetrics(body, 2);
+  assert.equal(probe.kvCacheUsage, 0.4);
+  assert.equal(probe.kvCacheTokens, 883552);
+  assert.equal(probe.kvCacheMemoryBytes, 15032385536);
+  assert.equal(probe.kvCacheTokensAvailable, Math.round(883552 * 0.6));
+});
+
+test("vLLM cache_config_info: sums pools across engines and clamps usage", () => {
+  const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 8000);
+  probe._applyVllmMetrics(
+    [
+      'vllm:kv_cache_usage_perc{engine="0"} 1.4',
+      'vllm:cache_config_info{engine="0",kv_cache_size_tokens="1000",kv_cache_memory_bytes="100"} 1',
+      'vllm:cache_config_info{engine="1",kv_cache_size_tokens="2000",kv_cache_memory_bytes="50"} 1',
+    ].join("\n"),
+    2
+  );
+  assert.equal(probe.kvCacheTokens, 3000);
+  assert.equal(probe.kvCacheMemoryBytes, 150);
+  assert.equal(probe.kvCacheTokensAvailable, 0);
+});
+
+test("vLLM prefill excludes prefix-cache hits; cached vs uncached split", () => {
+  const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 8000);
+  const base = (prompt, cached, ttft) => `vllm:prompt_tokens_total{engine="0"} ${prompt}
+vllm:prompt_tokens_cached_total{engine="0"} ${cached}
+vllm:generation_tokens_total{engine="0"} 500.0
+vllm:time_to_first_token_seconds_sum{engine="0"} ${ttft}
+`;
+  probe._applyVllmMetrics(base(100000, 90000, 10), 2); // seed
+  // 50,000 new prompt tokens, 49,000 of them from the prefix cache, TTFT +0.5 s
+  probe._applyVllmMetrics(base(150000, 139000, 10.5), 2);
+  assert.equal(probe.prefillTps, 2000); // 1,000 computed / 0.5 s, not 100,000
+  assert.equal(probe.cachedPrefillTps, 24500);
+  assert.equal(probe.uncachedPrefillTps, 500);
+  assert.equal(probe.totalCachedTokens, 139000);
+});
+
+test("vLLM without prompt_tokens_cached_total falls back to prefix_cache_hits_total", () => {
+  const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 8000);
+  const base = (prompt, hits, ttft) => `vllm:prompt_tokens_total{engine="0"} ${prompt}
+vllm:prefix_cache_hits_total{engine="0"} ${hits}
+vllm:prefix_cache_queries_total{engine="0"} ${prompt}
+vllm:generation_tokens_total{engine="0"} 500.0
+vllm:time_to_first_token_seconds_sum{engine="0"} ${ttft}
+`;
+  probe._applyVllmMetrics(base(10000, 8000, 5), 2);
+  probe._applyVllmMetrics(base(20000, 17000, 6), 2);
+  assert.equal(probe.prefillTps, 1000); // 1,000 computed / 1 s
+  assert.equal(probe.uncachedPrefillTps, 500);
+  assert.equal(probe.cachedPrefillTps, 4500);
+});
+
+test("vLLM counter reset (engine restart) reads 0 prefill, not a negative or a spike", () => {
+  const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 8000);
+  const base = (prompt, cached, ttft) => `vllm:prompt_tokens_total{engine="0"} ${prompt}
+vllm:prompt_tokens_cached_total{engine="0"} ${cached}
+vllm:generation_tokens_total{engine="0"} 0
+vllm:time_to_first_token_seconds_sum{engine="0"} ${ttft}
+`;
+  probe._applyVllmMetrics(base(500000, 450000, 100), 2);
+  probe._applyVllmMetrics(base(1200, 0, 0.4), 2);
+  assert.equal(probe.prefillTps, 0);
+  assert.equal(probe.cachedPrefillTps, 0);
+  assert.equal(probe.uncachedPrefillTps, 0);
+});
+
+test("vLLM: the first poll after a detection reset only seeds the counters", async () => {
+  const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 8000);
+  let metrics = VLLM_METRICS; // lifetime counters: 1000 prompt, 500 generated
+  probe._fetch = async (url) => {
+    const u = String(url);
+    if (u.endsWith("/v1/models")) return jsonRes({ data: [{ id: "m", max_model_len: 4096 }] });
+    if (u.endsWith("/metrics")) return textRes(metrics);
+    return jsonRes({}, 404);
+  };
+  // Three failed polls reset detection; each of them still advanced lastProbeTime.
+  probe.lastProbeTime = Date.now() - 2000;
+  probe._resetDetection();
+
+  const recovery = await probe.probe();
+  assert.equal(recovery.backend, "vllm");
+  // Lifetime counters must not be read as two seconds of work: the engine is
+  // busy (num_requests_running > 0) but this poll measured no real delta, so
+  // the truthful-telemetry rule (same as ds4/q27) reports null, not a fake 0.
+  assert.equal(recovery.generationTps, null);
+  assert.equal(recovery.prefillTps, null);
+
+  // The poll after that measures normally: +400 generated and +200 prompt over 2 s.
+  probe.lastProbeTime = Date.now() - 2000;
+  metrics = VLLM_METRICS.replace("1000.0", "1200.0").replace("500.0", "900.0");
+  const next = await probe.probe();
+  assert.ok(Math.abs(next.generationTps - 200) < 5, `generationTps ${next.generationTps}`);
+  assert.ok(Math.abs(next.prefillTps - 100) < 5, `prefillTps ${next.prefillTps}`);
+});
+
+test("llama.cpp: a slot starting a new request does not cancel another slot's tokens", async (t) => {
+  const now = freezeProbeClock(t);
+  const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 8080);
+  probe.serverIsOpenAI = false;
+  probe.backendType = "llama.cpp";
+  probe.authOpen = true;
+  probe._lastDetectAt = now;
+  probe.lastProbeTime = now - 2000;
+  probe.slotState.set(0, { decoded: 600, prompted: 900 });
+  probe.slotState.set(1, { decoded: 100, prompted: 50 });
+  probe._fetch = async (url) => {
+    const u = String(url);
+    if (u.endsWith("/slots")) {
+      return jsonRes([
+        // Slot 0 finished and began a new request: both counters restarted.
+        { id: 0, n_decoded: 20, n_prompt_tokens_processed: 30, is_processing: true },
+        // Slot 1 kept going: +100 decoded, +40 prompted.
+        { id: 1, n_decoded: 200, n_prompt_tokens_processed: 90, is_processing: true },
+      ]);
+    }
+    if (u.endsWith("/props")) return jsonRes({ model_alias: "m", total_context_length: 4096 });
+    return jsonRes({}, 404);
+  };
+
+  const snap = await probe.probe();
+  assert.equal(snap.generationTps, 50); // slot 1 only: 100 / 2 s
+  assert.equal(snap.prefillTps, 20); // slot 1 only: 40 / 2 s
 });

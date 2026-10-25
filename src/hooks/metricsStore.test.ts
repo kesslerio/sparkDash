@@ -45,6 +45,39 @@ describe("metricsStore timestamp contract", () => {
       { at: 5_000, value: 42 },
     ]);
   });
+
+  it("does not record unavailable GPU fields as fabricated zero readings", () => {
+    const spark = makeSpark();
+    spark.metrics.gpu!.metricAvailability = {
+      temperature: false, usage: false, powerDraw: false, powerLimit: false, vramUsed: false, vramTotal: false,
+    };
+    spark.metrics.gpu!.usage = 0;
+    spark.metrics.gpu!.temperature = 0;
+    spark.metrics.gpu!.power = { draw: 0, limit: 0 };
+    ingestSnapshots([spark], 10_000);
+    expect(getMetricHistorySamples(spark.id, "gpu.usage")).toEqual([]);
+    expect(getMetricHistorySamples(spark.id, "gpu.temp")).toEqual([]);
+    expect(getMetricHistorySamples(spark.id, "gpu.powerPct")).toEqual([]);
+  });
+
+  it("leaves a gap, not a zero, for an LLM poll whose stats could not be read", () => {
+    const spark = makeSpark();
+    spark.llmPorts = [8888];
+    Object.assign(spark.metrics.llm[0], { available: true, generationTps: 40, prefillTps: 900, measurementValid: true });
+    ingestSnapshots([spark], 1_000);
+    Object.assign(spark.metrics.llm[0], { generationTps: 0, prefillTps: 0, measurementValid: false });
+    ingestSnapshots([spark], 3_000);
+    Object.assign(spark.metrics.llm[0], { generationTps: 42, prefillTps: 0, measurementValid: true });
+    ingestSnapshots([spark], 5_000);
+    expect(getMetricHistorySamples(spark.id, "llm:8888.tps")).toEqual([
+      { at: 1_000, value: 40 },
+      { at: 5_000, value: 42 },
+    ]);
+    expect(getMetricHistorySamples(spark.id, "llm:8888.prefill")).toEqual([
+      { at: 1_000, value: 900 },
+      { at: 5_000, value: 0 },
+    ]);
+  });
 });
 
 function llm(overrides: Partial<LlmMetrics> = {}): LlmMetrics {

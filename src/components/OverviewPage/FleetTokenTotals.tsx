@@ -1,3 +1,5 @@
+import { AppLink } from "../ui/AppLink";
+import { TOKENS_ID, idToPath } from "../../constants";
 /**
  * FleetTokenTotals — Overview section with cumulative prompt/completion tokens
  * aggregated across all Sparks, grouped by model, plus a fleet-wide total.
@@ -8,12 +10,15 @@ import { useEffect, useState } from "react";
 import { fetchLlmTokenTotals } from "../../api/llmTokenClient";
 import { addTokens, formatTokensCompact } from "../../shared/tokenFormat";
 import type { LlmTokenRange, LlmTokenSeriesTotals } from "../../api/llmTokenTypes";
+import { LEDGER_HINT, LEDGER_TITLE } from "../SparkPage/tokenTotalsCopy";
 
 const POLL_MS = 60_000;
 
 const RANGE_OPTIONS: Array<{ value: LlmTokenRange; label: string }> = [
   { value: "all", label: "All time" },
-  { value: "today", label: "Today" },
+  { value: "today", label: "Last 24 hours" },
+  { value: "6h", label: "Last 6 hours" },
+  { value: "1h", label: "Last 1 hour" },
   { value: "7d", label: "Last 7 days" },
   { value: "14d", label: "Last 14 days" },
   { value: "30d", label: "Last month" },
@@ -65,7 +70,7 @@ export function aggregateModelTotals(
   return { rows, totalPrompt, totalCached: Math.min(totalCached, totalPrompt), totalCompletion };
 }
 
-export function FleetTokenTotals() {
+export function FleetTokenTotals({ onOpenDetails }: { onOpenDetails?: () => void }) {
   const [series, setSeries] = useState<LlmTokenSeriesTotals[] | null>(null);
   const [range, setRange] = useState<LlmTokenRange>("all");
 
@@ -91,26 +96,54 @@ export function FleetTokenTotals() {
   if (!series || series.length === 0) return null;
 
   const { rows, totalPrompt, totalCached, totalCompletion } = aggregateModelTotals(series);
+  // One row per machine-model combination (merged across ports on the same
+  // machine serving the same model). Workers serve no LLM endpoint, so they
+  // produce no series and appear nowhere.
+  const combinedRows = (() => {
+    const byKey = new Map<
+      string,
+      { sparkId: string; modelId: string; promptTokens: number; cachedTokens: number; completionTokens: number }
+    >();
+    for (const s of Array.isArray(series) ? series : []) {
+      for (const m of Array.isArray(s.models) ? s.models : []) {
+        const key = `${s.sparkId}\u0000${m.modelId}`;
+        const entry =
+          byKey.get(key) ??
+          { sparkId: s.sparkId, modelId: m.modelId, promptTokens: 0, cachedTokens: 0, completionTokens: 0 };
+        entry.promptTokens = addTokens(entry.promptTokens, m.promptTokens || 0);
+        entry.cachedTokens = addTokens(entry.cachedTokens, m.cachedTokens || 0);
+        entry.completionTokens = addTokens(entry.completionTokens, m.completionTokens || 0);
+        byKey.set(key, entry);
+      }
+    }
+    return [...byKey.values()]
+      .map((e) => ({ ...e, cachedTokens: Math.min(e.cachedTokens, e.promptTokens) }))
+      .sort(
+        (a, b) =>
+          a.sparkId.localeCompare(b.sparkId) || a.modelId.localeCompare(b.modelId)
+      );
+  })();
   // Count only endpoints with token data in the selected period, not all configured ones.
   const activeEndpoints = series.filter((s) => s.models.length > 0).length;
   if (rows.length === 0 && range === "all") return null;
 
+  const prefillComputed = Math.max(0, totalPrompt - totalCached);
+  const grand = Math.max(1, totalCompletion + totalCached + prefillComputed);
+  const pct = (n: number) => `${((n / grand) * 100).toFixed(1)}%`;
+
   return (
-    <section className="panel p-4" aria-labelledby="fleet-token-totals-title">
-      <div className="flex items-center justify-between gap-2">
-        <h2 id="fleet-token-totals-title" className="text-sm font-semibold text-text-strong">
-          LLM Token Totals
-        </h2>
-        <div className="flex items-center gap-2">
-          <span className="shrink-0 whitespace-nowrap text-[10px] text-muted">
+    <section className="panel ov-card" aria-labelledby="fleet-token-totals-title">
+      <div className="ov-card__head">
+        <h2 id="fleet-token-totals-title" className="ov-card__title">LLM token totals</h2>
+        <div className="ov-card__tools">
+          <span className="tag">
             {activeEndpoints} endpoint{activeEndpoints === 1 ? "" : "s"}
           </span>
           <select
             value={range}
             onChange={(e) => setRange(e.target.value as LlmTokenRange)}
             aria-label="Token totals time range"
-            className="rounded border border-border bg-surface-elevated text-text"
-            style={{ height: "20px", padding: "0 4px", fontSize: "9px", width: "auto" }}
+            className="ov-select"
           >
             {RANGE_OPTIONS.map((opt) => (
               <option key={opt.value} value={opt.value}>
@@ -118,68 +151,64 @@ export function FleetTokenTotals() {
               </option>
             ))}
           </select>
+          {onOpenDetails ? (
+            <AppLink href={idToPath(TOKENS_ID)} className="btn btn--sm btn--ghost" onNavigate={onOpenDetails}>
+              Details
+            </AppLink>
+          ) : null}
         </div>
       </div>
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-[10px] text-muted">
-          Cumulative tokens by model, whole fleet
-        </span>
-        <span className="shrink-0 whitespace-nowrap text-[10px] text-muted">
-          <span className="inline-block w-14 text-right">Cached</span>
-
-          <span className="inline-block w-14 text-right">Prefill</span>
-
-          <span className="inline-block w-16 text-right">Generated</span>
-        </span>
+      <div>
+        <div className="big-num">
+          {formatTokensCompact(totalCompletion)}
+          <small>generated</small>
+        </div>
+        <div className="ov-card__sub" title={LEDGER_TITLE}>
+          {LEDGER_HINT}, whole fleet
+        </div>
       </div>
-      <div className="mt-3 space-y-1">
+      <div className="seg-bar" role="img" aria-label="Generated, cached prefill and computed prefill token share">
+        <i className="ov-seg ov-seg--gen" style={{ width: pct(totalCompletion) }} />
+        <i className="ov-seg ov-seg--cached" style={{ width: pct(totalCached) }} />
+        <i className="ov-seg ov-seg--comp" style={{ width: pct(prefillComputed) }} />
+      </div>
+      <div className="legend">
+        <span className="ov-leg--gen">Generated</span>
+        <span className="ov-leg--cached">Cached</span>
+        <span className="ov-leg--comp">Prefill</span>
+      </div>
+      <div className="ov-rows">
+        <div className="ov-row ov-row--head">
+          <span className="ov-row__name eyebrow">Machine · Model</span>
+          <span className="ov-row__num eyebrow">Cached</span>
+          <span className="ov-row__num eyebrow">Prefill</span>
+          <span className="ov-row__num eyebrow">Gen</span>
+        </div>
         {rows.length === 0 ? (
-          <p className="text-[11px] text-muted">No tokens recorded in this period.</p>
+          <p className="ov-card__sub">No tokens recorded in this period.</p>
         ) : (
-          rows.map((row) => (
-          <div
-            key={row.modelId}
-            className="flex items-center justify-between gap-2 text-[11px]"
-            title={`${row.promptTokens.toLocaleString()} prompt · ${row.cachedTokens.toLocaleString()} cached · ${(row.promptTokens - row.cachedTokens).toLocaleString()} prefill · ${row.completionTokens.toLocaleString()} generated · ${row.sparkCount} Spark${row.sparkCount === 1 ? "" : "s"}`}
-          >
-            <span className="min-w-0 flex-1 truncate text-text" title={row.modelId}>
-              {row.modelId}
-              {row.sparkCount > 1 && (
-                <span className="ml-1.5 text-[9px] text-muted">×{row.sparkCount}</span>
-              )}
-            </span>
-            <span className="shrink-0 font-tabular text-muted">
-              <span className="inline-block w-14 text-right">
-                {row.cachedTokens > 0 ? formatTokensCompact(row.cachedTokens) : "—"}
+          combinedRows.map((row) => (
+            <div
+              key={`${row.sparkId}\u0000${row.modelId}`}
+              className="ov-row"
+              title={`${row.promptTokens.toLocaleString()} prompt \u00b7 ${row.cachedTokens.toLocaleString()} cached \u00b7 ${(row.promptTokens - row.cachedTokens).toLocaleString()} prefill \u00b7 ${row.completionTokens.toLocaleString()} generated`}
+            >
+              <span className="ov-row__name" title={row.modelId}>
+                {row.sparkId}
+                <span className="text-muted">{" \u00b7 "}{row.modelId}</span>
               </span>
-
-              <span className="inline-block w-14 text-right">
-                {formatTokensCompact(row.promptTokens - row.cachedTokens)}
-              </span>
-
-              <span className="inline-block w-16 text-right text-text">
-                {formatTokensCompact(row.completionTokens)}
-              </span>
-            </span>
-          </div>
-        ))
+              <span className="ov-row__num mono">{row.cachedTokens > 0 ? formatTokensCompact(row.cachedTokens) : "\u2014"}</span>
+              <span className="ov-row__num mono">{formatTokensCompact(row.promptTokens - row.cachedTokens)}</span>
+              <span className="ov-row__num ov-row__num--strong mono">{formatTokensCompact(row.completionTokens)}</span>
+            </div>
+          ))
         )}
-      </div>
-      <div className="mt-3 flex items-center justify-between gap-2 border-t border-border pt-2 text-[11px]">
-        <span className="uppercase tracking-wide text-muted">Total</span>
-        <span className="font-tabular">
-          <span className="inline-block w-14 text-right text-muted">
-            {totalCached > 0 ? formatTokensCompact(totalCached) : "—"}
-          </span>
-
-          <span className="inline-block w-14 text-right text-muted">
-            {formatTokensCompact(totalPrompt - totalCached)}
-          </span>
-
-          <span className="inline-block w-16 text-right text-sm font-semibold text-text-strong">
-            {formatTokensCompact(totalCompletion)}
-          </span>
-        </span>
+        <div className="ov-row ov-row--total">
+          <span className="ov-row__name eyebrow">Total</span>
+          <span className="ov-row__num mono">{totalCached > 0 ? formatTokensCompact(totalCached) : "\u2014"}</span>
+          <span className="ov-row__num mono">{formatTokensCompact(prefillComputed)}</span>
+          <span className="ov-row__num ov-row__num--strong mono">{formatTokensCompact(totalCompletion)}</span>
+        </div>
       </div>
     </section>
   );

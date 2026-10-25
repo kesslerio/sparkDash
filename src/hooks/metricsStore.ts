@@ -95,6 +95,33 @@ function pushHistory(key: string, value: number, at: number) {
   setHistoryTail(key, ring.tail(SPARKLINE_TAIL).map((sample) => sample.value));
 }
 
+/**
+ * Merge older samples (fetched from the server) in front of what this tab has collected, so a freshly
+ * opened page does not start empty. Only samples older than the first local one are added; live
+ * ingestion carries on from there.
+ */
+export function backfillHistory(sparkId: string, metric: string, older: readonly TimedSample[]): void {
+  if (older.length === 0) return;
+  const key = `${sparkId}:${metric}`;
+  const existing = history.get(key)?.toArray() ?? [];
+  const firstLocal = existing.length ? existing[0].at : Infinity;
+  const prefix = older.filter((s) => s.at < firstLocal).sort((a, b) => a.at - b.at);
+  if (prefix.length === 0) return;
+  const ring = new TimedRingBuffer(HISTORY_MAX);
+  let lastAt = -Infinity;
+  for (const s of [...prefix, ...existing]) {
+    if (s.at <= lastAt) continue;
+    ring.push(s);
+    lastAt = s.at;
+  }
+  history.set(key, ring);
+  const samples = ring.toArray();
+  historySamples.set(key, samples);
+  historyValues.set(key, samples.map((sample) => sample.value));
+  setHistoryTail(key, ring.tail(SPARKLINE_TAIL).map((sample) => sample.value));
+  notify();
+}
+
 function removeHistoryForSpark(sparkId: string) {
   const prefix = `${sparkId}:`;
   for (const key of history.keys()) {
@@ -117,14 +144,24 @@ export function ingestSnapshots(sparks: SparkSnapshot[], at = Date.now()): void 
     if (!s.online) continue; // don't record zero-samples for offline hosts
     const m = s.metrics;
     if (m.gpu) {
-      pushHistory(`${s.id}:gpu.usage`, m.gpu.usage, at);
+      if (m.gpu.metricAvailability?.usage !== false) pushHistory(`${s.id}:gpu.usage`, m.gpu.usage, at);
       // Skip a missing or zero reading. A privileged Mac collector can supply a real one.
-      if (m.gpu.temperature != null && m.gpu.temperature > 0) pushHistory(`${s.id}:gpu.temp`, m.gpu.temperature, at);
+      if (m.gpu.metricAvailability?.temperature !== false && m.gpu.temperature != null && m.gpu.temperature > 0) {
+        pushHistory(`${s.id}:gpu.temp`, m.gpu.temperature, at);
+      }
+      const draw = m.gpu.power?.draw;
+      const limit = m.gpu.power?.limit;
+      if (m.gpu.metricAvailability?.powerDraw !== false && m.gpu.metricAvailability?.powerLimit !== false && draw != null && limit != null && limit > 0) {
+        pushHistory(`${s.id}:gpu.powerPct`, Math.min(100, (draw / limit) * 100), at);
+      }
       // Per-card series for multi-GPU hosts (keyed by nvidia-smi index).
       if (Array.isArray(m.gpu.gpus) && m.gpu.gpus.length > 1) {
         for (const d of m.gpu.gpus) {
-          pushHistory(`${s.id}:gpu.${d.index}.usage`, d.usage, at);
-          pushHistory(`${s.id}:gpu.${d.index}.temp`, d.temperature, at);
+          if (d.metricAvailability?.usage !== false) pushHistory(`${s.id}:gpu.${d.index}.usage`, d.usage, at);
+          if (d.metricAvailability?.temperature !== false) pushHistory(`${s.id}:gpu.${d.index}.temp`, d.temperature, at);
+          if (d.metricAvailability?.powerDraw !== false && d.metricAvailability?.powerLimit !== false && d.power && d.power.limit > 0) {
+            pushHistory(`${s.id}:gpu.${d.index}.powerPct`, Math.min(100, (d.power.draw / d.power.limit) * 100), at);
+          }
         }
       }
     }
@@ -145,12 +182,12 @@ export function ingestSnapshots(sparks: SparkSnapshot[], at = Date.now()): void 
         const llm = m.llm[i];
         const port = ports[i];
         const portKey = port != null ? `:${port}` : `:${i}`;
-        // Null means the source is stale/unavailable/ambiguous. Never turn it
-        // into a fake zero in the chart; zero is reserved for fresh idle data.
-        if (llm.generationTps != null && Number.isFinite(llm.generationTps)) {
+        // Null means the source is stale/unavailable/ambiguous, and an unreadable
+        // poll is a gap too: never turn either into a fake zero in the chart.
+        if (llm.measurementValid !== false && llm.generationTps != null && Number.isFinite(llm.generationTps)) {
           pushHistory(`${s.id}:llm${portKey}.tps`, llm.generationTps, at);
         }
-        if (llm.prefillTps != null && Number.isFinite(llm.prefillTps)) {
+        if (llm.measurementValid !== false && llm.prefillTps != null && Number.isFinite(llm.prefillTps)) {
           pushHistory(`${s.id}:llm${portKey}.prefill`, llm.prefillTps, at);
         }
         // TTFT is sparse: vLLM reports live TTFT only while serving. It is NOT

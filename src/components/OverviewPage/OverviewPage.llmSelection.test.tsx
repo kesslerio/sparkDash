@@ -65,9 +65,11 @@ describe("overview card LLM selection", () => {
         ]}
       />
     );
-    const text = container.textContent ?? "";
-    expect(text).toContain("DeepSeek-V4.1-Flash");
-    expect(text).not.toContain("GLM-5.3-Flash");
+    // The serving engine is the card's model; the idle sibling only appears
+    // as an extra "Loaded" row, never as the monitored model.
+    const rows = [...container.querySelectorAll(".ov-modelrow")];
+    expect(rows[0].querySelector("code")?.textContent).toBe("DeepSeek-V4.1-Flash");
+    expect(rows.find((r) => r.textContent?.includes("GLM-5.3-Flash"))?.textContent).toContain("Loaded");
   });
 
   it("falls back to an idle engine when nothing is active", () => {

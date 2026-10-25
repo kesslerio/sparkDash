@@ -12,10 +12,15 @@
  * container cannot reach the host's 127.0.0.1. In that case HOST_ROOT_PATH
  * is set and we fall back to lanIp for local sparks.
  *
- * @param {{ isLocal?: boolean, lanIp?: string } | null | undefined} spark
+ * `llmHost` pins the HTTP target when a Spark's SSH/display hostname resolves
+ * to more than one machine (for example, a multi-node serving cluster).
+ *
+ * @param {{ isLocal?: boolean, lanIp?: string, llmHost?: string } | null | undefined} spark
  * @returns {string}
  */
 export function llmProbeHost(spark) {
+  const configured = spark?.llmHost != null ? String(spark.llmHost).trim() : "";
+  if (configured) return configured;
   if (spark?.isLocal) {
     // In Docker with port mapping, 127.0.0.1 is the container's loopback.
     // HOST_ROOT_PATH indicates a containerized deployment; use lanIp instead.

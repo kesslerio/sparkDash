@@ -1,705 +1,493 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import {
-  fetchSessionSources,
-  testSessionSources,
-  updateSessionSources,
+  checkOccupancyHelper,
+  deleteOccupancyHelper,
+  fetchOccupancyHelpers,
+  saveOccupancyHelpers,
 } from "../api/client";
-import type {
-  SessionSourceAttach,
-  SessionSourcePatch,
-  SessionSources,
-  SessionSourcesHealth,
-  SessionSourcesPatch,
-} from "../api/types";
+import type { OccupancyCheck, OccupancyHelper, OccupancyHelperInput, OccupancyRoute } from "../api/types";
 import { useModalPresence } from "../hooks/useModalPresence";
-import "./HarnessWizard.css";
+import { XIcon } from "./ui/icons";
+
+const HARNESSES = [
+  { id: "openclaw", label: "OpenClaw" },
+  { id: "opencode", label: "OpenCode" },
+  { id: "omp", label: "oh-my-pi" },
+  { id: "hermes", label: "Hermes" },
+  { id: "dsh", label: "DeepSeek Harness" },
+] as const;
+
+export interface HarnessSparkOption {
+  id: string;
+  name: string;
+  llmPorts: number[];
+}
 
 interface HarnessWizardProps {
   open: boolean;
   onClose: () => void;
-  onSaved: () => void;
+  sparks: HarnessSparkOption[];
+  sparkId?: string;
 }
 
-interface HarnessConfigDraft {
-  mode: "local" | "remote";
+interface RouteDraft {
+  harness: string;
+  sparkId: string;
+  port: string;
+  cwdPrefix: string;
+}
+
+interface Draft {
+  id?: string;
+  label: string;
   url: string;
   token: string;
-  stateDir: string;
-  label: string;
-  username: string;
+  clearToken: boolean;
+  enabled: boolean;
+  harnesses: string[];
+  routes: RouteDraft[];
 }
 
-interface CheckResult {
-  ok: boolean;
-  message: string;
-}
+const STEPS = ["Harnesses", "Connection", "Routes", "Check", "Review"] as const;
 
-type StepPhase = "pick" | "configure" | "review";
-
-interface WizardStep {
-  phase: StepPhase;
-  kind?: string;
-  label?: string;
-}
-
-function draftFromAttach(attach: SessionSourceAttach): HarnessConfigDraft {
-  const isRemote = attach.mode === "url" || Boolean(attach.remoteOnly);
+function emptyDraft(): Draft {
   return {
-    mode: isRemote ? "remote" : "local",
-    url: attach.url || "",
+    label: "",
+    url: "http://127.0.0.1:8790/occupancy",
     token: "",
-    stateDir: attach.stateDir || attach.conventionalStateDir || "",
-    label: attach.label || "",
-    username: attach.username || "",
-  };
-}
-
-function draftToPatch(draft: HarnessConfigDraft, kind: string): SessionSourcePatch {
-  return {
-    id: kind,
+    clearToken: false,
     enabled: true,
-    mode: draft.mode === "local" ? "state-dir" : "url",
-    url: draft.mode === "remote" ? draft.url : "",
-    stateDir: draft.mode === "local" ? draft.stateDir : "",
-    label: draft.label || undefined,
-    username: draft.username || undefined,
-    ...(draft.token ? { token: draft.token } : {}),
+    harnesses: [],
+    routes: [],
   };
 }
 
-function buildPatch(
-  selectedKinds: string[],
-  configs: Record<string, HarnessConfigDraft>
-): SessionSourcesPatch {
-  const patch: SessionSourcesPatch = {};
-  for (const kind of selectedKinds) {
-    const draft = configs[kind];
-    if (draft) patch[kind] = draftToPatch(draft, kind);
-  }
-  return patch;
+function draftFromHelper(helper: OccupancyHelper): Draft {
+  return {
+    id: helper.id,
+    label: helper.label,
+    url: helper.url,
+    token: "",
+    clearToken: false,
+    enabled: helper.enabled,
+    harnesses: [...helper.harnesses],
+    routes: helper.routes.map((route) => ({
+      harness: route.harness,
+      sparkId: route.sparkId,
+      port: String(route.port),
+      cwdPrefix: route.cwdPrefix || "",
+    })),
+  };
 }
 
-export function HarnessWizard({ open, onClose, onSaved }: HarnessWizardProps) {
-  const { mounted, visible } = useModalPresence(open, 240, { escapeOnClose: onClose });
+function preferredSpark(sparks: HarnessSparkOption[], sparkId?: string) {
+  return sparks.find((spark) => spark.id === sparkId) || sparks[0];
+}
 
-  const [loading, setLoading] = useState(false);
-  const [sources, setSources] = useState<SessionSources | null>(null);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [configs, setConfigs] = useState<Record<string, HarnessConfigDraft>>({});
-  const [snippetMode, setSnippetMode] = useState<Record<string, "human" | "agent">>({});
-  const [checking, setChecking] = useState<Record<string, boolean>>({});
-  const [checkResults, setCheckResults] = useState<Record<string, CheckResult | null>>({});
-  const [stepIdx, setStepIdx] = useState(0);
-  const [saving, setSaving] = useState(false);
-  const [saveError, setSaveError] = useState<string | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const didLoadSources = useRef(false);
-
-  // Load session sources when wizard opens
-  useEffect(() => {
-    if (!open || didLoadSources.current) return;
-    didLoadSources.current = true;
-    setLoading(true);
-    setLoadError(null);
-    fetchSessionSources()
-      .then((data) => {
-        setSources(data);
-        // Pre-check harnesses that already have enabled attaches
-        const preSelected = new Set<string>();
-        const preConfigs: Record<string, HarnessConfigDraft> = {};
-        for (const [kind, attaches] of Object.entries(data)) {
-          const enabled = attaches.find((a) => a.enabled);
-          if (enabled) {
-            preSelected.add(kind);
-            preConfigs[kind] = draftFromAttach(enabled);
-          }
-        }
-        setSelected(preSelected);
-        setConfigs(preConfigs);
-      })
-      .catch((err) => setLoadError(err.message || "Failed to load harnesses"))
-      .finally(() => setLoading(false));
-  }, [open]);
-
-  // Reset transient state when wizard closes
-  useEffect(() => {
-    if (!open) {
-      didLoadSources.current = false;
-      setStepIdx(0);
-      setSaveError(null);
-      setCheckResults({});
-      setChecking({});
-    }
-  }, [open]);
-
-  const allKinds = useMemo<SessionSourceAttach[]>(() => {
-    if (!sources) return [];
-    // Collect one representative attach per kind (first attach carries metadata)
-    const result: SessionSourceAttach[] = [];
-    for (const attaches of Object.values(sources)) {
-      if (attaches.length > 0) {
-        result.push(attaches[0]);
-      }
-    }
-    return result;
-  }, [sources]);
-
-  // Build the step sequence: pick → one per selected → review
-  const stepSequence = useMemo<WizardStep[]>(() => {
-    const steps: WizardStep[] = [{ phase: "pick", label: "Select harnesses" }];
-    const selectedKinds = allKinds.filter((k) => selected.has(k.id));
-    for (const kind of selectedKinds) {
-      steps.push({ phase: "configure", kind: kind.id, label: kind.kindLabel || kind.id });
-    }
-    steps.push({ phase: "review", label: "Review and save" });
-    return steps;
-  }, [allKinds, selected]);
-
-  const currentStep = stepSequence[stepIdx] || stepSequence[0];
-  const totalSteps = stepSequence.length;
-
-  // Derive the attach for the current configure step once, no repeated find() + !
-  const currentAttach = useMemo(() => {
-    if (currentStep.phase !== "configure" || !currentStep.kind) return null;
-    return allKinds.find((k) => k.id === currentStep.kind) ?? null;
-  }, [allKinds, currentStep]);
-
-  const toggleKind = useCallback((kindId: string) => {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(kindId)) next.delete(kindId);
-      else next.add(kindId);
-      return next;
+function withRoutes(draft: Draft, sparks: HarnessSparkOption[], sparkId?: string): Draft {
+  const spark = preferredSpark(sparks, sparkId);
+  const routes = draft.routes.filter((route) => draft.harnesses.includes(route.harness));
+  for (const harness of draft.harnesses) {
+    if (routes.some((route) => route.harness === harness)) continue;
+    routes.push({
+      harness,
+      sparkId: spark?.id || "",
+      port: spark?.llmPorts?.[0] ? String(spark.llmPorts[0]) : "",
+      cwdPrefix: "",
     });
-    // Initialize config draft from the attach metadata if not already present
-    setConfigs((prev) => {
-      if (prev[kindId]) return prev;
-      const attach = allKinds.find((k) => k.id === kindId);
-      if (!attach) return prev;
-      return { ...prev, [kindId]: draftFromAttach(attach) };
-    });
-  }, [allKinds]);
+  }
+  return { ...draft, routes };
+}
 
-  const updateConfig = useCallback((kindId: string, patch: Partial<HarnessConfigDraft>) => {
-    setConfigs((prev) => ({
-      ...prev,
-      [kindId]: { ...prev[kindId], ...patch },
+function parseUrl(value: string): string | null {
+  try {
+    const parsed = new URL(value.trim());
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "Use an http or https URL";
+    if (parsed.username || parsed.password) return "Remove the username and password from the URL";
+    if (!parsed.hostname) return "The URL needs a host";
+    return null;
+  } catch {
+    return "Enter a helper URL";
+  }
+}
+
+function snippetFor(harnesses: string[]): string {
+  const lines = [
+    "OCCUPANCY_BIND=127.0.0.1",
+    'OCCUPANCY_TOKEN="$(openssl rand -hex 32)"',
+    `OCCUPANCY_ADAPTERS=${harnesses.join(",")}`,
+  ];
+  if (harnesses.includes("hermes")) lines.push("HERMES_STATE_DIR=$HOME/.hermes");
+  if (harnesses.includes("dsh")) lines.push("DSH_WEB_URL=http://127.0.0.1:3080");
+  lines.push("node scripts/occupancy-helper/index.js");
+  return lines.join(" \\\n");
+}
+
+function toInput(helper: OccupancyHelper): OccupancyHelperInput {
+  return {
+    id: helper.id,
+    label: helper.label,
+    url: helper.url,
+    enabled: helper.enabled,
+    harnesses: helper.harnesses,
+    routes: helper.routes,
+  };
+}
+
+function routesFromDraft(routes: RouteDraft[]): OccupancyRoute[] {
+  return routes
+    .filter((route) => route.sparkId && route.port)
+    .map((route) => ({
+      harness: route.harness,
+      sparkId: route.sparkId,
+      port: Number(route.port),
+      ...(route.cwdPrefix.trim() ? { cwdPrefix: route.cwdPrefix.trim() } : {}),
     }));
+}
+
+export function HarnessWizard({ open, onClose, sparks, sparkId }: HarnessWizardProps) {
+  const { mounted, visible } = useModalPresence(open);
+  const [helpers, setHelpers] = useState<OccupancyHelper[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [step, setStep] = useState(0);
+  const [draft, setDraft] = useState<Draft>(emptyDraft());
+  const [check, setCheck] = useState<OccupancyCheck | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(() => {
+    setLoading(true);
+    setError(null);
+    fetchOccupancyHelpers()
+      .then((data) => {
+        const list = data.helpers || [];
+        setHelpers(list);
+        if (list.length === 0) {
+          setDraft(emptyDraft());
+          setEditing(true);
+          setStep(0);
+        } else {
+          setEditing(false);
+        }
+      })
+      .catch((err: Error) => setError(err.message || "Could not load helpers"))
+      .finally(() => setLoading(false));
   }, []);
 
-  const handleCheck = useCallback(
-    async (kindId: string) => {
-      setChecking((prev) => ({ ...prev, [kindId]: true }));
-      setCheckResults((prev) => ({ ...prev, [kindId]: null }));
-      try {
-        const draft = configs[kindId];
-        if (!draft) return;
-        const patch: SessionSourcesPatch = { [kindId]: draftToPatch(draft, kindId) };
-        const health: SessionSourcesHealth = await testSessionSources(patch);
-        const entry = health[kindId]?.[0];
-        if (entry) {
-          setCheckResults((prev) => ({
-            ...prev,
-            [kindId]: {
-              ok: entry.status === "ok",
-              message: entry.status === "ok"
-                ? `Connected — ${entry.found} session${entry.found === 1 ? "" : "s"} found`
-                : entry.error || "Check failed",
-            },
-          }));
-        } else {
-          setCheckResults((prev) => ({
-            ...prev,
-            [kindId]: { ok: false, message: "No response from server" },
-          }));
-        }
-      } catch (err) {
-        setCheckResults((prev) => ({
-          ...prev,
-          [kindId]: { ok: false, message: (err as Error).message || "Check failed" },
-        }));
-      } finally {
-        setChecking((prev) => ({ ...prev, [kindId]: false }));
-      }
-    },
-    [configs]
-  );
+  useEffect(() => {
+    if (!open) return;
+    setCheck(null);
+    setStep(0);
+    load();
+  }, [open, load]);
 
-  const handleSave = useCallback(async () => {
-    setSaving(true);
-    setSaveError(null);
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [open, onClose]);
+
+  const sparkName = useMemo(() => new Map(sparks.map((spark) => [spark.id, spark.name])), [sparks]);
+
+  const toggleHarness = (id: string) => {
+    setDraft((prev) => {
+      const harnesses = prev.harnesses.includes(id)
+        ? prev.harnesses.filter((item) => item !== id)
+        : [...prev.harnesses, id];
+      return { ...prev, harnesses };
+    });
+  };
+
+  const goNext = () => {
+    if (step === 0 && draft.harnesses.length === 0) {
+      setError("Pick at least one harness");
+      return;
+    }
+    if (step === 1) {
+      const problem = parseUrl(draft.url);
+      if (problem) {
+        setError(problem);
+        return;
+      }
+    }
+    if (step === 2) {
+      const bad = draft.routes.find((route) => route.sparkId && (!Number.isInteger(Number(route.port)) || Number(route.port) < 1 || Number(route.port) > 65535));
+      if (bad) {
+        setError("Each route needs a port from 1 to 65535");
+        return;
+      }
+    }
+    setError(null);
+    if (step === 1) setDraft((prev) => withRoutes(prev, sparks, sparkId));
+    setStep((prev) => Math.min(prev + 1, STEPS.length - 1));
+  };
+
+  const runCheck = async () => {
+    setChecking(true);
+    setError(null);
     try {
-      const selectedKinds = allKinds.filter((k) => selected.has(k.id)).map((k) => k.id);
-      const patch = buildPatch(selectedKinds, configs);
-      await updateSessionSources(patch);
-      onSaved();
-      onClose();
-    } catch (err) {
-      setSaveError((err as Error).message || "Failed to save harnesses");
+      const result = await checkOccupancyHelper(draft.url, draft.token);
+      setCheck(result);
+    } catch (err: unknown) {
+      setCheck(null);
+      setError(err instanceof Error ? err.message : "Check failed");
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  const save = async (nextHelpers: OccupancyHelperInput[]) => {
+    setSaving(true);
+    setError(null);
+    try {
+      const saved = await saveOccupancyHelpers(nextHelpers);
+      setHelpers(saved.helpers);
+      setEditing(false);
+      setStep(0);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Save failed");
     } finally {
       setSaving(false);
     }
-  }, [allKinds, selected, configs, onSaved, onClose]);
-
-  if (!mounted) return null;
-
-  const canAdvance =
-    currentStep.phase === "pick" ? selected.size > 0 : true;
-
-  const handleNext = () => {
-    if (stepIdx < totalSteps - 1) setStepIdx(stepIdx + 1);
-  };
-  const handleBack = () => {
-    if (stepIdx > 0) setStepIdx(stepIdx - 1);
   };
 
-  const title =
-    currentStep.phase === "pick"
-      ? "Connect your harnesses"
-      : currentStep.phase === "review"
-      ? "Review and save"
-      : `Configure ${currentStep.label}`;
+  const saveDraft = () => {
+    const others = helpers.filter((helper) => helper.id !== draft.id).map(toInput);
+    const body: OccupancyHelperInput = {
+      ...(draft.id ? { id: draft.id } : {}),
+      label: draft.label,
+      url: draft.url.trim(),
+      enabled: draft.enabled,
+      harnesses: draft.harnesses,
+      routes: routesFromDraft(draft.routes),
+    };
+    if (draft.token) body.token = draft.token;
+    else if (draft.clearToken) body.token = "";
+    return save([...others, body]);
+  };
 
-  const subtitle =
-    currentStep.phase === "pick"
-      ? "Select all the coding-agent harnesses you use, then configure each one."
-      : currentStep.phase === "review"
-      ? "Confirm your harness connections before saving."
-      : "Set up how SparkDash reaches this harness.";
+  const setEnabled = (helper: OccupancyHelper, enabled: boolean) => {
+    const next = helpers.map((item) => (item.id === helper.id ? { ...toInput(item), enabled } : toInput(item)));
+    return save(next);
+  };
 
-  return createPortal(
-    <div
-      className={`harness-wizard-overlay${visible ? " is-open" : ""}`}
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
-    >
-      <div
-        className="harness-wizard-sheet"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="harness-wizard-title"
-      >
-        <div className="harness-wizard__header">
-          <div className="harness-wizard__header-row">
-            <div className="harness-wizard__header-text">
-              <h2 id="harness-wizard-title" className="harness-wizard__title">
-                {title}
-              </h2>
-              <p className="harness-wizard__subtitle">{subtitle}</p>
-            </div>
-            <button
-              type="button"
-              className="harness-wizard__close"
-              onClick={onClose}
-              aria-label="Close"
-            >
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M18 6L6 18M6 6l12 12" />
-              </svg>
-            </button>
-          </div>
-          <div className="harness-wizard__step-indicator">
-            <span className="harness-wizard__step-compact">
-              Step {stepIdx + 1} of {totalSteps}
-            </span>
-            <div className="harness-wizard__step-track">
-              {stepSequence.map((s, i) => (
-                <div
-                  key={i}
-                  className={`harness-wizard__step-node${i === stepIdx ? " is-current" : ""}${i < stepIdx ? " is-done" : ""}`}
-                >
-                  <span className="harness-wizard__step-node-dot" />
-                  {i < stepSequence.length - 1 && (
-                    <span className="harness-wizard__step-node-line" />
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-
-        <div className="harness-wizard__body">
-          {loading && <p className="text-xs text-muted">Loading harnesses…</p>}
-          {loadError && (
-            <div className="harness-wizard__error">{loadError}</div>
-          )}
-
-          {!loading && currentStep.phase === "pick" && (
-            <PickStep
-              allKinds={allKinds}
-              selected={selected}
-              onToggle={toggleKind}
-            />
-          )}
-
-          {!loading && currentStep.phase === "configure" && currentStep.kind && currentAttach && (
-            <ConfigureStep
-              kindId={currentStep.kind}
-              attach={currentAttach}
-              draft={configs[currentStep.kind] || draftFromAttach(currentAttach)}
-              snippetMode={snippetMode[currentStep.kind] || "human"}
-              onSnippetModeChange={(mode) => setSnippetMode((prev) => ({ ...prev, [currentStep.kind!]: mode }))}
-              onUpdate={(patch) => updateConfig(currentStep.kind!, patch)}
-              onCheck={() => handleCheck(currentStep.kind!)}
-              checking={checking[currentStep.kind] || false}
-              checkResult={checkResults[currentStep.kind] || null}
-            />
-          )}
-
-          {!loading && currentStep.phase === "review" && (
-            <ReviewStep
-              selectedKinds={allKinds.filter((k) => selected.has(k.id))}
-              configs={configs}
-              checkResults={checkResults}
-            />
-          )}
-
-          {saveError && (
-            <div className="harness-wizard__error harness-wizard__error--save">
-              {saveError}
-            </div>
-          )}
-        </div>
-
-        <div className="harness-wizard__footer">
-          {currentStep.phase !== "pick" && (
-            <button
-              type="button"
-              className="harness-wizard__btn harness-wizard__btn--ghost"
-              onClick={handleBack}
-            >
-              Back
-            </button>
-          )}
-          <div className="harness-wizard__footer-actions">
-            {currentStep.phase !== "review" ? (
-              <button
-                type="button"
-                className="harness-wizard__btn harness-wizard__btn--primary"
-                onClick={handleNext}
-                disabled={!canAdvance}
-              >
-                Next
-              </button>
-            ) : (
-              <button
-                type="button"
-                className="harness-wizard__btn harness-wizard__btn--primary"
-                onClick={handleSave}
-                disabled={saving || selected.size === 0}
-              >
-                {saving ? "Saving…" : "Save harnesses"}
-              </button>
-            )}
-          </div>
-        </div>
-      </div>
-    </div>,
-    document.body
-  );
-}
-
-// ─── Step 1: Pick harnesses ──────────────────────────────
-
-function PickStep({
-  allKinds,
-  selected,
-  onToggle,
-}: {
-  allKinds: SessionSourceAttach[];
-  selected: Set<string>;
-  onToggle: (kindId: string) => void;
-}) {
-  return (
-    <div className="harness-wizard__pick">
-      <p className="harness-wizard__pick-intro">
-        Select all the coding-agent harnesses you use.
-      </p>
-      <div className="harness-wizard__cards">
-        {allKinds.map((kind) => {
-          const kindId = kind.id;
-          const isSelected = selected.has(kindId);
-          const isHelper = Boolean(kind.helperHuman);
-          return (
-            <button
-              key={kindId}
-              type="button"
-              className={`harness-wizard__card${isSelected ? " is-selected" : ""}`}
-              onClick={() => onToggle(kindId)}
-              role="checkbox"
-              aria-checked={isSelected}
-            >
-              <div className="harness-wizard__card-row">
-                <div className="harness-wizard__card-check">
-                  {isSelected && (
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
-                      <path d="M20 6L9 17l-5-5" />
-                    </svg>
-                  )}
-                </div>
-                <div className="harness-wizard__card-content">
-                  <div className="harness-wizard__card-label">
-                    {kind.kindLabel || kindId}
-                    <span className={`harness-wizard__card-tag${isHelper ? " is-helper" : ""}`}>
-                      {isHelper ? "Helper" : "Native API"}
-                    </span>
-                  </div>
-                  <div className="harness-wizard__card-desc" title={kind.description}>
-                    {kind.description}
-                  </div>
-                </div>
-              </div>
-            </button>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-// ─── Step 2: Configure a single harness ──────────────────
-
-function ConfigureStep({
-  kindId,
-  attach,
-  draft,
-  snippetMode,
-  onSnippetModeChange,
-  onUpdate,
-  onCheck,
-  checking,
-  checkResult,
-}: {
-  kindId: string;
-  attach: SessionSourceAttach;
-  draft: HarnessConfigDraft;
-  snippetMode: "human" | "agent";
-  onSnippetModeChange: (mode: "human" | "agent") => void;
-  onUpdate: (patch: Partial<HarnessConfigDraft>) => void;
-  onCheck: () => void;
-  checking: boolean;
-  checkResult: CheckResult | null;
-}) {
-  const isRemoteOnly = Boolean(attach.remoteOnly);
-  const isHelper = Boolean(attach.helperHuman);
-  const helperSnippet = snippetMode === "human" ? attach.helperHuman : attach.helperAgent;
-  const [copied, setCopied] = useState(false);
-
-  const copySnippet = () => {
-    if (helperSnippet) {
-      navigator.clipboard.writeText(helperSnippet).then(() => {
-        setCopied(true);
-        setTimeout(() => setCopied(false), 2000);
-      });
+  const remove = async (helper: OccupancyHelper) => {
+    if (!window.confirm(`Remove helper ${helper.label || helper.id}?`)) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const saved = await deleteOccupancyHelper(helper.id);
+      setHelpers(saved.helpers);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Remove failed");
+    } finally {
+      setSaving(false);
     }
   };
 
-  return (
-    <div className="harness-wizard__configure">
-      {!isRemoteOnly && (
-        <div className="harness-wizard__field-group">
-          <label className="harness-wizard__field-label">
-            Where does {attach.kindLabel} run?
-          </label>
-          <div className="harness-wizard__radio-row">
-            <button
-              type="button"
-              className={`harness-wizard__radio${draft.mode === "local" ? " is-active" : ""}`}
-              onClick={() => onUpdate({ mode: "local" })}
-            >
-              This machine
-            </button>
-            <button
-              type="button"
-              className={`harness-wizard__radio${draft.mode === "remote" ? " is-active" : ""}`}
-              onClick={() => onUpdate({ mode: "remote" })}
-            >
-              Another machine
-            </button>
-          </div>
-        </div>
-      )}
+  if (!mounted) return null;
 
-      {draft.mode === "local" && (
-        <div className="harness-wizard__field-group">
-          <label className="harness-wizard__field-label" htmlFor={`stateDir-${kindId}`}>
-            State directory
-          </label>
-          <input
-            id={`stateDir-${kindId}`}
-            type="text"
-            value={draft.stateDir}
-            onChange={(e) => onUpdate({ stateDir: e.target.value })}
-            placeholder={attach.conventionalStateDir}
-            className="harness-wizard__input"
-          />
-          <p className="harness-wizard__field-hint">
-            Default: {attach.conventionalStateDir}
-          </p>
+  return createPortal(
+    <div
+      className={`modal-overlay${visible ? " is-open" : ""}`}
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <div className="modal-sheet modal-sheet--wide" role="dialog" aria-modal="true" aria-labelledby="harness-title">
+        <div className="modal-sheet__header">
+          <h2 className="modal-sheet__title" id="harness-title">Harness sessions</h2>
+          <button type="button" className="modal-sheet__close" onClick={onClose} aria-label="Close">
+            <XIcon className="h-4 w-4" />
+          </button>
         </div>
-      )}
-
-      {draft.mode === "remote" && (
-        <>
-          {isHelper && helperSnippet && (
-            <div className="harness-wizard__field-group">
-              <div className="harness-wizard__snippet-header">
-                <div className="harness-wizard__snippet-toggle">
-                  <button
-                    type="button"
-                    className={`harness-wizard__toggle-btn${snippetMode === "human" ? " is-active" : ""}`}
-                    onClick={() => onSnippetModeChange("human")}
-                  >
-                    Run it yourself
+        <div className="modal-sheet__body">
+          {loading && <p className="bench-sheet__hint">Loading…</p>}
+          {error && <p role="alert" className="modal-sheet__error">{error}</p>}
+          {!loading && !editing && (
+            <div className="harness-list">
+              {helpers.map((helper) => (
+                <article key={helper.id}>
+                  <div>
+                    <strong>{helper.label || helper.id}</strong>
+                    <div className="occupancy-ctx">{helper.enabled ? helper.harnesses.join(", ") : "Disabled"}</div>
+                  </div>
+                  <button type="button" className="btn btn--sm" onClick={() => { setDraft(draftFromHelper(helper)); setEditing(true); setStep(0); setCheck(null); setError(null); }}>Edit</button>
+                  <button type="button" className="btn btn--sm" onClick={() => void setEnabled(helper, !helper.enabled)} disabled={saving}>
+                    {helper.enabled ? "Disable" : "Enable"}
                   </button>
-                  <button
-                    type="button"
-                    className={`harness-wizard__toggle-btn${snippetMode === "agent" ? " is-active" : ""}`}
-                    onClick={() => onSnippetModeChange("agent")}
-                  >
-                    Have an agent set it up
-                  </button>
+                  <button type="button" className="btn btn--sm" onClick={() => void remove(helper)} disabled={saving}>Remove</button>
+                </article>
+              ))}
+              <button type="button" className="btn btn--primary" onClick={() => { setDraft(emptyDraft()); setEditing(true); setStep(0); setCheck(null); setError(null); }}>
+                Add helper
+              </button>
+            </div>
+          )}
+          {!loading && editing && (
+            <>
+              <p className="bench-sheet__hint">Step {step + 1} of {STEPS.length}: {STEPS[step]}</p>
+              {step === 0 && (
+                <div className="harness-pick" role="group" aria-label="Harnesses">
+                  {HARNESSES.map((harness) => (
+                    <label key={harness.id}>
+                      <input
+                        type="checkbox"
+                        aria-label={harness.label}
+                        checked={draft.harnesses.includes(harness.id)}
+                        onChange={() => toggleHarness(harness.id)}
+                      />
+                      {harness.label}
+                    </label>
+                  ))}
                 </div>
-                <button
-                  type="button"
-                  className="harness-wizard__copy-btn"
-                  onClick={copySnippet}
+              )}
+              {step === 1 && (
+                <form
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    goNext();
+                  }}
                 >
-                  {copied ? "Copied!" : "Copy"}
+                  <label className="harness-field">
+                    <span>Name</span>
+                    <input aria-label="Helper name" name="helper-name" value={draft.label} onChange={(event) => setDraft({ ...draft, label: event.target.value })} />
+                  </label>
+                  <label className="harness-field">
+                    <span>Helper URL</span>
+                    <input aria-label="Helper URL" name="helper-url" value={draft.url} onChange={(event) => setDraft({ ...draft, url: event.target.value })} />
+                  </label>
+                  <label className="harness-field">
+                    <span>{draft.id ? "New bearer token (leave blank to keep the saved one)" : "Bearer token"}</span>
+                    <input aria-label="Bearer token" name="helper-token" type="password" value={draft.token} onChange={(event) => setDraft({ ...draft, token: event.target.value, clearToken: false })} autoComplete="off" />
+                  </label>
+                  {draft.id && (
+                    <label>
+                      <input type="checkbox" aria-label="Clear saved token" checked={draft.clearToken} onChange={(event) => setDraft({ ...draft, clearToken: event.target.checked, token: "" })} />
+                      Clear saved token
+                    </label>
+                  )}
+                </form>
+              )}
+              {step === 2 && (
+                <div className="harness-routes">
+                  <p className="bench-sheet__hint">A route sends one harness to a Spark and port. A directory prefix wins over a general route. Rows with no route stay off the cards.</p>
+                  {draft.routes.map((route, index) => (
+                    <div key={`${route.harness}-${index}`}>
+                      <strong>{HARNESSES.find((item) => item.id === route.harness)?.label || route.harness}</strong>
+                      <div className="harness-route">
+                        <select
+                          aria-label={`Spark for ${route.harness}`}
+                          value={route.sparkId}
+                          onChange={(event) => {
+                            const spark = sparks.find((item) => item.id === event.target.value);
+                            setDraft((prev) => {
+                              const routes = [...prev.routes];
+                              routes[index] = {
+                                ...routes[index],
+                                sparkId: event.target.value,
+                                port: spark?.llmPorts?.[0] ? String(spark.llmPorts[0]) : routes[index].port,
+                              };
+                              return { ...prev, routes };
+                            });
+                          }}
+                        >
+                          <option value="">Unassigned</option>
+                          {sparks.map((spark) => (
+                            <option key={spark.id} value={spark.id}>{spark.name}</option>
+                          ))}
+                        </select>
+                        <input
+                          aria-label={`Port for ${route.harness}`}
+                          inputMode="numeric"
+                          value={route.port}
+                          onChange={(event) => {
+                            const port = event.target.value;
+                            setDraft((prev) => {
+                              const routes = [...prev.routes];
+                              routes[index] = { ...routes[index], port };
+                              return { ...prev, routes };
+                            });
+                          }}
+                        />
+                      </div>
+                      <label className="harness-field">
+                        <span>Directory prefix, optional</span>
+                        <input
+                          aria-label={`Directory prefix for ${route.harness}`}
+                          value={route.cwdPrefix}
+                          onChange={(event) => {
+                            const cwdPrefix = event.target.value;
+                            setDraft((prev) => {
+                              const routes = [...prev.routes];
+                              routes[index] = { ...routes[index], cwdPrefix };
+                              return { ...prev, routes };
+                            });
+                          }}
+                        />
+                      </label>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {step === 3 && (
+                <div>
+                  <button type="button" className="btn btn--primary" onClick={() => void runCheck()} disabled={checking}>
+                    {checking ? "Checking…" : "Check connection"}
+                  </button>
+                  {check && (
+                    <>
+                      <p>{check.rowCount} sessions</p>
+                      <ul className="harness-check-list">
+                        {Object.entries(check.adapters).map(([id, adapter]) => (
+                          <li key={id}>{id}: {adapter.coverage}{adapter.stale ? ", stale" : ""}{adapter.error ? ` (${adapter.error})` : ""}</li>
+                        ))}
+                      </ul>
+                    </>
+                  )}
+                </div>
+              )}
+              {step === 4 && (
+                <div>
+                  <p>{draft.harnesses.join(", ")} via {draft.url}</p>
+                  <ul className="harness-check-list">
+                    {draft.routes.filter((route) => route.sparkId).map((route) => (
+                      <li key={`${route.harness}-${route.sparkId}-${route.port}`}>
+                        {route.harness} → {sparkName.get(route.sparkId) || route.sparkId}:{route.port}
+                        {route.cwdPrefix ? ` ${route.cwdPrefix}` : ""}
+                      </li>
+                    ))}
+                  </ul>
+                  <pre className="harness-snippet">{snippetFor(draft.harnesses)}</pre>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+        {editing && (
+          <div className="modal-sheet__footer">
+            <div className="modal-sheet__footer-actions">
+              <button type="button" className="btn btn--ghost" onClick={() => (step === 0 ? setEditing(helpers.length > 0) : setStep((prev) => prev - 1))}>
+                {step === 0 ? "Back" : "Back"}
+              </button>
+              {step < STEPS.length - 1 ? (
+                <button type="button" className="btn btn--primary" onClick={goNext}>Next</button>
+              ) : (
+                <button type="button" className="btn btn--primary" onClick={() => void saveDraft()} disabled={saving}>
+                  {saving ? "Saving…" : "Save"}
                 </button>
-              </div>
-              <pre className="harness-wizard__snippet">{helperSnippet}</pre>
-              <p className="harness-wizard__field-hint">
-                Run this on the machine that hosts {attach.kindLabel}. It prints a URL and token — paste them below.
-              </p>
+              )}
             </div>
-          )}
-
-          <div className="harness-wizard__field-group">
-            <label className="harness-wizard__field-label" htmlFor={`url-${kindId}`}>
-              URL
-            </label>
-            <input
-              id={`url-${kindId}`}
-              type="text"
-              value={draft.url}
-              onChange={(e) => onUpdate({ url: e.target.value })}
-              placeholder={attach.urlPlaceholder}
-              className="harness-wizard__input"
-            />
           </div>
-
-          {attach.usesUsername && (
-            <div className="harness-wizard__field-group">
-              <label className="harness-wizard__field-label" htmlFor={`username-${kindId}`}>
-                Username
-              </label>
-              <input
-                id={`username-${kindId}`}
-                type="text"
-                value={draft.username}
-                onChange={(e) => onUpdate({ username: e.target.value })}
-                placeholder="admin"
-                className="harness-wizard__input"
-              />
-            </div>
-          )}
-
-          <div className="harness-wizard__field-group">
-            <label className="harness-wizard__field-label" htmlFor={`token-${kindId}`}>
-              Token
-            </label>
-            <input
-              id={`token-${kindId}`}
-              type="password"
-              value={draft.token}
-              onChange={(e) => onUpdate({ token: e.target.value })}
-              placeholder="Paste the token from the helper"
-              className="harness-wizard__input"
-            />
-          </div>
-
-          <div className="harness-wizard__field-group">
-            <label className="harness-wizard__field-label" htmlFor={`label-${kindId}`}>
-              Label (optional)
-            </label>
-            <input
-              id={`label-${kindId}`}
-              type="text"
-              value={draft.label}
-              onChange={(e) => onUpdate({ label: e.target.value })}
-              placeholder="e.g. theshop"
-              className="harness-wizard__input"
-            />
-          </div>
-        </>
-      )}
-
-      <div className="harness-wizard__check-row">
-        <button
-          type="button"
-          className="harness-wizard__btn harness-wizard__btn--ghost"
-          onClick={onCheck}
-          disabled={checking || (draft.mode === "remote" && !draft.url)}
-        >
-          {checking ? "Checking…" : "Check connection"}
-        </button>
-        {checkResult && (
-          <span className={`harness-wizard__check-result${checkResult.ok ? " is-ok" : " is-fail"}`}>
-            {checkResult.ok ? "✓" : "✗"} {checkResult.message}
-          </span>
         )}
       </div>
-    </div>
-  );
-}
-
-// ─── Step 3: Review ──────────────────────────────────────
-
-function ReviewStep({
-  selectedKinds,
-  configs,
-  checkResults,
-}: {
-  selectedKinds: SessionSourceAttach[];
-  configs: Record<string, HarnessConfigDraft>;
-  checkResults: Record<string, CheckResult | null>;
-}) {
-  if (selectedKinds.length === 0) {
-    return <p className="text-xs text-muted">No harnesses selected. Go back and select at least one.</p>;
-  }
-
-  return (
-    <div className="harness-wizard__review">
-      <p className="harness-wizard__pick-intro">
-        Review your harnesses before saving.
-      </p>
-      <div className="harness-wizard__review-list">
-        {selectedKinds.map((kind) => {
-          const draft = configs[kind.id];
-          const result = checkResults[kind.id];
-          const status = result ? (result.ok ? "Passed" : "Failed") : "Not checked";
-          const statusClass = result ? (result.ok ? "is-ok" : "is-fail") : "is-pending";
-          return (
-            <div key={kind.id} className="harness-wizard__review-row">
-              <div className="harness-wizard__review-label">
-                {kind.kindLabel || kind.id}
-                {draft?.label && <span className="harness-wizard__review-sublabel">{draft.label}</span>}
-              </div>
-              <div className="harness-wizard__review-meta">
-                <span className="harness-wizard__review-mode">
-                  {draft?.mode === "local" ? "Local" : "Remote"}
-                </span>
-                <span className={`harness-wizard__review-status ${statusClass}`}>
-                  {status}
-                </span>
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    </div>
+    </div>,
+    document.body
   );
 }

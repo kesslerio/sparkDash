@@ -3,7 +3,7 @@ import { strict as assert } from "node:assert";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { sshCommandSpec, sshExecOutcome } from "../ssh.js";
+import { sshCommandSpec, sshExecOutcome, explainSshFailure } from "../ssh.js";
 
 beforeEach((t) => {
   for (const name of ["SSH_CONTROL_PERSIST_SECONDS", "SSH_CONTROL_PERSIST", "SSH_IDENTITY_FILE"]) {
@@ -76,6 +76,25 @@ test("sshCommandSpec: commands use the private socket and persistence from their
   assert.deepEqual(controlOptions(spec), spec.multiplex.args.filter((arg) => /^Control/.test(arg)));
   const next = sshCommandSpec(keySpark, { remoteArgv: ["cat /proc/meminfo"] });
   assert.deepEqual(controlOptions(next), controlOptions(spec));
+});
+
+test("sshCommandSpec: SSH port defaults to 22 and a custom port isolates the master", () => {
+  const def = sshCommandSpec(keySpark, { remoteArgv: ["echo ok"] });
+  const custom = sshCommandSpec(
+    { ...keySpark, ssh: { ...keySpark.ssh, port: 2222 } },
+    { remoteArgv: ["echo ok"] }
+  );
+  const portArg = (spec) => {
+    const dash = spec.args.indexOf("--");
+    const p = spec.args.indexOf("-p");
+    assert.ok(p >= 0 && p < dash);
+    return spec.args[p + 1];
+  };
+  assert.equal(portArg(def), "22");
+  assert.equal(portArg(custom), "2222");
+  assert.equal(custom.sshPort, 2222);
+  const controlPath = (spec) => spec.args.find((arg) => arg.startsWith("ControlPath="));
+  assert.notEqual(controlPath(def), controlPath(custom));
 });
 
 test("sshCommandSpec: multiplex:false opts out (tunnels own their connection)", () => {
@@ -199,4 +218,28 @@ test("sshExecOutcome: a transport failure never yields output even with stdout",
     sshExecOutcome({ error: transport, stdout: "partial table", allowNonZeroExit: true }),
     null
   );
+});
+
+test("explainSshFailure points Windows hosts at the Windows unit type and leaves other errors alone", () => {
+  const win = explainSshFailure("'true' is not recognized as an internal or external command, operable program or batch file.");
+  assert.match(win, /Windows/);
+  assert.match(win, /Windows PC with an NVIDIA GPU/);
+  assert.equal(explainSshFailure("Permission denied (publickey)."), "Permission denied (publickey).");
+});
+
+test("a Windows unit's command is sent as an encoded PowerShell argv, others unchanged", async () => {
+  const { remoteArgvFor } = await import("../ssh.js");
+  const win = remoteArgvFor({ platform: "windows" }, "echo ok");
+  assert.equal(win.length, 1);
+  assert.match(win[0], /^powershell .*-EncodedCommand [A-Za-z0-9+/=]+$/);
+  assert.deepEqual(remoteArgvFor({ platform: "linux" }, "echo ok"), ["echo ok"]);
+  assert.deepEqual(remoteArgvFor({}, "echo ok"), ["echo ok"]);
+});
+
+test("explainSshFailure names the administrators_authorized_keys file for a refused key on a Windows unit only", () => {
+  const denied = "Permission denied (publickey,password,keyboard-interactive).";
+  const win = explainSshFailure(denied, { windows: true });
+  assert.match(win, /administrators_authorized_keys/);
+  assert.match(win, /Administrators and SYSTEM/);
+  assert.equal(explainSshFailure(denied), denied);
 });

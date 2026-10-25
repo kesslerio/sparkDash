@@ -1,14 +1,36 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
+import { isValidTimeZone, listTimeZones } from "../shared/timeZone";
 import { fetchSettings, updateSettings } from "../api/client";
+import { clearToken, getToken, onTokenChange, requestTokenPrompt } from "../api/authToken";
 import type { Settings } from "../api/types";
-import { Toggle } from "./SessionSourceFields";
 import { useModalPresence } from "../hooks/useModalPresence";
+import { useOverlayClose } from "../hooks/useOverlayClose";
 import packageJson from "../../package.json";
+import { XIcon } from "./ui/icons";
+import { SettingRow, ToggleRow } from "./SettingRows";
+import { AlertsDialog } from "./AlertsDialog";
+import { BrowserAlertsSettings } from "./BrowserAlertsSettings";
+import { FleetGpuClock, type FleetGpuClockApi } from "./FleetGpuClock";
+import { LanguageSelector } from "./LanguageSelector";
+import "../styles/dialogs.css";
 
 interface SettingsDialogProps {
   open: boolean;
   onClose: () => void;
   onSaved: (settings: Settings) => void;
+  onOpenHarness?: () => void;
+}
+
+/** Whether a broker URL carries a user name or password before the host (mqtt://user:pass@host). */
+function mqttUrlHasCredentials(value: string): boolean {
+  const v = value.trim();
+  try {
+    const url = new URL(v);
+    return Boolean(url.username || url.password);
+  } catch {
+    return /^[a-z]+:\/\/[^/]*@/i.test(v);
+  }
 }
 
 function useEscape(onClose: () => void) {
@@ -21,29 +43,107 @@ function useEscape(onClose: () => void) {
   }, [onClose]);
 }
 
-const POLL_PRESETS = [
-  { label: "1s", value: 1000 },
-  { label: "2s", value: 2000 },
-  { label: "5s", value: 5000 },
-  { label: "10s", value: 10000 },
+type ThemeId = "white" | "light" | "dark" | "oled";
+
+const THEME_STORAGE_KEY = "sparkdash-theme";
+
+/** Real swatches: background, text and accent mirror each theme's tokens. */
+const THEME_CHOICES: Array<{ id: ThemeId; bg: string; fg: string; accent: string }> = [
+  { id: "white", bg: "#ffffff", fg: "#14181e", accent: "#e8a21c" },
+  { id: "light", bg: "#eaedf1", fg: "#12161c", accent: "#e8a21c" },
+  { id: "dark", bg: "#12151a", fg: "#e9ecf0", accent: "#f0b03a" },
+  { id: "oled", bg: "#000000", fg: "#e9ecf0", accent: "#f0b03a" },
 ];
 
-export function SettingsDialog({ open, onClose, onSaved }: SettingsDialogProps) {
+function readTheme(): ThemeId {
+  try {
+    const attr = document.documentElement.getAttribute("data-theme");
+    const stored = attr || localStorage.getItem(THEME_STORAGE_KEY);
+    if (THEME_CHOICES.some((t) => t.id === stored)) return stored as ThemeId;
+  } catch {
+    /* storage can throw in private windows */
+  }
+  return "dark";
+}
+
+/** Apply a theme the same way ThemeSwitch does, then tell it to resync. */
+function applyTheme(theme: ThemeId) {
+  document.documentElement.setAttribute("data-theme", theme);
+  try {
+    localStorage.setItem(THEME_STORAGE_KEY, theme);
+  } catch {
+    /* ignore */
+  }
+  window.dispatchEvent(new CustomEvent("sparkdash:set-theme", { detail: theme }));
+}
+
+const POLL_PRESETS = [
+  { value: 1000 },
+  { value: 2000 },
+  { value: 5000 },
+  { value: 10000 },
+];
+
+const AGE_PRESETS = [
+  { label: "1h", value: 60 * 60 * 1000 },
+  { label: "6h", value: 6 * 60 * 60 * 1000 },
+  { label: "12h", value: 12 * 60 * 60 * 1000 },
+  { label: "24h", value: 24 * 60 * 60 * 1000 },
+  { label: "3d", value: 3 * 24 * 60 * 60 * 1000 },
+  { label: "7d", value: 7 * 24 * 60 * 60 * 1000 },
+  { label: "14d", value: 14 * 24 * 60 * 60 * 1000 },
+];
+
+export function SettingsDialog({ open, onClose, onSaved, onOpenHarness }: SettingsDialogProps) {
+  const { t } = useTranslation("settings");
+  const themeLabel = (themeId: ThemeId) => {
+    switch (themeId) {
+      case "white": return t("appearance.white");
+      case "light": return t("appearance.light");
+      case "dark": return t("appearance.dark");
+      case "oled": return t("appearance.oled");
+    }
+  };
+  const pollLabel = (value: number) => {
+    switch (value) {
+      case 1000: return t("refresh.oneSecond");
+      case 2000: return t("refresh.twoSeconds");
+      case 5000: return t("refresh.fiveSeconds");
+      case 10000: return t("refresh.tenSeconds");
+      default: return "";
+    }
+  };
   const [settings, setSettings] = useState<Settings | null>(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [invalidTimeZone, setInvalidTimeZone] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
+  // The GPU clock row applies through Save, so a pick there is unsaved work too.
+  const fleetClock = useRef<FleetGpuClockApi | null>(null);
+  const [fleetClockPending, setFleetClockPending] = useState(false);
+  const [theme, setTheme] = useState<ThemeId>(readTheme);
+  const [tokenSet, setTokenSet] = useState(() => getToken() !== "");
+  const [showAlerts, setShowAlerts] = useState(false);
 
-  useEscape(onClose);
+  // While the Alerts dialog is open on top, Escape belongs to it alone.
+  const closeOnEscape = useCallback(() => {
+    if (!showAlerts) onClose();
+  }, [showAlerts, onClose]);
+  useEscape(closeOnEscape);
+
+  useEffect(() => onTokenChange((token) => setTokenSet(token !== "")), []);
 
   useEffect(() => {
     if (!open) {
+      setShowAlerts(false);
       setSettings(null);
       setError(null);
+      setInvalidTimeZone(null);
       setDirty(false);
       return;
     }
+    setTheme(readTheme());
     let cancelled = false;
     setLoading(true);
     fetchSettings()
@@ -62,17 +162,57 @@ export function SettingsDialog({ open, onClose, onSaved }: SettingsDialogProps) 
   }, [open]);
 
   const { mounted, visible } = useModalPresence(open);
+  const overlayClose = useOverlayClose(onClose);
+
+  const timeZones = useMemo(() => listTimeZones(), []);
+  const [tzTouched, setTzTouched] = useState(false);
+  const [tzFocused, setTzFocused] = useState(false);
+  const tzInput = useRef<HTMLInputElement | null>(null);
+  const browserTimeZone = useMemo(() => Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC", []);
+
+  // Say a zone is unknown only once the field has been left (not while "Eur" is half typed).
+  const tzInvalid = tzTouched && !tzFocused && Boolean(settings?.timeZone) && !isValidTimeZone(settings?.timeZone);
 
   const update = (patch: Partial<Settings>) => {
     setSettings((prev) => (prev ? { ...prev, ...patch } : prev));
     setDirty(true);
   };
 
+  // The Alerts dialog saves its switch itself; mirror it here without marking
+  // Settings dirty, so a later Save does not undo it.
+  const handleAlertsSettings = (saved: Settings) => {
+    setSettings((prev) => (prev ? { ...prev, alertsEnabled: saved.alertsEnabled } : prev));
+    onSaved(saved);
+  };
+
   const handleSave = async () => {
     if (!settings) return;
+    if (settings.timeZone && !isValidTimeZone(settings.timeZone)) {
+      // The server would silently fall back to the browser's zone; say so instead.
+      setError(null);
+      setInvalidTimeZone(settings.timeZone);
+      return;
+    }
+    if (settings.mqttUrl && !/^(mqtt|ws)s?:\/\//i.test(settings.mqttUrl.trim())) {
+      // The server would silently clear it; say so instead.
+      setError(`"${settings.mqttUrl}" is not a broker URL — use mqtt://host:1883 (or mqtts://, ws://, wss://), or clear the field.`);
+      return;
+    }
+    if (settings.mqttUrl && mqttUrlHasCredentials(settings.mqttUrl)) {
+      // settings.json is world-readable, so the server refuses (and clears) such a URL.
+      setError("Remove the user name and password from the broker URL: put the user name in MQTT username and the password in the SPARKDASH_MQTT_PASSWORD environment variable.");
+      return;
+    }
     setSaving(true);
     setError(null);
+    setInvalidTimeZone(null);
     try {
+      // Hardware first: Save is the only thing that changes a clock, and a unit
+      // that refuses it must not leave the settings half-saved behind.
+      if (fleetClockPending && !(await fleetClock.current?.apply())) return;
+      // The settings write remains unsaved work even when only the GPU changed.
+      // Keep it retryable if it fails after the hardware choice has been cleared.
+      setDirty(true);
       const result = await updateSettings(settings);
       setSettings(result);
       setDirty(false);
@@ -87,374 +227,461 @@ export function SettingsDialog({ open, onClose, onSaved }: SettingsDialogProps) 
 
   if (!mounted) return null;
 
+  const pickTheme = (next: ThemeId) => {
+    setTheme(next);
+    applyTheme(next);
+  };
+
   return (
     <div
-      className={`settings-overlay fixed inset-0 z-50 flex justify-center bg-black/55 p-0 sm:p-4${
-        visible ? " is-open" : ""
-      }`}
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
+      className={`settings-overlay${visible ? " is-open" : ""}`}
+      {...overlayClose}
     >
-      <div className="settings-panel w-full max-w-md">
-        <h2 className="shrink-0 px-6 pt-6 text-sm font-semibold text-text-strong">Settings</h2>
+      <div className="settings-panel" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+        <div className="modal-sheet__header">
+          <h2 className="modal-sheet__title" id="settings-title">
+            {t("dialog.title")}
+          </h2>
+          <button type="button" className="modal-sheet__close" onClick={onClose} aria-label={t("dialog.close")}>
+            <XIcon className="h-4 w-4" />
+          </button>
+        </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 py-4">
-        {loading && <p className="text-xs text-muted">Loading…</p>}
+        <div className="modal-sheet__body">
+          {loading && <p className="bench-sheet__hint">{t("dialog.loading")}</p>}
 
-        {settings && !loading && (
-          <div className="space-y-4">
-            <div>
-              <label className="mb-2 block text-xs text-muted">Poll interval</label>
-              <div className="flex gap-2">
-                {POLL_PRESETS.map((preset) => (
+          <LanguageSelector />
+
+          <SettingRow
+            title={t("appearance.title")}
+            help={t("appearance.help")}
+          >
+            <div className="swatches" role="radiogroup" aria-label={t("appearance.theme")}>
+              {THEME_CHOICES.map((t) => (
+                <button
+                  key={t.id}
+                  type="button"
+                  role="radio"
+                  aria-checked={theme === t.id}
+                  className={`sw sw--${t.id}${theme === t.id ? " is-on" : ""}`}
+                  onClick={() => pickTheme(t.id)}
+                >
+                  <i className="sw__dot" aria-hidden />
+                  {themeLabel(t.id)}
+                </button>
+              ))}
+            </div>
+          </SettingRow>
+
+          {settings && !loading && (
+            <>
+              <SettingRow title={t("refresh.title")} help={t("refresh.help")}>
+                <div className="seg" role="radiogroup" aria-label={t("refresh.interval")}>
+                  {POLL_PRESETS.map((preset) => (
+                    <button
+                      key={preset.value}
+                      type="button"
+                      role="radio"
+                      aria-checked={settings.pollIntervalMs === preset.value}
+                      className={settings.pollIntervalMs === preset.value ? "is-on" : ""}
+                      onClick={() => update({ pollIntervalMs: preset.value })}
+                    >
+                      {pollLabel(preset.value)}
+                    </button>
+                  ))}
+                </div>
+              </SettingRow>
+
+              <SettingRow title="Session age" help="Hide harness sessions older than this. The oldest choice is 14 days. There is no unlimited value.">
+                <div className="seg" role="radiogroup" aria-label="Session age">
+                  {AGE_PRESETS.map((preset) => (
+                    <button
+                      key={preset.value}
+                      type="button"
+                      role="radio"
+                      aria-checked={(settings.occupancyMaxAgeMs ?? AGE_PRESETS[2].value) === preset.value}
+                      className={(settings.occupancyMaxAgeMs ?? AGE_PRESETS[2].value) === preset.value ? "is-on" : ""}
+                      onClick={() => update({ occupancyMaxAgeMs: preset.value })}
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
+                </div>
+              </SettingRow>
+
+              <SettingRow title="Harness sessions" help="One helper on each machine lists OpenClaw, OpenCode, oh-my-pi, Hermes and DeepSeek Harness. The dashboard only stores the helper address and token.">
+                <button type="button" className="btn btn--sm" onClick={() => onOpenHarness?.()}>
+                  Set up
+                </button>
+              </SettingRow>
+
+              <SettingRow title={t("temperature.title")}>
+                <div className="seg" role="radiogroup" aria-label={t("temperature.aria")}>
                   <button
-                    key={preset.value}
                     type="button"
-                    onClick={() => update({ pollIntervalMs: preset.value })}
-                    className={`rounded px-3 py-1.5 text-xs font-medium transition-colors ${
-                      settings.pollIntervalMs === preset.value
-                        ? "bg-accent text-white"
-                        : "border border-border bg-surface-elevated text-muted hover:bg-surface-hover"
-                    }`}
+                    role="radio"
+                    aria-checked={settings.temperatureUnit === "celsius"}
+                    className={settings.temperatureUnit === "celsius" ? "is-on" : ""}
+                    onClick={() => update({ temperatureUnit: "celsius" })}
                   >
-                    {preset.label}
+                    °C
                   </button>
-                ))}
-              </div>
-            </div>
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={settings.temperatureUnit === "fahrenheit"}
+                    className={settings.temperatureUnit === "fahrenheit" ? "is-on" : ""}
+                    onClick={() => update({ temperatureUnit: "fahrenheit" })}
+                  >
+                    °F
+                  </button>
+                </div>
+              </SettingRow>
 
-            <div>
-              <label className="mb-1 block text-xs text-muted">Default LLM port</label>
-              <input
-                type="number"
-                min={1}
-                max={65535}
-                value={settings.defaultLlmPort}
-                onChange={(e) => {
-                  const val = parseInt(e.target.value, 10);
-                  if (!isNaN(val)) update({ defaultLlmPort: val });
-                }}
-                className="w-full rounded border border-border bg-surface-elevated px-3 py-1.5 text-xs text-text outline-none focus:border-accent"
+              <SettingRow
+                title={t("timeZone.title")}
+                help={t("timeZone.help", { timeZone: browserTimeZone })}
+                htmlFor="settings-time-zone"
+                stack
+              >
+                <div className="set-tz">
+                  <input
+                    id="settings-time-zone"
+                    type="text"
+                    list="settings-time-zones"
+                    value={settings.timeZone ?? ""}
+                    placeholder={t("timeZone.placeholder")}
+                    title={t("timeZone.inputTitle", { timeZone: browserTimeZone })}
+                    spellCheck={false}
+                    autoComplete="off"
+                    aria-invalid={tzInvalid}
+                    aria-describedby="settings-time-zone-msg"
+                    ref={tzInput}
+                    onChange={(e) => update({ timeZone: e.target.value })}
+                    onFocus={() => setTzFocused(true)}
+                    onBlur={() => {
+                      setTzFocused(false);
+                      setTzTouched(true);
+                    }}
+                    className="field-input"
+                  />
+                  <datalist id="settings-time-zones">
+                    {timeZones.map((zone) => (
+                      <option key={zone} value={zone} />
+                    ))}
+                  </datalist>
+                  <button
+                    type="button"
+                    className="btn btn--sm btn--ghost"
+                    disabled={!settings.timeZone}
+                    onClick={() => {
+                      update({ timeZone: "" });
+                      setTzTouched(false);
+                      tzInput.current?.focus(); // the button disables itself: keep keyboard focus somewhere sensible
+                    }}
+                  >
+                    {t("timeZone.useBrowser")}
+                  </button>
+                </div>
+                {/* One reserved line: the message appears after the field is left, and never moves anything. */}
+                <small id="settings-time-zone-msg" className="set-tz__msg" role="status" aria-live="polite">
+                  {tzInvalid ? t("timeZone.unknown") : ""}
+                </small>
+              </SettingRow>
+
+              <SettingRow
+                title={t("defaultLlmPort.title")}
+                help={t("defaultLlmPort.help")}
+                htmlFor="settings-default-llm-port"
+              >
+                <input
+                  id="settings-default-llm-port"
+                  type="number"
+                  min={1}
+                  max={65535}
+                  value={settings.defaultLlmPort}
+                  onChange={(e) => {
+                    const val = parseInt(e.target.value, 10);
+                    if (!isNaN(val)) update({ defaultLlmPort: val });
+                  }}
+                  className="field-input field-input--port"
+                />
+              </SettingRow>
+
+              <ToggleRow
+                title={t("toggles.hideOffline.title")}
+                help={t("toggles.hideOffline.help")}
+                checked={settings.autoHideOffline}
+                onChange={(v) => update({ autoHideOffline: v })}
               />
-              <p className="mt-1 text-[10px] text-muted">
-                Pre-filled when adding a new Spark (1–65535)
-              </p>
-            </div>
-
-            <div>
-              <label className="flex items-center gap-3 text-xs text-muted">
-                <Toggle
-                  on={settings.autoHideOffline}
-                  onClick={() => update({ autoHideOffline: !settings.autoHideOffline })}
+              <ToggleRow
+                title={t("toggles.hideWorkers.title")}
+                help={t("toggles.hideWorkers.help")}
+                checked={Boolean(settings.hideWorkers)}
+                onChange={(v) => update({ hideWorkers: v })}
+              />
+              <ToggleRow
+                title={t("toggles.overviewSearch.title")}
+                help={t("toggles.overviewSearch.help")}
+                checked={Boolean(settings.showOverviewSearch)}
+                onChange={(v) => update({ showOverviewSearch: v })}
+              />
+              <ToggleRow
+                title={t("toggles.benchShareImage.title")}
+                help={t("toggles.benchShareImage.help")}
+                checked={Boolean(settings.benchShareImage)}
+                onChange={(v) => update({ benchShareImage: v })}
+              />
+              <ToggleRow
+                title={t("toggles.vramBreakdown.title")}
+                help={t("toggles.vramBreakdown.help")}
+                checked={settings.showVramBreakdown ?? true}
+                onChange={(v) => update({ showVramBreakdown: v })}
+              />
+              <ToggleRow
+                title={t("toggles.prometheus.title")}
+                help={t("toggles.prometheus.help", { origin: window.location.origin })}
+                checked={Boolean(settings.prometheusExport)}
+                onChange={(v) => update({ prometheusExport: v })}
+              />
+              <ToggleRow
+                title={t("toggles.intelVramSudo.title")}
+                help={t("toggles.intelVramSudo.help")}
+                checked={Boolean(settings.intelVramSudo)}
+                onChange={(v) => update({ intelVramSudo: v })}
+              />
+              <ToggleRow
+                title={t("toggles.metricsHistory.title")}
+                help={t("toggles.metricsHistory.help")}
+                checked={Boolean(settings.metricsHistory)}
+                onChange={(v) => update({ metricsHistory: v })}
+              />
+              <ToggleRow
+                title="MQTT publishing"
+                help="Publishes the activity feed events and every unit's readings to your MQTT broker (Home Assistant, Node-RED, …) as they change. Off by default. The README's MQTT section lists the topics."
+                checked={Boolean(settings.mqttEnabled)}
+                onChange={(v) => update({ mqttEnabled: v })}
+              />
+              <SettingRow
+                title="MQTT broker URL"
+                help="mqtt://host:1883, mqtts:// for TLS, ws(s):// for a websocket broker. The password is read from the SPARKDASH_MQTT_PASSWORD environment variable, never stored in settings.json."
+                htmlFor="settings-mqtt-url"
+              >
+                <input
+                  id="settings-mqtt-url"
+                  type="text"
+                  value={settings.mqttUrl ?? ""}
+                  placeholder="mqtt://homeassistant.local:1883"
+                  spellCheck={false}
+                  autoComplete="off"
+                  onChange={(e) => update({ mqttUrl: e.target.value })}
+                  className="field-input"
                 />
-                Auto-hide offline Sparks on Overview
-              </label>
-            </div>
-
-            {/* Hide worker nodes */}
-            <div>
-              <label className="flex items-start gap-3 text-xs text-muted">
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={Boolean(settings.hideWorkers)}
-                  onClick={() => update({ hideWorkers: !settings.hideWorkers })}
-                  className={`toggle-track relative mt-0.5 inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
-                    settings.hideWorkers ? "is-on" : ""
-                  }`}
-                >
-                  <span
-                    className={`toggle-dot inline-block h-4 w-4 transform rounded-full shadow transition-transform ${
-                      settings.hideWorkers ? "translate-x-4" : "translate-x-0"
-                    }`}
-                  />
-                </button>
-                <span>
-                  <span className="block text-text">Hide worker nodes</span>
-                  <span className="mt-0.5 block text-[10px] leading-snug text-muted">
-                    Removes Worker-role Sparks from Overview and the tab bar. Direct
-                    URLs and batch power / Hermes actions still include them.
-                  </span>
-                </span>
-              </label>
-            </div>
-
-            {/* Overview search + status */}
-            <div>
-              <label className="flex items-start gap-3 text-xs text-muted">
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={Boolean(settings.showOverviewSearch)}
-                  onClick={() =>
-                    update({ showOverviewSearch: !settings.showOverviewSearch })
-                  }
-                  className={`toggle-track relative mt-0.5 inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
-                    settings.showOverviewSearch ? "is-on" : ""
-                  }`}
-                >
-                  <span
-                    className={`toggle-dot inline-block h-4 w-4 transform rounded-full shadow transition-transform ${
-                      settings.showOverviewSearch ? "translate-x-4" : "translate-x-0"
-                    }`}
-                  />
-                </button>
-                <span>
-                  <span className="block text-text">Show search and status filters</span>
-                  <span className="mt-0.5 block text-[10px] leading-snug text-muted">
-                    Overview “Search up to 12 units” field and status dropdown
-                    (All / Online / Offline / Issues). One switch for both. Off by default.
-                  </span>
-                </span>
-              </label>
-            </div>
-
-            {/* Benchmark share image */}
-            <div>
-              <label className="flex items-start gap-3 text-xs text-muted">
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={Boolean(settings.benchShareImage)}
-                  onClick={() => update({ benchShareImage: !settings.benchShareImage })}
-                  className={`toggle-track relative mt-0.5 inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
-                    settings.benchShareImage ? "is-on" : ""
-                  }`}
-                >
-                  <span
-                    className={`toggle-dot inline-block h-4 w-4 transform rounded-full shadow transition-transform ${
-                      settings.benchShareImage ? "translate-x-4" : "translate-x-0"
-                    }`}
-                  />
-                </button>
-                <span>
-                  <span className="block text-text">Benchmark share image</span>
-                  <span className="mt-0.5 block text-[10px] leading-snug text-muted">
-                    On by default. The decode/prefill <em>Copy results</em> button gains a caret with
-                    <em> Copy as text</em> / <em>Copy as image</em> (a share card). Turn it off to keep
-                    the plain text button.
-                  </span>
-                </span>
-              </label>
-            </div>
-
-            {/* Fleet Energy */}
-            <div>
-              <label className="flex items-start gap-3 text-xs text-muted">
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={Boolean(settings.showFleetEnergy)}
-                  onClick={() => update({ showFleetEnergy: !settings.showFleetEnergy })}
-                  className={`toggle-track relative mt-0.5 inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
-                    settings.showFleetEnergy ? "is-on" : ""
-                  }`}
-                >
-                  <span
-                    className={`toggle-dot inline-block h-4 w-4 transform rounded-full shadow transition-transform ${
-                      settings.showFleetEnergy ? "translate-x-4" : "translate-x-0"
-                    }`}
-                  />
-                </button>
-                <span>
-                  <span className="block text-text">Show Fleet Energy</span>
-                  <span className="mt-0.5 block text-[10px] leading-snug text-muted">
-                    Overview card with rolling fleet power estimates. Off by default.
-                  </span>
-                </span>
-              </label>
-            </div>
-
-            {/* LLM Token Totals */}
-            <div>
-              <label className="flex items-start gap-3 text-xs text-muted">
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={Boolean(settings.showLlmTokenTotals)}
-                  onClick={() => update({ showLlmTokenTotals: !settings.showLlmTokenTotals })}
-                  className={`toggle-track relative mt-0.5 inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
-                    settings.showLlmTokenTotals ? "is-on" : ""
-                  }`}
-                >
-                  <span
-                    className={`toggle-dot inline-block h-4 w-4 transform rounded-full shadow transition-transform ${
-                      settings.showLlmTokenTotals ? "translate-x-4" : "translate-x-0"
-                    }`}
-                  />
-                </button>
-                <span>
-                  <span className="block text-text">Show LLM Token Totals</span>
-                  <span className="mt-0.5 block text-[10px] leading-snug text-muted">
-                    Overview card with cumulative prompt/generated tokens per model. Off by default.
-                  </span>
-                </span>
-              </label>
-            </div>
-
-            {/* Fleet exceptions */}
-            <div>
-              <label className="flex items-start gap-3 text-xs text-muted">
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={Boolean(settings.showFleetExceptions)}
-                  onClick={() =>
-                    update({ showFleetExceptions: !settings.showFleetExceptions })
-                  }
-                  className={`toggle-track relative mt-0.5 inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
-                    settings.showFleetExceptions ? "is-on" : ""
-                  }`}
-                >
-                  <span
-                    className={`toggle-dot inline-block h-4 w-4 transform rounded-full shadow transition-transform ${
-                      settings.showFleetExceptions ? "translate-x-4" : "translate-x-0"
-                    }`}
-                  />
-                </button>
-                <span>
-                  <span className="block text-text">Show active fleet exceptions</span>
-                  <span className="mt-0.5 block text-[10px] leading-snug text-muted">
-                    Overview strip for offline hosts, GPU throttle, disk, LLM, and
-                    Tailnet alerts. Off by default.
-                  </span>
-                </span>
-              </label>
-            </div>
-
-            {/* Benchmark debug traces */}
-            <div>
-              <label className="flex items-start gap-3 text-xs text-muted">
-                <Toggle
-                  on={Boolean(settings.benchDebugTraces)}
-                  onClick={() =>
-                    update({ benchDebugTraces: !settings.benchDebugTraces })
-                  }
+              </SettingRow>
+              <SettingRow
+                title="MQTT username"
+                help="Leave empty for a broker that allows anonymous publish."
+                htmlFor="settings-mqtt-username"
+              >
+                <input
+                  id="settings-mqtt-username"
+                  type="text"
+                  value={settings.mqttUsername ?? ""}
+                  placeholder="empty"
+                  spellCheck={false}
+                  autoComplete="off"
+                  onChange={(e) => update({ mqttUsername: e.target.value })}
+                  className="field-input"
                 />
-                <span>
-                  <span className="block text-text">Enable debug traces for Benchmark runs</span>
-                  <span className="mt-0.5 block text-[10px] leading-snug text-muted">
-                    Stores prompts, HTTP/completion IDs, content previews, and GPU
-                    samples in bench history. Off by default — larger history files.
-                  </span>
-                </span>
-              </label>
-            </div>
-
-            <div>
-              <label className="text-xs text-muted">Temperature unit</label>
-              <div className="mt-1.5 flex gap-2">
-                <button
-                  type="button"
-                  onClick={() => update({ temperatureUnit: "celsius" })}
-                  className={`rounded px-3 py-1.5 text-xs font-medium transition-colors ${
-                    settings.temperatureUnit === "celsius"
-                      ? "bg-accent text-white"
-                      : "border border-border bg-surface-elevated text-muted hover:bg-surface-hover"
-                  }`}
-                >
-                  °C
-                </button>
-                <button
-                  type="button"
-                  onClick={() => update({ temperatureUnit: "fahrenheit" })}
-                  className={`rounded px-3 py-1.5 text-xs font-medium transition-colors ${
-                    settings.temperatureUnit === "fahrenheit"
-                      ? "bg-accent text-white"
-                      : "border border-border bg-surface-elevated text-muted hover:bg-surface-hover"
-                  }`}
-                >
-                  °F
-                </button>
-              </div>
-            </div>
-
-            <div>
-              <label className="flex items-start gap-3 text-xs text-muted">
-                <Toggle
-                  on={settings.density === "compact"}
-                  onClick={() =>
-                    update({
-                      density: settings.density === "compact" ? "comfortable" : "compact",
-                    })
-                  }
+              </SettingRow>
+              <SettingRow
+                title="MQTT topic prefix"
+                help="Topic root for everything published: PREFIX/events, PREFIX/status/… and PREFIX/metrics/…"
+                htmlFor="settings-mqtt-prefix"
+              >
+                <input
+                  id="settings-mqtt-prefix"
+                  type="text"
+                  value={settings.mqttTopicPrefix ?? ""}
+                  placeholder="sparkdash"
+                  spellCheck={false}
+                  autoComplete="off"
+                  onChange={(e) => update({ mqttTopicPrefix: e.target.value })}
+                  className="field-input"
                 />
-                <span>
-                  <span className="block text-text">Compact UI</span>
-                  <span className="mt-0.5 block text-[10px] leading-snug text-muted">
-                    Tighter spacing, smaller radius, and reduced font size — fits more Sparks on a single screen.
+              </SettingRow>
+              <ToggleRow
+                title={t("toggles.fleetEnergy.title")}
+                help={t("toggles.fleetEnergy.help")}
+                checked={Boolean(settings.showFleetEnergy)}
+                onChange={(v) => update({ showFleetEnergy: v })}
+              />
+              <SettingRow
+                title={t("electricityPrice.title")}
+                help={t("electricityPrice.help")}
+                htmlFor="settings-energy-price"
+              >
+                <div className="set-price">
+                  <input
+                    id="settings-energy-currency"
+                    type="text"
+                    aria-label={t("electricityPrice.currency")}
+                    maxLength={4}
+                    value={settings.energyCurrency ?? "$"}
+                    onChange={(e) => update({ energyCurrency: e.target.value })}
+                    className="field-input field-input--currency"
+                  />
+                  <input
+                    id="settings-energy-price"
+                    type="number"
+                    min={0}
+                    max={100}
+                    step="0.01"
+                    inputMode="decimal"
+                    placeholder="0.15"
+                    value={settings.energyPricePerKwh ?? ""}
+                    onChange={(e) => {
+                      const raw = e.target.value;
+                      if (raw === "") return update({ energyPricePerKwh: null });
+                      const val = parseFloat(raw);
+                      if (!isNaN(val)) update({ energyPricePerKwh: val });
+                    }}
+                    className="field-input field-input--price"
+                  />
+                </div>
+              </SettingRow>
+              <ToggleRow
+                title={t("toggles.llmTokenTotals.title")}
+                help={t("toggles.llmTokenTotals.help")}
+                checked={Boolean(settings.showLlmTokenTotals)}
+                onChange={(v) => update({ showLlmTokenTotals: v })}
+              />
+              <ToggleRow
+                title={t("toggles.recentActivity.title")}
+                help={t("toggles.recentActivity.help")}
+                checked={settings.showActivityFeed ?? true}
+                onChange={(v) => update({ showActivityFeed: v })}
+              />
+              <ToggleRow
+                title={t("toggles.fleetDecode.title")}
+                help={t("toggles.fleetDecode.help")}
+                checked={settings.showKpiDecode ?? true}
+                onChange={(v) => update({ showKpiDecode: v })}
+              />
+              <ToggleRow
+                title={t("toggles.fleetPower.title")}
+                help={t("toggles.fleetPower.help")}
+                checked={settings.showKpiPower ?? true}
+                onChange={(v) => update({ showKpiPower: v })}
+              />
+              <ToggleRow
+                title={t("toggles.memoryInUse.title")}
+                help={t("toggles.memoryInUse.help")}
+                checked={settings.showKpiMemory ?? true}
+                onChange={(v) => update({ showKpiMemory: v })}
+              />
+              <ToggleRow
+                title={t("toggles.tokens24Hours.title")}
+                help={t("toggles.tokens24Hours.help")}
+                checked={settings.showKpiTokens ?? true}
+                onChange={(v) => update({ showKpiTokens: v })}
+              />
+              <ToggleRow
+                title={t("toggles.fleetExceptions.title")}
+                help={t("toggles.fleetExceptions.help")}
+                checked={Boolean(settings.showFleetExceptions)}
+                onChange={(v) => update({ showFleetExceptions: v })}
+              />
+              <SettingRow
+                title={t("alertNotifications.title")}
+                help={t("alertNotifications.help")}
+              >
+                <div className="set-token">
+                  <span className={`set-token__state${settings.alertsEnabled ? " is-set" : ""}`} data-testid="alerts-state">
+                    <i aria-hidden />
+                    {settings.alertsEnabled ? t("alertNotifications.on") : t("alertNotifications.off")}
                   </span>
-                </span>
-              </label>
-            </div>
+                  <button type="button" className="btn btn--sm" onClick={() => setShowAlerts(true)}>
+                    {t("alertNotifications.configure")}
+                  </button>
+                </div>
+              </SettingRow>
+              <BrowserAlertsSettings />
+              <ToggleRow
+                title={t("toggles.benchDebugTraces.title")}
+                help={t("toggles.benchDebugTraces.help")}
+                checked={Boolean(settings.benchDebugTraces)}
+                onChange={(v) => update({ benchDebugTraces: v })}
+              />
+            </>
+          )}
 
-            <div>
-              <label className="block text-xs text-text">Harness session age limit</label>
-              <span className="mt-0.5 block text-[10px] leading-snug text-muted">
-                Hide harness sessions older than this many hours. 0 shows all.
+          {/* Outside the settings block: a fleet GPU action needs no saved settings. */}
+          <SettingRow
+            title="GPU clock cap"
+            help="Caps the GPU graphics clock on every Spark at once (nvidia-smi -lgc): pick the state they should be in — Full capacity or 1800–2400 MHz — and Save applies it. Offline or GPU-less units are skipped and reported."
+            stack
+          >
+            <FleetGpuClock apiRef={fleetClock} onPendingChange={setFleetClockPending} />
+          </SettingRow>
+
+          {/* Outside the settings block: a rejected token is exactly when settings fail to load. */}
+          <SettingRow
+            title={t("accessToken.title")}
+            help={t("accessToken.help")}
+          >
+            <div className="set-token">
+              <span className={`set-token__state${tokenSet ? " is-set" : ""}`} data-testid="access-token-state">
+                <i aria-hidden />
+                {tokenSet ? t("accessToken.set") : t("accessToken.notSet")}
               </span>
-              <input
-                type="number"
-                min={0}
-                max={168}
-                value={settings.occupancyMaxAgeHours}
-                onChange={(e) => update({ occupancyMaxAgeHours: Number(e.target.value) || 0 })}
-                className="mt-1 w-20 rounded border border-border bg-surface-elevated px-2 py-1 text-xs text-text outline-none focus:border-accent"
-              />
-              <span className="ml-1 text-[10px] text-muted">hours</span>
+              <button type="button" className="btn btn--sm" onClick={() => requestTokenPrompt()}>
+                {tokenSet ? t("accessToken.change") : t("accessToken.add")}
+              </button>
+              {tokenSet ? (
+                <button type="button" className="btn btn--sm btn--ghost" onClick={() => clearToken()}>
+                  {t("accessToken.clear")}
+                </button>
+              ) : null}
             </div>
-          </div>
-        )}
+          </SettingRow>
 
-        {/* Links */}
-        <div className="mt-5 flex flex-wrap items-center gap-3 border-t border-border pt-3">
-          <span className="text-[10px] text-muted">sparkDash v{packageJson.version}</span>
-          <span className="text-border-strong text-[10px]">·</span>
-          <a
-            href="https://x.com/MiaAI_lab"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-[10px] text-muted hover:text-accent transition-colors"
-          >
-            𝕏 @MiaAI_lab
-          </a>
-          <span className="text-border-strong text-[10px]">·</span>
-          <a
-            href="https://github.com/MiaAI-Lab"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-[10px] text-muted hover:text-accent transition-colors"
-          >
-            GitHub MiaAI-Lab
-          </a>
-        </div>
+          <div className="settings-links">
+            <span>{t("about.version", { version: packageJson.version })}</span>
+            <span aria-hidden>·</span>
+            <a href="https://mia-ai.net/" target="_blank" rel="noopener noreferrer">
+              mia-ai.net
+            </a>
+            <span aria-hidden>·</span>
+            <a href="https://x.com/MiaAI_lab" target="_blank" rel="noopener noreferrer">
+              𝕏 @MiaAI_lab
+            </a>
+            <span aria-hidden>·</span>
+            <a href="https://github.com/MiaAI-Lab" target="_blank" rel="noopener noreferrer">
+              {t("about.github")}
+            </a>
+          </div>
         </div>
 
-        {error && (
-          <div className="shrink-0 px-6 pt-1 text-xs">
-            <div className="rounded bg-danger/20 px-3 py-2 text-danger">{error}</div>
-          </div>
-        )}
+        {(invalidTimeZone || error) && <div className="modal-sheet__error">{invalidTimeZone ? t("errors.invalidTimeZone", { timeZone: invalidTimeZone }) : error}</div>}
 
-        <div className="flex shrink-0 justify-end gap-2 border-t border-border bg-inherit px-6 py-4 pb-[max(1rem,env(safe-area-inset-bottom))]">
-          <button
-            type="button"
-            onClick={onClose}
-            className="min-h-11 rounded border border-border bg-surface-elevated px-3 py-1.5 text-xs text-muted hover:bg-surface-hover"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            onClick={() => void handleSave()}
-            disabled={saving || !settings || !dirty}
-            className="min-h-11 rounded bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent-hover disabled:opacity-50"
-          >
-            {saving ? "Saving..." : "Save"}
-          </button>
+        <div className="modal-sheet__footer">
+          <div className="modal-sheet__footer-actions">
+            <button type="button" onClick={onClose} className="btn btn--ghost">
+              {t("dialog.cancel")}
+            </button>
+            <button
+              type="button"
+              onClick={handleSave}
+              disabled={saving || !settings || !(dirty || fleetClockPending)}
+              className="btn btn--primary"
+            >
+              {saving ? t("dialog.saving") : t("dialog.save")}
+            </button>
+          </div>
         </div>
       </div>
+      <AlertsDialog open={showAlerts} onClose={() => setShowAlerts(false)} onSettingsSaved={handleAlertsSettings} />
     </div>
   );
 }

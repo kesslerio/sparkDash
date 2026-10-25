@@ -3,11 +3,24 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      platforms:
-        - linux/arm64
+      # Nothing is pinned here on purpose: Docker detects the build platform
+      # from the host, so the same file builds the usual arm64 image on a Spark
+      # and a native amd64 image on an x86 box — no QEMU emulation, and none of
+      # "The requested image's platform (linux/arm64) does not match the
+      # detected host platform (linux/amd64/v3)" on `up`.
+      # Cross target a single architecture with DOCKER_DEFAULT_PLATFORM (it also
+      # sets the container platform below, so `up` stays warning-free), and
+      # build every supported architecture into one manifest list with
+      #   docker compose -f docker-compose.yml -f docker-compose.multiarch.yml build
       args:
-        # Frontend metrics-history retention (hours). Rebuild after changing.
+        # Frontend metrics-history retention (hours). Baked in when the frontend is
+        # built: for host builds set VITE_HISTORY_HOURS in the shell that runs
+        # `npm run build`; this arg only matters if you build the image itself.
         VITE_HISTORY_HOURS: ${VITE_HISTORY_HOURS:-8}
+    # Runs on the platform its image was built for: empty by default, so the
+    # container follows the host platform the build detected. DOCKER_DEFAULT_PLATFORM
+    # pins build and run together when cross-building.
+    platform: ${DOCKER_DEFAULT_PLATFORM:-}
     container_name: sparkDash
     # always: come back after host reboot even if the container was stopped
     # before shutdown (unlike unless-stopped, which stays down after a manual stop).
@@ -27,6 +40,12 @@ services:
       - ./server:/app/server
       # Prompt catalog imported by DecodeBench / Showcase (not under ./server)
       - ./src/shared:/app/src/shared:ro
+      - ./src/components/ShowcasePage/showcasePrompts.ts:/app/src/components/ShowcasePage/showcasePrompts.ts:ro
+      # Built frontend, served straight from the host. Rebuild it on the host
+      # (`npm run build`, or `npm run build:watch` to do it on every save) and just
+      # refresh the browser; the container and image are not touched.
+      # The directory must exist before `docker compose up` (run `npm run build` once).
+      - ./dist:/app/dist:ro
       # Mount host filesystem for local Spark metrics
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
@@ -48,6 +67,8 @@ services:
       - BIND_HOST=${BIND_HOST:-127.0.0.1}
       - SPARKDASH_TOKEN=${SPARKDASH_TOKEN:-}
       - SPARKDASH_ALLOW_OPEN_REMOTE=${SPARKDASH_ALLOW_OPEN_REMOTE:-1}
+      - SPARKDASH_ALLOWED_HOSTS=${SPARKDASH_ALLOWED_HOSTS:-}
+      - SPARKDASH_MQTT_PASSWORD=${SPARKDASH_MQTT_PASSWORD:-}
       - PORT=5555
       - LLM_PORT=8888
       - NODE_ENV=production
@@ -55,4 +76,5 @@ services:
       - HOST_SYS_PATH=/host/sys
       - HOST_ROOT_PATH=/host/root
       - SSH_CONTROL_PERSIST_SECONDS=${SSH_CONTROL_PERSIST_SECONDS:-60}
+      - MAX_ACTIVE_BENCH_JOBS=${MAX_ACTIVE_BENCH_JOBS:-2}
       - SSH_IDENTITY_FILE=${SSH_IDENTITY_FILE:-}

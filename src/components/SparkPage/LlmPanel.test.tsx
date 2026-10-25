@@ -100,9 +100,9 @@ describe("LlmPanel layout", () => {
     await renderPanel();
 
     expect(screen.getByRole("heading", { level: 3, name: DEEPSEEK_MODEL_ID })).toBeInTheDocument();
-    expect(screen.getByText("Generation tok/s")).toBeInTheDocument();
+    expect(screen.getByText("Decode", { selector: "span.eyebrow" })).toBeInTheDocument();
     expect(screen.getByText("60.3")).toBeInTheDocument();
-    expect(screen.getByText("Prefill tok/s")).toBeInTheDocument();
+    expect(screen.getByText("Prefill", { selector: "span.eyebrow" })).toBeInTheDocument();
     expect(screen.getByText("Last observation just now")).toBeInTheDocument();
     const trend = screen.getByRole("img", {
       name: /Generation and prefill tokens per second over the last 30 minutes/,
@@ -110,7 +110,7 @@ describe("LlmPanel layout", () => {
     const drawn = trend.querySelector("polyline")?.getAttribute("points")?.trim().split(/\s+/) ?? [];
     expect(drawn.length).toBeGreaterThan(2);
     expect(
-      await screen.findByRole("img", { name: /Daily peak decode and prefill tokens per second/ }),
+      await screen.findByRole("group", { name: /Daily peak decode and prefill tokens per second/ }),
     ).toBeInTheDocument();
     expect(await screen.findByText("Total tokens by model")).toBeInTheDocument();
     expect(
@@ -181,16 +181,16 @@ describe("LlmPanel layout", () => {
       screen.getByText("Telemetry source did not answer in the last 15 minutes."),
     ).toBeInTheDocument();
     // Folded: no live rates and no fake zero, but the history is one click away.
-    expect(screen.queryByText("Generation tok/s")).toBeNull();
+    expect(screen.queryByText("Decode", { selector: "span.eyebrow" })).toBeNull();
     expect(screen.queryByText("0.0")).toBeNull();
     expect(
-      screen.queryByRole("img", { name: /Daily peak decode and prefill tokens per second/ }),
+      screen.queryByRole("group", { name: /Daily peak decode and prefill tokens per second/ }),
     ).toBeNull();
 
     await userEvent.click(screen.getByRole("button", { name: "Expand LLM details" }));
 
     expect(
-      await screen.findByRole("img", { name: /Daily peak decode and prefill tokens per second/ }),
+      await screen.findByRole("group", { name: /Daily peak decode and prefill tokens per second/ }),
     ).toBeInTheDocument();
     expect(await screen.findByText("Total tokens by model")).toBeInTheDocument();
   });
@@ -200,14 +200,14 @@ describe("LlmPanel layout", () => {
     await renderPanel({ llm: makeDeepSeekIdle(NOW) });
 
     expect(screen.getByRole("button", { name: "Expand LLM details" })).toBeInTheDocument();
-    expect(screen.queryByText("Generation tok/s")).toBeNull();
+    expect(screen.queryByText("Decode", { selector: "span.eyebrow" })).toBeNull();
   });
 
   it("keeps an active LLM expanded and offers to fold it", async () => {
     mockApi();
     await renderPanel({ llm: makeDeepSeekActive(NOW) });
 
-    expect(screen.getByText("Generation tok/s")).toBeInTheDocument();
+    expect(screen.getByText("Decode", { selector: "span.eyebrow" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Collapse LLM details" })).toBeInTheDocument();
   });
 
@@ -259,19 +259,23 @@ describe("LlmPanel layout", () => {
 
     await user.click(screen.getByRole("button", { name: "Cancel" }));
     expect(screen.getByRole("heading", { level: 3, name: DEEPSEEK_MODEL_ID })).toBeInTheDocument();
-    expect(screen.getByText("Generation tok/s")).toBeInTheDocument();
+    expect(screen.getByText("Decode", { selector: "span.eyebrow" })).toBeInTheDocument();
   });
 
-  it("opens and closes the benchmark dialog without starting a run", async () => {
+  it("navigates to the dedicated Decode bench page instead of opening a dialog, and starts no run", async () => {
+    // Local benches now open their own full page (dispatched via a navigate event) rather
+    // than an inline dialog; the dialog stays reserved for remote targets.
     const calls = mockApi();
     const user = userEvent.setup();
     await renderPanel();
+    const navigateSpy = vi.fn();
+    window.addEventListener("sparkdash:navigate", navigateSpy);
 
-    await user.click(screen.getByRole("button", { name: "Run decode benchmark" }));
-    const dialog = screen.getByRole("dialog");
-    expect(dialog).toBeInTheDocument();
-    await user.click(within(dialog).getAllByRole("button", { name: "Close" })[0]);
-    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    await user.click(screen.getByRole("button", { name: "Decode" }));
+
+    expect(navigateSpy).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("dialog")).toBeNull();
     expect(calls.filter((call) => call.method !== "GET")).toEqual([]);
+    window.removeEventListener("sparkdash:navigate", navigateSpy);
   });
 });

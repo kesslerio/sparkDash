@@ -116,11 +116,12 @@ describe("overview card for a Mac node", () => {
 
   it("renders an unsupported metric as unavailable instead of zero", () => {
     const { container } = render(<OverviewPage sparks={[withAgent(makeMacSpark())]} />);
-    const text = container.textContent ?? "";
+    const text = container.querySelector(".ov-sc")?.textContent ?? "";
     expect(text).toContain("unavailable");
-    expect(text).not.toContain("0W");
+    expect(text).not.toMatch(/\b0 ?W\b/);
+    expect(text).not.toContain("0°C");
     // The unified-memory bar is a real reading, so it keeps its numbers.
-    expect(text).toContain("128 GB");
+    expect(text).toMatch(/128(\.0)? GB/);
   });
 
   it("carries the node's own reason into the tooltip", () => {
@@ -173,7 +174,7 @@ describe("existing DGX behaviour is untouched", () => {
   it("still reports GPU power as draw over limit", () => {
     const { container } = render(<OverviewPage sparks={[makeSpark("spark-1", true)]} />);
     const text = container.textContent ?? "";
-    expect(text).toContain("50W / 100W");
+    expect(text).toContain("50 / 100 W");
     expect(text).not.toContain("unavailable");
     const badge = container.querySelector('[data-testid="platform-badge"]')?.textContent;
     expect(badge).toBe("DGX");
