@@ -233,12 +233,20 @@ function RequestsRow({
   ];
   return (
     <div
-      className="flex items-center gap-2 whitespace-nowrap"
+      className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1"
       title={capacity != null && running != null ? `${capacity} requests decode in parallel on this engine` : undefined}
     >
       <span className="text-muted">Requests</span>
       {running != null ? <RequestPips running={running} waiting={waiting ?? 0} extent={extent} /> : null}
-      <span className="font-tabular text-text">{parts.join(" · ")}</span>
+      {/* Each part stays whole; the list wraps between parts on a narrow card. */}
+      <span className="font-tabular text-text">
+        {parts.map((part, i) => (
+          <span key={part} className="whitespace-nowrap">
+            {i > 0 ? " · " : ""}
+            {part}
+          </span>
+        ))}
+      </span>
     </div>
   );
 }

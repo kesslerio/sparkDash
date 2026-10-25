@@ -360,7 +360,15 @@ function SparkCardImpl({
                   color={cpuTempColor}
                 />
               ) : null}
-              {cpuPower ? <Bar label="CPU power" caption={`${cpuPower.draw} / ${cpuPower.tdp} W`} pct={cpuPowerPct} color="var(--color-violet)" /> : null}
+              {cpuPower ? (
+                // No TDP (a Mac) means no limit to fill against: show the draw alone, not "/ 0 W".
+                <Bar
+                  label="CPU power"
+                  caption={cpuPower.tdp > 0 ? `${cpuPower.draw} / ${cpuPower.tdp} W` : `${cpuPower.draw} W`}
+                  pct={cpuPowerPct}
+                  color="var(--color-violet)"
+                />
+              ) : null}
             </div>
           </div>
           {showLauncher ? <ModelLauncher spark={spark} onOpen={onSelect} busy={loadingHint} busyHolders={gpuHolders.length > 0} freeMb={memTotal > 0 ? memAvail : null} lowFreeMb={HEADROOM_THRESHOLDS_MB[memoryModelFor(spark.kind)].low} /> : null}

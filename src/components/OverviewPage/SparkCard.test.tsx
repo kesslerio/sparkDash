@@ -151,3 +151,13 @@ describe("SparkCard effective prefill rate", () => {
     expect(container.textContent).not.toContain("effective (incl. cached tokens)");
   });
 });
+
+describe("SparkCard CPU power without a TDP", () => {
+  it("shows the draw alone instead of a 0 W limit", () => {
+    const spark = makeSpark("mac");
+    Object.assign(spark.metrics.cpu!, { draw: 8.1, tdp: 0 });
+    const { container } = render(<SparkCard spark={spark} temperatureUnit="celsius" />);
+    expect(container.textContent).toContain("CPU power8.1 W");
+    expect(container.textContent).not.toContain("/ 0 W");
+  });
+});
