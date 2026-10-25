@@ -49,6 +49,32 @@ function omlxProbe(getStatus, models = MODELS) {
   return { probe, requested };
 }
 
+test("an explicit empty loaded list never promotes the configured default model", async () => {
+  let sample = status({ active_requests: 0, waiting_requests: 0 });
+  const { probe } = omlxProbe(() => sample);
+  await probe._detectServerType();
+  assert.equal((await probe.probe()).modelId, MODELS.data[0].id);
+
+  sample = status({ loaded_models: [], active_requests: 0, waiting_requests: 0 });
+  const empty = await probe.probe();
+  assert.equal(empty.modelId, null);
+  assert.equal(empty.benchmarkModel, null);
+  assert.equal(empty.statusReason, "no_active_model");
+  assert.notEqual(empty.status, "idle");
+  assert.deepEqual(empty.models, MODELS.data.map((m) => m.id));
+  assert.equal(empty.generationTps, null);
+
+  sample = status({ active_requests: 0, waiting_requests: 0 });
+  const loaded = await probe.probe();
+  assert.equal(loaded.modelId, MODELS.data[0].id);
+  assert.equal(loaded.status, "idle");
+});
+
+test("a loaded id outside the catalog does not fall back to an unloaded default", () => {
+  const rows = LlmProbe._omlxLoadedModels(MODELS.data, status({ loaded_models: ["other-model"] }));
+  assert.ok(rows.every((row) => row.status === "unloaded"));
+});
+
 test("owned_by omlx is classified as the omlx backend", async () => {
   const { probe } = omlxProbe(() => status());
   await probe._detectServerType();

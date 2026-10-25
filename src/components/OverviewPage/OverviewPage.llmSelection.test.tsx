@@ -37,6 +37,18 @@ function sparkWithLlms(llm: SparkSnapshot["metrics"]["llm"]): SparkSnapshot {
 }
 
 describe("overview card LLM selection", () => {
+  it("shows the idle serving model instead of an unloaded catalog on a lower port", () => {
+    const { container } = render(
+      <OverviewPage sparks={[sparkWithLlms([
+        llmEntry({ backend: "omlx", modelId: null, models: ["GLM-5.3-Flash"],
+          status: "unavailable", statusReason: "no_active_model", available: false }),
+        llmEntry({ backend: "vllm", modelId: "DeepSeek-V4.1-Flash", status: "idle" }),
+      ])]} />
+    );
+    expect(container.textContent).toContain("DeepSeek-V4.1-Flash");
+    expect(container.textContent).not.toContain("GLM-5.3-Flash");
+  });
+
   it("shows the active engine even when an idle one sits on a lower port", () => {
     const { container } = render(
       <OverviewPage
