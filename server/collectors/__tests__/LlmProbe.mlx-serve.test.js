@@ -68,3 +68,16 @@ test("mlx-serve: a server restart (counters drop) reads 0, not negative", async 
   const snap = await poll({ prompt: 0, gen: 0, prefillDone: 0, prefillLive: 100, genLive: 0, running: 1 });
   assert.ok(snap.prefillTps >= 0 && snap.generationTps >= 0);
 });
+
+test("an mlx-serve endpoint that also answers Ollama's /api/tags is read as vLLM, not Ollama", async () => {
+  // qc-model-switch fronts mlx-serve and answers /api/tags for Ollama clients;
+  // the explicit owned_by must win, or the engine shows as Ollama with no rates.
+  const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 8010);
+  probe._fetch = async (url) => {
+    if (String(url).endsWith("/api/tags")) {
+      return { ok: true, status: 200, json: async () => ({ models: [{ name: "DeepSeek-V4.1-Flash-iQ3-3.0bpw:latest" }] }) };
+    }
+    return { ok: false, status: 404, json: async () => ({}), text: async () => "" };
+  };
+  assert.equal(await probe._classifyOpenAIBackend("mlx-serve"), "vllm");
+});

@@ -967,6 +967,9 @@ export class LlmProbe {
     // Locals (Generated-Computers/Locals) reports owned_by: "locals" and also answers Ollama's /api/tags,
     // so it has to be recognised before the Ollama probe claims it.
     if (typeof ownedBy === "string" && /^locals$/i.test(ownedBy)) return "locals";
+    // mlx-serve (often behind a model switch that also answers Ollama's /api/tags)
+    // exports vLLM counters plus its own live series: read it as vLLM.
+    if (typeof ownedBy === "string" && /^mlx-serve$/i.test(ownedBy)) return "vllm";
     // Ollama second: its native /api/tags contract is unique among engines.
     if (await this._probeIsOllama()) return "ollama";
     if (flareCard) return "flare";

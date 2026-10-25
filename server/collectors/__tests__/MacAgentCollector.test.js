@@ -114,6 +114,18 @@ test("powermetrics refusal shows as a declared gap, not a zero", async () => {
   assert.match(gap.reason, /root/);
 });
 
+test("unified memory is a measured reading even when powermetrics is refused", async () => {
+  // The base collector's default marks every GPU field unavailable (no GPU
+  // found); the Overview card renders those as "—", which hid a Mac's memory.
+  const { collector } = collectorWith("ok");
+  const gpu = await collector.collectGpu();
+  assert.equal(gpu.metricAvailability.vramUsed, true);
+  assert.equal(gpu.metricAvailability.vramTotal, true);
+  assert.equal(gpu.metricAvailability.usage, false, "busy % needs powermetrics");
+  assert.equal(gpu.metricAvailability.powerDraw, false);
+  assert.equal(gpu.metricAvailability.powerLimit, false, "a Mac has no GPU power limit");
+});
+
 test("network: interface, ip, reachability probes, and counter-delta speeds", async () => {
   const { collector } = collectorWith("ok");
   const first = await collector.collectNetwork();

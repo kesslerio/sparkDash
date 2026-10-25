@@ -190,6 +190,23 @@ export function parsePowermetrics(text) {
   };
 }
 
+/**
+ * What a Mac GPU reading actually measured. The base collector's default marks
+ * every field unavailable (no GPU found), which the UI renders as "—"; a Mac
+ * always measures unified memory, and GPU busy/power only through powermetrics.
+ * A Mac has no GPU power limit.
+ */
+export function macGpuAvailability({ powermetrics, temperature }) {
+  return {
+    temperature: temperature != null,
+    usage: Boolean(powermetrics),
+    powerDraw: Boolean(powermetrics),
+    powerLimit: false,
+    vramUsed: true,
+    vramTotal: true,
+  };
+}
+
 export class MacSystemCollector extends SystemCollector {
   /**
    * @param {object} spark
@@ -271,6 +288,7 @@ export class MacSystemCollector extends SystemCollector {
           power: { draw: 0, limit: 0, systemDraw: 0 },
           vram: { used: mem.used, total: mem.total, percentage: mem.percentage, available: mem.available },
           powermetricsAvailable: false,
+          metricAvailability: macGpuAvailability({ powermetrics: false, temperature: null }),
         };
       }
       const thermal = power.thermalPressure && power.thermalPressure !== "Nominal";
@@ -284,6 +302,7 @@ export class MacSystemCollector extends SystemCollector {
         throttle: this._buildThrottle({ swThermal: thermal, smClockMHz: power.gpuFreqMHz }),
         thermalPressure: power.thermalPressure,
         powermetricsAvailable: true,
+        metricAvailability: macGpuAvailability({ powermetrics: true, temperature: null }),
       };
     } catch (err) {
       console.error(`[MacSystemCollector] GPU error for ${this.spark.id}:`, err.message);
