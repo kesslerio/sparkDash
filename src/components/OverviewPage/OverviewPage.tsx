@@ -10,6 +10,7 @@ import { FleetTokenTotals } from "./FleetTokenTotals";
 import { ActivityIcon, PowerOffIcon, PowerOnIcon, RotateIcon } from "../ui/icons";
 import { PlatformBadge, gapFor, honestValue } from "../ui/platform";
 import { RuntimeChips } from "../ui/RuntimeChips";
+import { OverviewLlmFooter } from "./OverviewLlmFooter";
 
 /** Short backend names for the Overview LLM stat; unknown backends show their raw id. */
 const OVERVIEW_BACKEND_LABELS: Record<string, string> = {
@@ -64,10 +65,6 @@ function overviewLlm(llmArr: SparkSnapshot["metrics"]["llm"]) {
     llmArr.find((llm) => llm.modelId) ||
     llmArr[0]
   );
-}
-
-function formatLlmRate(rate: number | null | undefined): string {
-  return rate == null || !Number.isFinite(rate) ? "—" : rate.toFixed(0);
 }
 
 /**
@@ -439,20 +436,12 @@ function SparkCard({
             const llm = overviewLlm(llmArr);
             if (!llm) return null;
             return (
-              <div className="mt-3.5 grid grid-cols-2 gap-2 border-t border-border pt-3">
-                <div className="text-center">
-                  <span className="font-tabular text-[28px] font-bold leading-none text-text-strong">
-                    {formatLlmRate(llm.generationTps)}
-                  </span>
-                  <span className="text-sm font-normal text-muted"> tok/s</span>
-                </div>
-                <div className="border-l border-border text-center">
-                  <span className="font-tabular text-[28px] font-bold leading-none text-text-strong">
-                    {formatLlmRate(llm.prefillTps)}
-                  </span>
-                  <span className="text-sm font-normal text-muted"> prefill</span>
-                </div>
-              </div>
+              <OverviewLlmFooter
+                sparkId={spark.id}
+                // The server keeps metrics.llm in llmPorts order.
+                port={spark.llmPorts?.[llmArr.indexOf(llm)] ?? null}
+                llm={llm}
+              />
             );
           })()}
 
