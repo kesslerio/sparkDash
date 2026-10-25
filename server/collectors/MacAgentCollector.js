@@ -15,7 +15,7 @@
  * absence is itself reported, never hidden.
  */
 
-import { MacSystemCollector } from "./MacSystemCollector.js";
+import { MacSystemCollector, macGpuAvailability } from "./MacSystemCollector.js";
 import { llmProbeHost } from "./llmHost.js";
 
 export const MAC_AGENT_DEFAULT_PORT = 8790;
@@ -222,6 +222,10 @@ export class MacAgentCollector extends MacSystemCollector {
       thermalPressure: snapshot.thermal?.pressureState ?? gpu.thermalPressure ?? null,
       thermal: snapshot.thermal ?? null,
       powermetricsAvailable: read,
+      metricAvailability: macGpuAvailability({
+        powermetrics: read,
+        temperature: finiteTemperature(gpu.temperature) ? gpu.temperature : null,
+      }),
       unavailable: this._agentEntries(snapshot),
     };
   }

@@ -15,6 +15,7 @@ import {
   parseVmStat,
   splitSections,
   unifiedMemoryFromVmStat,
+  macGpuAvailability,
 } from "../MacSystemCollector.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -233,4 +234,13 @@ test("mac snapshot keeps its output when the trailing route guard exits nonzero"
   assert.equal(calls.length, 1);
   assert.equal(calls[0].options.allowNonZeroExit, true);
   assert.match(data.df, /System\/Volumes\/Data/);
+});
+
+test("Mac GPU availability: memory always, busy and power only with powermetrics", () => {
+  assert.deepEqual(macGpuAvailability({ powermetrics: true, temperature: null }), {
+    temperature: false, usage: true, powerDraw: true, powerLimit: false, vramUsed: true, vramTotal: true,
+  });
+  assert.deepEqual(macGpuAvailability({ powermetrics: false, temperature: 61 }), {
+    temperature: true, usage: false, powerDraw: false, powerLimit: false, vramUsed: true, vramTotal: true,
+  });
 });
