@@ -103,7 +103,8 @@ test("moving the agent endpoint rebuilds the collector", async () => {
 test("the runtimes domain carries detected runtimes and declared gaps into the snapshot", async () => {
   const monitor = new SparkMonitor(unit({ agent: { port: 8790 } }));
   // Non-agent units never poll the domain; an agent unit does.
-  monitor._running = true; // the poll loop's liveness gate, without opening SSH
+  monitor._running = true; // the poll loop's gate, without opening SSH
+  monitor.online = true; // bypass the SSH-liveness pause; this test never probes liveness
   monitor.collector.collectRuntimes = async () => ({
     runtimes: [
       { name: "tensorfold", label: "TensorFold", role: "server", pid: 2302, port: 8300, model: "qwen3.8-27b", state: "serving", detectedBy: "inventory" },

@@ -6,28 +6,21 @@
 import { useEffect, useState } from "react";
 import { fetchLlmTokenTotals } from "../../api/llmTokenClient";
 import { formatTokensCompact } from "../../shared/tokenFormat";
+import { formatSince } from "../../shared/formatSince";
 import type { LlmTokenRange, LlmTokenSeriesTotals } from "../../api/llmTokenTypes";
+import { LEDGER_HINT, LEDGER_TITLE } from "./tokenTotalsCopy";
 
 const POLL_MS = 60_000;
 
 const RANGE_OPTIONS: Array<{ value: LlmTokenRange; label: string }> = [
   { value: "all", label: "All time" },
-  { value: "today", label: "Today" },
+  { value: "today", label: "Last 24 hours" },
+  { value: "6h", label: "Last 6 hours" },
+  { value: "1h", label: "Last 1 hour" },
   { value: "7d", label: "Last 7 days" },
   { value: "14d", label: "Last 14 days" },
   { value: "30d", label: "Last month" },
 ];
-
-function age(ms: number | null): string | null {
-  if (ms == null || ms <= 0) return null;
-  const s = Math.max(0, Math.floor((Date.now() - ms) / 1000));
-  if (s < 90) return `${s}s`;
-  const m = Math.floor(s / 60);
-  if (m < 90) return `${m}m`;
-  const h = Math.floor(m / 60);
-  if (h < 48) return `${h}h`;
-  return `${Math.floor(h / 24)}d`;
-}
 
 /** Column widths shared by the header and every row so they cannot drift. */
 const COL = {
@@ -112,18 +105,18 @@ export function LlmTokenTotals({ sparkId, llmPort }: { sparkId: string; llmPort:
   if (rows.length === 0 && range === "all") return null;
 
   return (
-    <div className="border-t border-border pt-3 space-y-1.5">
-      <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
-        <span className="text-[10px] uppercase tracking-wide text-muted">
-          Total tokens by model
+    <div className="sp-section">
+      <div className="sp-section__head">
+        <span className="min-w-0" title={LEDGER_TITLE}>
+          <span className="eyebrow block">Total tokens by model</span>
+          <span className="sp-muted block">{LEDGER_HINT}</span>
         </span>
         <div className="flex flex-wrap items-center justify-end gap-2">
           <select
             value={range}
             onChange={(e) => setRange(e.target.value as LlmTokenRange)}
             aria-label="Token totals time range"
-            className="rounded border border-border bg-surface-elevated text-text"
-            style={{ height: "20px", padding: "0 4px", fontSize: "9px", width: "auto" }}
+            className="sp-select"
           >
             {RANGE_OPTIONS.map((opt) => (
               <option key={opt.value} value={opt.value}>
@@ -131,8 +124,8 @@ export function LlmTokenTotals({ sparkId, llmPort }: { sparkId: string; llmPort:
               </option>
             ))}
           </select>
-          <span className="shrink-0 whitespace-nowrap text-[10px] text-muted">
-            <span className="inline-block w-12 text-right">Cached</span>
+          <span className="sp-tok-cols">
+            <span className="inline-block w-14 text-right">Cached</span>
 
             <span className="inline-block w-12 text-right">Prefill</span>
 
@@ -142,12 +135,12 @@ export function LlmTokenTotals({ sparkId, llmPort }: { sparkId: string; llmPort:
           </span>
         </div>
       </div>
-      <div className="space-y-1">
+      <div className="sp-tok-rows">
         {rows.length === 0 ? (
-          <p className="text-[11px] text-muted">No tokens recorded in this period.</p>
+          <p className="sp-muted">No tokens recorded in this period.</p>
         ) : (
           rows.map((row) => {
-          const seen = age(row.lastSeenAt);
+          const seen = formatSince(row.lastSeenAt);
           const prefillTokens = row.promptTokens - row.cachedTokens;
           const totalTokens = row.promptTokens + row.completionTokens;
           return (

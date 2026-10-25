@@ -1,13 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
 import boltSvg from "../../../assets/bolt.svg?raw";
-import type { DecodeBenchJob, PrefillBenchJob } from "../../api/types";
+import type { DecodeBenchJob, PrefillBenchJob, QualityBenchJob } from "../../api/types";
 import {
   BOLT_POINTS,
   SHARE_CARD_MIN_HEIGHT,
   SHARE_CARD_WIDTH,
   buildDecodeShareCard,
   buildPrefillShareCard,
+  buildQualityShareCard,
+  buildToolEvalCompareShareCard,
+  buildToolEvalShareCard,
+  detectShareCardTheme,
   paintShareCard,
+  shareCardBarFractions,
   shareCardDate,
   shareCardFileName,
   shareCardHeight,
@@ -17,6 +22,8 @@ import {
   type ShareCardModel,
 } from "./benchShareCard";
 import { copyCardImage, copyTextOnly, renderShareCardPng } from "./shareImage";
+import { backendLabel } from "../../shared/llmBackends.js";
+import { normalizeToolResult } from "../bench/tooleval/normalize";
 
 /** Minimal decode result factory — only the fields the card reads. */
 function decodeResult(over: Partial<DecodeBenchJob["results"][number]> = {}) {
@@ -120,6 +127,7 @@ function fakeContext(
     closePath: () => {
       if (current.length) current = [...current, current[0]];
     },
+    arc: vi.fn(),
     moveTo: (x: number, y: number) => {
       current = [[x, y]];
     },
@@ -153,7 +161,7 @@ describe("share card model", () => {
     expect(card.host).toBe("spark-38bd");
     expect(card.subtitle).toBe("Port 8888 · DeepSeek-v4.1-Flash-EXL3");
     expect(card.status).toEqual({ label: "COMPLETED", tone: "ok" });
-    expect(card.meta).toBe("Prose · 400 tok · 1, 2 conc · 27.8 s");
+    expect(card.meta).toBe("Prose · 400 tok · temp 0 · thinking off · 1, 2 conc · 27.8 s");
     expect(card.columns).toEqual({ load: "Load", primary: "Aggregate", secondary: "Stream" });
     expect(card.rows).toHaveLength(1);
     expect(card.rows[0]).toMatchObject({
@@ -196,11 +204,89 @@ describe("share card model", () => {
     });
   });
 
+  it("prefill card states the real method and flags failed, partial and low-confidence rows", () => {
+    const base = prefillJob().results[0];
+    const job = prefillJob({
+      results: [
+        { ...base, targetTokens: 1024, prefillTps: 0, error: "The whole prompt was served from the prefix cache" },
+        { ...base, targetTokens: 32768, samples: 1, samplesRequested: 3, lowConfidence: true },
+      ],
+    });
+    const card = buildPrefillShareCard(job, { llmPort: 8888, modelId: "m" });
+    expect(card.legend).toMatch(/server prompt timing/);
+    expect(card.legend).not.toMatch(/prompt tokens ÷ time to first token/);
+    expect(card.rows[0]).toMatchObject({ detail: "The whole prompt was served from the prefix cache", tone: "bad", primary: "—" });
+    expect(card.rows[1].detail).toContain("1/3 samples, low confidence");
+    expect(card.rows[1].tone).toBe("warn");
+  });
+
+  it("quality card scores against answered items and drops the delta for incomparable runs", () => {
+    const mk = (scoring: number, passed: number, errors: number, pct: number) =>
+      ({
+        status: "completed",
+        durationMs: 1,
+        config: { label: "", suiteVersion: 1, scoringVersion: scoring },
+        results: {
+          overallPct: pct,
+          skippedLongSizes: [],
+          items: [],
+          categories: { qa: { passed, total: 10, scored: 10 - errors, errors, pct, meanCompletionTokens: 1, hitMaxTokens: 0 } },
+        },
+      }) as unknown as QualityBenchJob;
+    const a = mk(2, 4, 2, 50);
+    const same = buildQualityShareCard(a, mk(2, 5, 0, 50), { llmPort: 1, modelId: null });
+    expect(same.rows[0].detail).toBe("4/8 items · 2 errors");
+    const diff = buildQualityShareCard(a, mk(1, 5, 0, 40), { llmPort: 1, modelId: null });
+    expect(diff.rows[0].secondary).toBe("");
+    expect(diff.columns.secondary).toBe("");
+  });
+
   it("falls back to the port alone when the model is unknown, and to the remote host when used", () => {
     expect(shareCardSubtitle({ llmPort: 8888, modelId: null })).toBe("Port 8888");
     expect(shareCardSubtitle({ llmPort: 8888, modelId: "m", remoteHost: "spark.tailnet.ts.net" })).toBe(
       "spark.tailnet.ts.net · m"
     );
+  });
+
+  it("carries the engine and exposure chips the panel shows", () => {
+    const card = buildDecodeShareCard(
+      decodeJob(),
+      {
+        llmPort: 8888,
+        modelId: "GLM-5.3-Flash-EXL3",
+        engine: "tensorfold",
+        posture: { label: "Open · Local", level: "ok" },
+      },
+      Date.UTC(2026, 8, 17)
+    );
+    expect(card.chips).toEqual([
+      { label: "TensorFold", tone: "accent" },
+      { label: "Open · Local", tone: "ok" },
+    ]);
+
+    // Absent probe data leaves the row empty rather than inventing a chip.
+    const bare = buildDecodeShareCard(decodeJob(), { llmPort: 8888, modelId: null });
+    expect(bare.chips).toEqual([]);
+
+    // A warned/dangerous posture keeps its level's colour.
+    const warned = buildDecodeShareCard(decodeJob(), {
+      llmPort: 8888,
+      modelId: null,
+      engine: "vllm",
+      posture: { label: "Open · Public", level: "danger" },
+    });
+    expect(warned.chips).toEqual([
+      { label: "vLLM", tone: "accent" },
+      { label: "Open · Public", tone: "bad" },
+    ]);
+  });
+
+  it("labels backends the same way the LLM panel does", () => {
+    expect(backendLabel("tensorfold")).toBe("TensorFold");
+    expect(backendLabel("sglang")).toBe("SGLang");
+    expect(backendLabel("exl3")).toBe("EXL3");
+    expect(backendLabel("something-new")).toBe("something-new");
+    expect(backendLabel(null)).toBeNull();
   });
 
   it("labels every job status", () => {
@@ -238,12 +324,20 @@ describe("share card painter", () => {
   it("draws the header, one line per row, the legend and the footer", () => {
     const card = buildDecodeShareCard(
       decodeJob({ results: [decodeResult({ concurrency: 1 }), decodeResult({ concurrency: 2 })] }),
-      { llmPort: 8888, modelId: "DeepSeek-v4.1-Flash-EXL3", sparkName: "spark-38bd" }
+      {
+        llmPort: 8888,
+        modelId: "DeepSeek-v4.1-Flash-EXL3",
+        sparkName: "spark-38bd",
+        engine: "tensorfold",
+        posture: { label: "Open · Local", level: "ok" },
+      }
     );
     const ctx = fakeContext();
     paintShareCard(ctx, card);
 
-    expect(ctx.texts).toContain("sparkDash");
+    // Two-tone wordmark, as in the sidebar logo.
+    expect(ctx.texts).toContain("spark");
+    expect(ctx.texts).toContain("Dash");
     expect(ctx.texts).toContain("spark-38bd");
     expect(ctx.texts).toContain("Decode benchmark");
     expect(ctx.texts).toContain("Port 8888 · DeepSeek-v4.1-Flash-EXL3");
@@ -255,15 +349,18 @@ describe("share card painter", () => {
     expect(ctx.texts).toContain("×2");
     expect(ctx.texts.filter((t) => t === "tok/s")).toHaveLength(4); // two rows × agg + stream
     expect(ctx.texts).toContain(card.legend);
+    // Chips are painted, not just carried in the model.
+    expect(ctx.texts).toContain("TensorFold");
+    expect(ctx.texts).toContain("Open · Local");
     expect(ctx.texts).toContain("github.com/MiaAI-Lab/sparkDash");
     // Background covers the whole card.
     expect(ctx.fillRects[0]).toEqual([0, 0, SHARE_CARD_WIDTH, shareCardHeight(card)]);
   });
 
-  it("strokes the repo's brand mark next to the wordmark", () => {
+  it("draws the brand tile with the bolt outlined in the on-accent colour", () => {
     const ctx = fakeContext();
     paintShareCard(ctx, buildDecodeShareCard(decodeJob(), { llmPort: 8888, modelId: null }));
-    const bolt = ctx.strokes.find((s) => s.color.startsWith("#e8a830"));
+    const bolt = ctx.strokes.find((s) => s.color.startsWith("#1c1404"));
     expect(bolt).toBeDefined();
     // Start point, the five interior vertices, and the closing repeat.
     expect(bolt!.points).toHaveLength(BOLT_POINTS.length + 1);
@@ -289,6 +386,76 @@ describe("share card painter", () => {
     const ctx = fakeContext(30); // wide glyphs so everything overflows
     paintShareCard(ctx, card);
     expect(ctx.texts.some((t) => t.endsWith("…"))).toBe(true);
+  });
+});
+
+describe("share card themes", () => {
+  const card = () => buildDecodeShareCard(decodeJob(), { llmPort: 8888, modelId: "m" });
+
+  /** Every colour the painter assigns, in order. */
+  function fillColors(theme: "dark" | "light" | "white") {
+    const colors: string[] = [];
+    const ctx = fakeContext();
+    let fill = "";
+    Object.defineProperty(ctx, "fillStyle", {
+      get: () => fill,
+      set: (v) => {
+        fill = String(v);
+        colors.push(fill);
+      },
+    });
+    paintShareCard(ctx, card(), theme);
+    return colors;
+  }
+
+  it("paints the dark card with the app's dark tokens and the light card with its light tokens", () => {
+    const dark = fillColors("dark");
+    const light = fillColors("light");
+    expect(dark[0]).toBe("#0a0c0f"); // page background
+    expect(dark).toContain("#12151a"); // panel
+    expect(light[0]).toBe("#dce0e7");
+    expect(light).toContain("#ffffff"); // panel
+    expect(light).not.toContain("#0a0c0f");
+    expect(dark).not.toContain("#dce0e7");
+  });
+
+  it("paints the White theme's card on its own lighter page colour, not the Light theme's", () => {
+    const white = fillColors("white");
+    expect(white[0]).toBe("#f3f4f6");
+    expect(white).toContain("#ffffff");
+    expect(white).not.toContain("#dce0e7");
+  });
+
+  it("uses the darker amber for numbers on the light card so they stay readable", () => {
+    expect(fillColors("light")).toContain("#8c5a00");
+    expect(fillColors("dark")).toContain("#f4b942");
+  });
+
+  it("defaults to the dark card", () => {
+    const ctx = fakeContext();
+    paintShareCard(ctx, card());
+    expect(ctx.fillRects[0]).toEqual([0, 0, SHARE_CARD_WIDTH, shareCardHeight(card())]);
+  });
+
+  it("follows the active app theme: Dark and OLED are dark, Light is light, White is its own near-white card, unknown is dark", () => {
+    const set = (t: string | null) =>
+      t === null ? document.documentElement.removeAttribute("data-theme") : document.documentElement.setAttribute("data-theme", t);
+    try {
+      for (const [theme, expected] of [["dark", "dark"], ["oled", "dark"], ["light", "light"], ["white", "white"], ["weird", "dark"], [null, "dark"]] as const) {
+        set(theme);
+        expect(detectShareCardTheme()).toBe(expected);
+      }
+    } finally {
+      set("dark");
+    }
+  });
+
+  it("sizes the bars under the rows relative to the largest headline number, or omits them", () => {
+    const row = (primary: string) => ({ load: "×1", detail: "", primary, secondary: "1", primaryUnit: "tok/s", secondaryUnit: "tok/s", tone: "ok" as const });
+    expect(shareCardBarFractions([row("50.0"), row("25.0"), row("12.5")])).toEqual([1, 0.5, 0.25]);
+    expect(shareCardBarFractions([row("1,200"), row("600")])).toEqual([1, 0.5]);
+    expect(shareCardBarFractions([row("50"), row("—")])).toBeNull();
+    expect(shareCardBarFractions([])).toBeNull();
   });
 });
 
@@ -364,5 +531,231 @@ describe("copy formats", () => {
     });
     expect(outcome).toBe("failed");
     expect(download).not.toHaveBeenCalled();
+  });
+});
+
+describe("quality share card", () => {
+  const qJob = (overrides = {}) =>
+    ({
+      benchId: "b",
+      status: "completed",
+      durationMs: 60_000,
+      config: { label: "fp8" },
+      results: {
+        overallPct: 91.2,
+        categories: {
+          qa: { passed: 45, total: 50, pct: 90, errors: 0 },
+          gsm8k: { passed: 10, total: 20, pct: 50, errors: 0 },
+        },
+        items: [],
+      },
+      ...overrides,
+    }) as never;
+
+  it("carries an overall ring and one tile per category, with item totals", async () => {
+    const { buildQualityShareCard } = await import("./benchShareCard");
+    const m = buildQualityShareCard(qJob(), null, { llmPort: 8888, modelId: "m" }, 0);
+    expect(m.quality?.overall).toBe(91.2);
+    expect(m.quality?.tiles.map((t) => [t.label, t.pct, t.detail])).toEqual([
+      ["QA", 90, "45/50 items"],
+      ["GSM8K", 50, "10/20 items"],
+    ]);
+    expect(m.quality?.summary).toBe("2 categories · 70 items · 1m 0s");
+    expect([m.quality?.modelName, m.quality?.target, m.quality?.runLabel]).toEqual(["m", "Port 8888", "fp8"]);
+  });
+
+  it("shows the points change against a compared run", async () => {
+    const { buildQualityShareCard } = await import("./benchShareCard");
+    const other = qJob({ results: { overallPct: 80, categories: { qa: { passed: 40, total: 50, pct: 80, errors: 0 }, gsm8k: { passed: 10, total: 20, pct: 50, errors: 0 } }, items: [] } });
+    const m = buildQualityShareCard(qJob(), other, { llmPort: 8888, modelId: null }, 0);
+    expect(m.quality?.tiles.map((t) => t.delta)).toEqual([10, 0]);
+  });
+
+  it("is painted as tiles, grows with the number of categories, and colours by score band", async () => {
+    const { buildQualityShareCard, qualityTierColor } = await import("./benchShareCard");
+    const m = buildQualityShareCard(qJob(), null, { llmPort: 8888, modelId: "m" }, 0);
+    const ctx = fakeContext();
+    paintShareCard(ctx, m, "light");
+    expect(ctx.texts).toContain("Quality benchmark");
+    expect(ctx.texts).toContain("90.0");
+    expect(ctx.texts).toContain("50.0");
+    expect(ctx.texts).not.toContain("CATEGORY");
+    expect(ctx.texts).toContain("m"); // the model under test is the headline of the hero panel
+    expect(shareCardHeight(m)).toBeGreaterThanOrEqual(675);
+    const bigger = { ...m, quality: { ...m.quality!, tiles: Array.from({ length: 8 }, () => m.quality!.tiles[0]) } };
+    expect(shareCardHeight(bigger)).toBeGreaterThan(shareCardHeight(m));
+    const P = { success: "g", accent: "a", danger: "r", muted: "m" };
+    expect([95, 90, 89.9, 70, 69.9, null].map((v) => qualityTierColor(P, v))).toEqual(["g", "g", "a", "a", "r", "m"]);
+  });
+});
+
+describe("tool eval share card", () => {
+  const result = (over: Record<string, unknown> = {}) =>
+    normalizeToolResult({
+      final_score: 82.46,
+      rating: "★★★★ Good",
+      deployability: 78.2,
+      responsiveness: 91,
+      total_scenarios: 4,
+      tool_eval_bench_version: "1.4.0",
+      config: { model: "org/model", backend: "vllm" },
+      scores: {
+        category_scores: [
+          { category: "A", points: 9, max_points: 10 },
+          { category: "B", percent: 20, name: "Params" },
+        ],
+        scenario_results: [
+          { scenario_id: "TC-01", status: "pass", category: "A" },
+          { scenario_id: "TC-02", status: "pass", category: "A" },
+          { scenario_id: "TC-03", status: "partial", category: "B" },
+          { scenario_id: "TC-04", status: "fail", category: "B" },
+        ],
+      },
+      ...over,
+    })!;
+  const run = { status: "completed" as const, startedAt: 1_000, finishedAt: 125_000, model: null };
+
+  it("carries the headline numbers, the outcome split and a tile per category", () => {
+    const m = buildToolEvalShareCard(result(), run, { sparkName: "spark-38bd" }, new Date(2026, 8, 17, 12).getTime());
+    const te = m.toolEval!;
+    expect([m.title, m.host, m.status.label]).toEqual(["Tool Eval Bench", "spark-38bd", "COMPLETED"]);
+    expect([te.score, te.rating, te.stars, te.modelName]).toEqual([82.46, "Good", 4, "org/model"]);
+    expect(te.subline).toBe("vLLM · tool-eval-bench 1.4.0");
+    expect(te.stats.map((s) => [s.label, s.value, s.suffix])).toEqual([
+      ["Deployability", "78.2", "/100"],
+      ["Responsiveness", "91.0", "/100"],
+    ]);
+    expect(te.counts).toEqual({ pass: 2, partial: 1, fail: 1, other: 0, total: 4 });
+    expect(te.summary).toBe("4 scenarios · 2m 4s");
+    expect(te.categories).toEqual([
+      { id: "A", name: "Tool selection", pct: 90, detail: "9/10 pts" },
+      { id: "B", name: "Params", pct: 20, detail: "" },
+    ]);
+    expect(shareCardFileName(m, "tool-eval")).toBe("sparkdash-tool-eval-spark-38bd-2026-09-17.png");
+  });
+
+  it("falls back to the score tier and the run's model when the result has no rating or model", () => {
+    const r = result({ rating: undefined, config: {} });
+    const m = buildToolEvalShareCard(r, { ...run, model: "from-run" }, {}, 0);
+    expect([m.toolEval!.rating, m.toolEval!.stars, m.toolEval!.modelName]).toEqual(["Good", 4, "from-run"]);
+  });
+
+  it("flags safety warnings on the card, listing only the first few", () => {
+    const warnings = ["w1", "w2", "w3", "w4", "w5"];
+    const m = buildToolEvalShareCard(result({ safety_warnings: warnings }), run, {}, 0);
+    expect(m.toolEval!.safety).toEqual(["w1", "w2", "w3"]);
+    expect(m.toolEval!.safetyTotal).toBe(5);
+    expect(m.toolEval!.tone).toBe("warn");
+    expect(m.chips.map((c) => c.label)).toContain("5 safety warnings");
+    const ctx = fakeContext();
+    paintShareCard(ctx, m, "dark");
+    expect(ctx.texts.some((t) => t.startsWith("SAFETY WARNINGS (5)"))).toBe(true);
+    expect(ctx.texts).toContain("+2 more");
+    expect(shareCardHeight(m)).toBeGreaterThan(shareCardHeight(buildToolEvalShareCard(result(), run, {}, 0)));
+  });
+
+  it("paints the score, the stat tiles and the categories, and grows with the category count", () => {
+    const m = buildToolEvalShareCard(result(), run, { sparkName: "s" }, 0);
+    const ctx = fakeContext();
+    paintShareCard(ctx, m, "light");
+    for (const t of ["Tool Eval Bench", "82.5", "Good", "org/model", "78.2", "91.0", "Tool selection", "Params", "90", "20"]) {
+      expect(ctx.texts).toContain(t);
+    }
+    expect(ctx.texts).toContain("pass");
+    expect(ctx.texts).toContain("partial");
+    // Failures are kept off the card.
+    expect(ctx.texts).not.toContain("fail");
+    expect(shareCardHeight(m)).toBeGreaterThanOrEqual(SHARE_CARD_MIN_HEIGHT);
+    const tile = m.toolEval!.categories[0];
+    const sixteen = { ...m, toolEval: { ...m.toolEval!, categories: Array.from({ length: 16 }, () => tile) } };
+    expect(shareCardHeight(sixteen)).toBeGreaterThan(shareCardHeight(m));
+  });
+
+  it("copes with a result that has no score, no categories and no model", () => {
+    const r = normalizeToolResult({ scores: { scenario_results: [{ scenario_id: "x", status: "pass" }] } })!;
+    const m = buildToolEvalShareCard(r, { ...run, finishedAt: null }, {}, 0);
+    expect(m.toolEval!.score).toBeNull();
+    expect(m.toolEval!.summary).toBe("1 scenario");
+    const ctx = fakeContext();
+    expect(() => paintShareCard(ctx, m, "dark")).not.toThrow();
+    expect(ctx.texts).toContain("—");
+    expect(ctx.texts).toContain("Unknown model");
+  });
+});
+
+describe("tool eval comparison card", () => {
+  const side = (score: number, pcts: [number, number], statuses: string[], over: Record<string, unknown> = {}) =>
+    normalizeToolResult({
+      final_score: score,
+      deployability: 70,
+      responsiveness: 90,
+      config: { model: "org/model" },
+      scores: {
+        category_scores: [
+          { category: "A", percent: pcts[0] },
+          { category: "B", percent: pcts[1] },
+        ],
+        scenario_results: statuses.map((status, i) => ({ scenario_id: `TC-${i + 1}`, status, category: "A" })),
+      },
+      ...over,
+    })!;
+  // Local noon: shareCardDate formats in local time, so a UTC-midnight start is the 9th west of UTC.
+  const run = { label: "", startedAt: new Date(2026, 8, 10, 12).getTime(), model: null, baseUrl: "http://x", options: {}, type: "tool-eval" };
+  const a = () => side(60, [50, 80], ["pass", "fail", "partial", "pass"]);
+  const b = () => side(72.5, [70, 75], ["pass", "pass", "fail", "pass"], { deployability: 71, responsiveness: 85 });
+
+  it("carries both scores, the change, the metric tiles and the scenario moves", () => {
+    const m = buildToolEvalCompareShareCard(a(), b(), run, { ...run, label: "fp8 KV" }, { sparkName: "spark-1" }, 0);
+    const c = m.toolEvalCompare!;
+    expect([m.title, m.status.label]).toEqual(["Tool Eval Comparison", "SAME SETUP"]);
+    expect([c.a.heading, c.b.heading]).toEqual(["RUN A · 2026-09-10", "RUN B · fp8 KV"]);
+    expect([c.a.score, c.b.score, c.scoreDelta, c.scoreDeltaTone]).toEqual([60, 72.5, "+12.5", "ok"]);
+    expect(c.stats.map((s) => [s.label, s.a, s.b, s.delta, s.tone])).toEqual([
+      ["Deployability", "70.0", "71.0", "+1.0", "ok"],
+      ["Responsiveness", "90.0", "85.0", "−5.0", "bad"],
+      ["Scenarios passed", "2", "3", "+1", "ok"],
+    ]);
+    // TC-2 fail→pass improved, TC-3 partial→fail regressed, two unchanged.
+    expect(c.changes).toEqual({ improved: 1, regressed: 1, unchanged: 2 });
+    expect(c.categories.map((x) => [x.id, x.a, x.b, x.delta, x.tone])).toEqual([
+      ["A", 50, 70, "+20.0 pts", "ok"],
+      ["B", 80, 75, "−5.0 pts", "bad"],
+    ]);
+    expect(shareCardFileName(m, "tool-eval-compare")).toMatch(/^sparkdash-tool-eval-compare-spark-1-/);
+  });
+
+  it("names both Sparks when the runs come from different ones", () => {
+    const m = buildToolEvalCompareShareCard(a(), b(), run, run, { sparkName: "spark-1", sparkNameA: "spark1", sparkNameB: "spark3" }, 0);
+    expect(m.host).toBe("spark1 vs spark3");
+    expect([m.toolEvalCompare!.a.heading, m.toolEvalCompare!.b.heading]).toEqual(["RUN A · spark1 · 2026-09-10", "RUN B · spark3 · 2026-09-10"]);
+    // Same Spark on both sides: no per-Spark naming.
+    const same = buildToolEvalCompareShareCard(a(), b(), run, run, { sparkName: "spark-1", sparkNameA: "spark1", sparkNameB: "spark1" }, 0);
+    expect(same.host).toBe("spark-1");
+    expect(same.toolEvalCompare!.a.heading).toBe("RUN A · 2026-09-10");
+  });
+
+  it("says when the setups differ and keeps failures off the card", () => {
+    const m = buildToolEvalCompareShareCard(a(), b(), run, { ...run, baseUrl: "http://y", model: "other" }, {}, 0);
+    expect(m.status).toEqual({ label: "DIFFERENT SETUP", tone: "warn" });
+    expect(m.toolEvalCompare!.caveat).toMatch(/^Different models/);
+    expect(m.toolEvalCompare!.caveat).toMatch(/\(\+1 more\)$/);
+    const ctx = fakeContext();
+    paintShareCard(ctx, m, "dark");
+    expect(ctx.texts).toContain("+12.5");
+    expect(ctx.texts).toContain("Tool selection");
+    expect(ctx.texts.some((t) => t.startsWith("⚠"))).toBe(true);
+    expect(ctx.texts).not.toContain("fail");
+    expect(ctx.texts.some((t) => /fail/i.test(t) && !/^⚠/.test(t))).toBe(false);
+  });
+
+  it("grows with the category count and copes with results that only have categories", () => {
+    const m = buildToolEvalCompareShareCard(a(), b(), run, run, {}, 0);
+    const cat = m.toolEvalCompare!.categories[0];
+    const big = { ...m, toolEvalCompare: { ...m.toolEvalCompare!, categories: Array.from({ length: 16 }, () => cat) } };
+    expect(shareCardHeight(big)).toBeGreaterThan(shareCardHeight(m));
+    const bare = (score: number) => normalizeToolResult({ final_score: score, scores: { category_scores: [{ category: "A", percent: score }] } })!;
+    const n = buildToolEvalCompareShareCard(bare(40), bare(55), run, run, {}, 0);
+    expect(n.toolEvalCompare!.changes).toBeNull();
+    expect(() => paintShareCard(fakeContext(), n, "light")).not.toThrow();
   });
 });

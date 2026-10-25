@@ -12,6 +12,7 @@ const SOURCE_LABEL: Record<string, string> = {
 interface ConversationListProps {
   conversations: ConversationRow[];
   onAddHarness?: () => void;
+  now?: number;
 }
 
 function formatSessionAge(lastUsedAt: number | undefined, now: number): string {
@@ -27,8 +28,9 @@ function formatSessionAge(lastUsedAt: number | undefined, now: number): string {
   return new Date(lastUsedAt).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
-function occupancyTone(row: ConversationRow, now: number): "generating" | "recent" | "warm" | "idle" {
+function occupancyTone(row: ConversationRow, now: number): "generating" | "stalled" | "recent" | "warm" | "idle" {
   if (row.badge === "generating") return "generating";
+  if (row.badge === "stalled") return "stalled";
   if (row.lastUsedAt == null || !Number.isFinite(row.lastUsedAt)) return "idle";
   const age = now - row.lastUsedAt;
   if (age < 5 * 60_000) return "recent";
@@ -61,12 +63,12 @@ function contextTitle(row: ConversationRow): string {
 
 function stateLabel(row: ConversationRow, now: number): string {
   if (row.badge === "generating") return "Generating";
+  if (row.badge === "stalled") return "Stalled";
   return formatSessionAge(row.lastUsedAt, now);
 }
 
-function laneLabel(source: string, agent?: string, gateway?: string): string {
+function laneLabel(source: string, agent?: string): string {
   const parts = [SOURCE_LABEL[source] ?? source];
-  if (gateway) parts.push(gateway);
   if (agent) parts.push(agent);
   return parts.join(" · ");
 }
@@ -75,20 +77,19 @@ function groupConversations(rows: ConversationRow[]) {
   const groups: { key: string; label: string; rows: ConversationRow[] }[] = [];
   const index = new Map<string, number>();
   for (const row of rows) {
-    const key = `${row.source}\0${row.gateway ?? ""}\0${row.agent ?? ""}`;
+    const key = `${row.source}\0${row.agent ?? ""}`;
     const existing = index.get(key);
     if (existing != null) {
       groups[existing].rows.push(row);
       continue;
     }
     index.set(key, groups.length);
-    groups.push({ key, label: laneLabel(row.source, row.agent, row.gateway), rows: [row] });
+    groups.push({ key, label: laneLabel(row.source, row.agent), rows: [row] });
   }
   return groups;
 }
 
-export function ConversationList({ conversations, onAddHarness }: ConversationListProps) {
-  const now = Date.now();
+export function ConversationList({ conversations, onAddHarness, now = Date.now() }: ConversationListProps) {
   const groups = groupConversations(conversations);
 
   return (
@@ -97,13 +98,7 @@ export function ConversationList({ conversations, onAddHarness }: ConversationLi
         <span className="occupancy-head-count">{conversations.length}</span>
         <span className="occupancy-head-title">Sessions</span>
         {onAddHarness && (
-          <button
-            type="button"
-            title="Add harness"
-            aria-label="Add harness"
-            onClick={onAddHarness}
-            className="occupancy-head-add"
-          >
+          <button type="button" title="Add harness" aria-label="Add harness" onClick={onAddHarness} className="occupancy-head-add">
             <PlusIcon className="h-3.5 w-3.5" />
           </button>
         )}
@@ -126,15 +121,14 @@ export function ConversationList({ conversations, onAddHarness }: ConversationLi
                 {group.rows.map((row) => {
                   const ctx = contextLabel(row);
                   return (
-                    <li key={row.id} className={`occupancy-row is-${occupancyTone(row, now)}`}>
+                    <li key={row.id} className={`occupancy-row is-${occupancyTone(row, now)}`} title={row.stale ? "Last refresh failed; this row is stale" : undefined}>
                       <span className="occupancy-dot" aria-hidden="true" />
-                      <span className="occupancy-handle" title={row.handle}>
-                        {row.handle}
+                      <span className="occupancy-handle" title={row.handle}>{row.handle}</span>
+                      <span className="occupancy-ctx" title={ctx ? contextTitle(row) : undefined}>{ctx}</span>
+                      <span className="occupancy-state">
+                        {stateLabel(row, now)}
+                        {row.stale ? <span className="occupancy-stale"> stale</span> : null}
                       </span>
-                      <span className="occupancy-ctx" title={ctx ? contextTitle(row) : undefined}>
-                        {ctx}
-                      </span>
-                      <span className="occupancy-state">{stateLabel(row, now)}</span>
                     </li>
                   );
                 })}

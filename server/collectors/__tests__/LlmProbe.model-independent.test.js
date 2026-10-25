@@ -48,7 +48,12 @@ test("selectActiveModel refuses multiple active, multiple unqualified, and all i
   );
 });
 
-test("ambiguous model discovery does not fetch metrics or guess a benchmark model", async () => {
+test("a plain unqualified multi-model catalog serves its first entry instead of refusing", async () => {
+  // Upstream design: a router catalog with no status field at all (the normal
+  // shape for most OpenAI-compatible routers) is not the same as a genuine
+  // conflict (more than one row explicitly marked active) — see
+  // selectActiveModel's own ambiguous-status tests above. oMLX is the one
+  // backend that keeps the stricter "never guess" block (LlmProbe.omlx.test.js).
   const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 8888);
   probe.serverIsOpenAI = true;
   probe.backendType = "vllm";
@@ -61,15 +66,20 @@ test("ambiguous model discovery does not fetch metrics or guess a benchmark mode
     if (path === "/v1/models") {
       return jsonRes({ data: [{ id: "router-a" }, { id: "router-b" }] });
     }
-    assert.fail(`unexpected fetch ${path}`);
+    if (path === "/metrics") return jsonRes({}, 404);
+    return jsonRes({}, 404);
   };
   const snapshot = await probe.probe();
-  assert.equal(snapshot.status, "ambiguous_model");
+  // /metrics 404s in this fixture (not relevant to catalog selection), so the
+  // snapshot reads as an unreached engine, same as any other vLLM poll whose
+  // Prometheus scrape failed.
+  assert.equal(snapshot.status, "unavailable");
+  assert.equal(snapshot.statusReason, "metrics_unavailable");
   assert.equal(snapshot.available, false);
-  assert.equal(snapshot.modelId, null);
-  assert.equal(snapshot.benchmarkModel, null);
+  assert.equal(probe.modelId, "router-a");
+  assert.equal(probe.benchmarkModel, "router-a");
   assert.deepEqual(snapshot.models, ["router-a", "router-b"]);
-  assert.deepEqual(paths, ["/v1/models"]);
+  assert.deepEqual(paths, ["/v1/models", "/metrics"]);
 });
 
 test("model labels scope Prometheus counters and relay mapping keeps API-key port", async () => {

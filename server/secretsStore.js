@@ -1,23 +1,29 @@
 /**
- * Encrypted secret store — survives process/Docker restarts.
+ * Encrypted secrets store — survives process/Docker restarts.
  *
- * SSH passwords, session-source tokens, and LLM API keys are NEVER written to
- * sparks.json / session-sources.json and NEVER returned by GET APIs.
+ * Secrets are NEVER written to sparks.json and NEVER returned by the API.
  * They live in:
  *   - memory (Maps) for SSH collectors / LLM probes
  *   - config/sparks-secrets.json (AES-256-GCM ciphertext, volume-mounted)
  *
- * File shape (v2, backward compatible):
+ * File shape (v2):
  *   {
  *     version: 2,
  *     secrets: { [sparkId]: "<encrypted ssh password>" },
- *     llmApiKeys?: { [sparkId]: "<encrypted JSON { \"8000\": \"sk-…\" }>" },
- *     sessionSourceTokens?: { [attachId]: "<encrypted token>" },
- *     sessionSourceDevices?: { [attachId]: "<encrypted device identity JSON>" }
+ *     llmApiKeys: { [sparkId]: "<encrypted JSON { \"8000\": \"sk-…\" }>" },
+ *     alertChannels: { [channelId]: "<encrypted alert channel URL>" },   (optional)
+ *     helperTokens: { [helperId]: "<encrypted helper bearer>" }          (optional)
  *   }
  *
- * v1 files (secrets + optional sessionSourceTokens/Devices) still load;
- * rewritten as v2 on next save.
+ * Alert channel URLs (an ntfy topic, a Discord or Slack webhook) are the
+ * channel's credential, so they live here too, written by their own save
+ * function. Harness helper bearer tokens live in helperTokens, written by
+ * saveHelperTokens. Each save keeps the other sections exactly as they are
+ * on disk, including ciphertext this process cannot decrypt.
+ *
+ * v1 files (secrets only) still load; rewritten as v2 on next save.
+ * A save replaces only the namespaces the caller supplies. An empty map clears
+ * that namespace. The file is removed only when every namespace is empty.
  *
  * Encryption key:
  *   - SPARKDASH_SECRETS_KEY env (passphrase or 64-char hex), or
@@ -33,6 +39,7 @@ const ALGO = "aes-256-gcm";
 const IV_LEN = 12;
 const TAG_LEN = 16;
 const KEY_LEN = 32;
+
 /** Cached key so we never regenerate mid-process. */
 let _cachedKey = null;
 
@@ -123,86 +130,13 @@ function decrypt(blobB64, key) {
   return Buffer.concat([decipher.update(data), decipher.final()]).toString("utf8");
 }
 
-function asBlobMap(value) {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return {};
-  return value;
-}
-
-function readRawStore() {
-  const empty = { version: 2, secrets: {}, llmApiKeys: {}, sessionSourceTokens: {}, sessionSourceDevices: {} };
-  if (!fs.existsSync(SPARKS_SECRETS_PATH)) return empty;
-  const data = JSON.parse(fs.readFileSync(SPARKS_SECRETS_PATH, "utf8"));
-  return {
-    version: 2,
-    secrets: asBlobMap(data?.secrets),
-    llmApiKeys: asBlobMap(data?.llmApiKeys),
-    sessionSourceTokens: asBlobMap(data?.sessionSourceTokens),
-    sessionSourceDevices: asBlobMap(data?.sessionSourceDevices),
-  };
-}
-
-function nonEmptyBlobs(blobs) {
-  const out = {};
-  for (const [id, blob] of Object.entries(blobs || {})) {
-    if (id && typeof blob === "string" && blob) out[id] = blob;
-  }
-  return out;
-}
-
-function hasBlobMap(blobs) {
-  return Object.keys(nonEmptyBlobs(blobs)).length > 0;
-}
-
-function unlinkStoreFile() {
-  if (!fs.existsSync(SPARKS_SECRETS_PATH)) return;
-  try {
-    fs.accessSync(SPARKS_SECRETS_PATH, fs.constants.W_OK);
-    fs.unlinkSync(SPARKS_SECRETS_PATH);
-  } catch (err) {
-    throw new Error(
-      `Failed to clear secrets file (permission?): ${err.message}. ` +
-        `Run: sudo chown -R $(id -u):$(id -g) config/sparks-secrets.json`
-    );
-  }
-}
-
-function persistStore({ secrets: secretBlobs, llmApiKeys: llmKeyBlobs, sessionSourceTokens: tokenBlobs, sessionSourceDevices: deviceBlobs }) {
-  const secrets = asBlobMap(secretBlobs);
-  const llmApiKeys = nonEmptyBlobs(llmKeyBlobs);
-  const sessionSourceTokens = nonEmptyBlobs(tokenBlobs);
-  const sessionSourceDevices = nonEmptyBlobs(deviceBlobs);
-  const hasSecrets = Object.keys(secrets).length > 0;
-  if (!hasSecrets && !hasBlobMap(llmApiKeys) && !hasBlobMap(sessionSourceTokens) && !hasBlobMap(sessionSourceDevices)) {
-    unlinkStoreFile();
-    return;
-  }
-  const payload = { version: 2, secrets };
-  if (hasBlobMap(llmApiKeys)) payload.llmApiKeys = llmApiKeys;
-  if (hasBlobMap(sessionSourceTokens)) payload.sessionSourceTokens = sessionSourceTokens;
-  if (hasBlobMap(sessionSourceDevices)) payload.sessionSourceDevices = sessionSourceDevices;
-  atomicWrite(SPARKS_SECRETS_PATH, JSON.stringify(payload, null, 2) + "\n", 0o644);
-}
-
-function decryptEntries(entries, key, kind) {
-  const map = new Map();
-  let failed = 0;
-  for (const [id, blob] of Object.entries(entries)) {
-    if (!id || typeof blob !== "string") continue;
-    try {
-      const value = decrypt(blob, key);
-      if (value) map.set(id, value);
-    } catch {
-      failed += 1;
-      console.error(`[secretsStore] Failed to decrypt ${kind} for ${id} (wrong/missing key?)`);
-    }
-  }
-  return { map, failed };
-}
+let lastLoggedHelperTokens = -1;
 
 /**
  * @returns {{
  *   passwords: Map<string, string>,
  *   llmApiKeys: Map<string, Record<string, string>>,
+ *   helperTokens: Map<string, string>,
  * }}
  */
 export function loadSecrets() {
@@ -210,28 +144,45 @@ export function loadSecrets() {
   const passwords = new Map();
   /** @type {Map<string, Record<string, string>>} */
   const llmApiKeys = new Map();
+  /** @type {Map<string, string>} */
+  const helperTokens = new Map();
 
   if (!fs.existsSync(SPARKS_SECRETS_PATH)) {
-    return { passwords, llmApiKeys };
+    return { passwords, llmApiKeys, helperTokens };
   }
 
   try {
     const key = resolveKey();
-    const raw = readRawStore();
-    const { map: loaded, failed } = decryptEntries(raw.secrets, key, "password");
-    for (const [id, pw] of loaded) passwords.set(id, pw);
-    if (passwords.size > 0) {
-      console.log(`[secretsStore] Loaded ${passwords.size} SSH password(s) from encrypted store`);
-    }
-    if (failed > 0) {
-      console.warn(
-        `[secretsStore] ${failed} password(s) could not be decrypted — re-enter via Edit Spark`
-      );
+    const raw = fs.readFileSync(SPARKS_SECRETS_PATH, "utf8");
+    const data = JSON.parse(raw);
+    const entries = data?.secrets || {};
+    if (typeof entries === "object" && entries !== null) {
+      let failed = 0;
+      for (const [id, blob] of Object.entries(entries)) {
+        if (!id || typeof blob !== "string") continue;
+        try {
+          const pw = decrypt(blob, key);
+          if (pw) passwords.set(id, pw);
+        } catch {
+          failed += 1;
+          console.error(
+            `[secretsStore] Failed to decrypt password for ${id} (wrong/missing key?)`
+          );
+        }
+      }
+      if (passwords.size > 0) {
+        console.log(`[secretsStore] Loaded ${passwords.size} SSH password(s) from encrypted store`);
+      }
+      if (failed > 0) {
+        console.warn(
+          `[secretsStore] ${failed} password(s) could not be decrypted — re-enter via Edit Spark`
+        );
+      }
     }
 
-    const keyEntries = raw.llmApiKeys || {};
+    const keyEntries = data?.llmApiKeys || {};
     if (typeof keyEntries === "object" && keyEntries !== null) {
-      let failedKeys = 0;
+      let failed = 0;
       let portCount = 0;
       for (const [id, blob] of Object.entries(keyEntries)) {
         if (!id || typeof blob !== "string") continue;
@@ -248,7 +199,7 @@ export function loadSecrets() {
           }
           if (Object.keys(ports).length > 0) llmApiKeys.set(id, ports);
         } catch {
-          failedKeys += 1;
+          failed += 1;
           console.error(
             `[secretsStore] Failed to decrypt LLM API keys for ${id} (wrong/missing key?)`
           );
@@ -257,9 +208,36 @@ export function loadSecrets() {
       if (portCount > 0) {
         console.log(`[secretsStore] Loaded ${portCount} LLM API key(s) from encrypted store`);
       }
-      if (failedKeys > 0) {
+      if (failed > 0) {
         console.warn(
-          `[secretsStore] ${failedKeys} LLM API key bundle(s) could not be decrypted — re-enter via LLM Settings`
+          `[secretsStore] ${failed} LLM API key bundle(s) could not be decrypted — re-enter via LLM Settings`
+        );
+      }
+    }
+
+    const helperEntries = data?.helperTokens || {};
+    if (typeof helperEntries === "object" && helperEntries !== null && !Array.isArray(helperEntries)) {
+      let failedHelpers = 0;
+      for (const [id, blob] of Object.entries(helperEntries)) {
+        if (!id || typeof blob !== "string") continue;
+        try {
+          const token = decrypt(blob, key);
+          if (token) helperTokens.set(id, token);
+        } catch {
+          failedHelpers += 1;
+          console.error(
+            `[secretsStore] Failed to decrypt helper token for ${id} (wrong/missing key?)`
+          );
+        }
+      }
+      // The occupancy poller reloads these every tick: log only when the count changes.
+      if (helperTokens.size > 0 && helperTokens.size !== lastLoggedHelperTokens) {
+        console.log(`[secretsStore] Loaded ${helperTokens.size} helper token(s) from encrypted store`);
+      }
+      lastLoggedHelperTokens = helperTokens.size;
+      if (failedHelpers > 0) {
+        console.warn(
+          `[secretsStore] ${failedHelpers} helper token(s) could not be decrypted — re-enter in the harness wizard`
         );
       }
     }
@@ -267,23 +245,20 @@ export function loadSecrets() {
     console.error(`[secretsStore] Failed to load secrets: ${err.message}`);
   }
 
-  return { passwords, llmApiKeys };
+  return { passwords, llmApiKeys, helperTokens };
 }
 
 /**
- * Persist SSH passwords + per-port LLM API keys (encrypted). Empty passwords
- * remove those slots; the file is deleted only when passwords, LLM keys, AND
- * session tokens/devices are all gone. Throws on failure so callers can
- * surface errors to the UI.
- *
- * Encrypted file mode is 0o644 so bind-mounted volumes stay usable across
- * root/non-root container users (contents are ciphertext, not plaintext).
+ * Persist SSH passwords + per-port LLM API keys (encrypted).
+ * Alert channel URLs and helper tokens already on disk are kept.
+ * The file is removed only when every namespace is empty.
  *
  * @param {Map<string, string>} passwords
  * @param {Map<string, Record<string, string>>} [llmApiKeys]
  */
 export function saveSecrets(passwords, llmApiKeys = new Map()) {
-  const raw = readRawStore();
+  const alertChannels = readRawSection("alertChannels");
+  const helperTokens = readRawSection("helperTokens");
   const hasPasswords = passwords && passwords.size > 0;
   let hasKeys = false;
   if (llmApiKeys) {
@@ -295,8 +270,13 @@ export function saveSecrets(passwords, llmApiKeys = new Map()) {
     }
   }
 
-  if (!hasPasswords && !hasKeys) {
-    persistStore({ secrets: {}, llmApiKeys: raw.llmApiKeys, sessionSourceTokens: raw.sessionSourceTokens, sessionSourceDevices: raw.sessionSourceDevices });
+  if (
+    !hasPasswords &&
+    !hasKeys &&
+    Object.keys(alertChannels).length === 0 &&
+    Object.keys(helperTokens).length === 0
+  ) {
+    clearSecretsFile();
     return;
   }
 
@@ -322,7 +302,7 @@ export function saveSecrets(passwords, llmApiKeys = new Map()) {
     }
   }
 
-  persistStore({ secrets, llmApiKeys: llmOut, sessionSourceTokens: raw.sessionSourceTokens, sessionSourceDevices: raw.sessionSourceDevices });
+  writeSecretsFile({ secrets, llmApiKeys: llmOut, alertChannels, helperTokens });
   const keyCount = Object.keys(llmOut).length;
   console.log(
     `[secretsStore] Saved ${Object.keys(secrets).length} SSH password(s)` +
@@ -330,86 +310,167 @@ export function saveSecrets(passwords, llmApiKeys = new Map()) {
   );
 }
 
-function decryptTokenMap(blobs, key) {
-  const { map } = decryptEntries(blobs, key, "session source token");
-  /** @type {Record<string, string>} */
-  const out = {};
-  for (const [id, value] of map) {
-    if (value) out[id] = value;
-  }
-  return out;
-}
-
-/** @returns {Record<string, string>} plaintext tokens keyed by attach id */
-export function loadSessionSourceTokens() {
-  try {
-    const raw = readRawStore();
-    if (!hasBlobMap(raw.sessionSourceTokens)) return {};
-    return decryptTokenMap(raw.sessionSourceTokens, resolveKey());
-  } catch (err) {
-    console.error(`[secretsStore] Failed to load session source tokens: ${err.message}`);
-    return {};
-  }
+/** Helper bearers currently decryptable with this process's key. */
+export function loadHelperTokens() {
+  return loadSecrets().helperTokens;
 }
 
 /**
- * Merge session-source token slots. Omitted keys leave the stored token;
- * empty string clears that slot. Keys are attach ids.
- * @param {Record<string, string>} patch
- * @returns {Record<string, string>}
+ * Replace only helper-attach bearers. SSH passwords, LLM keys and alert
+ * channel URLs stay as stored, including ciphertext that cannot be decrypted.
+ * A file that cannot be parsed is left untouched.
+ * @param {Map<string, string>} helperTokens
  */
-export function patchSessionSourceTokens(patch) {
-  const raw = readRawStore();
-  const key = resolveKey();
-  const current = decryptTokenMap(raw.sessionSourceTokens, key);
-  const body = patch && typeof patch === "object" ? patch : {};
-  for (const id of Object.keys(body)) {
-    if (!id) continue;
-    const value = body[id];
-    if (value == null) continue;
-    if (value === "") delete current[id];
-    else current[id] = String(value);
-  }
-  /** @type {Record<string, string>} */
-  const tokenBlobs = {};
-  for (const [id, value] of Object.entries(current)) {
-    if (value) tokenBlobs[id] = encrypt(value, key);
-  }
-  persistStore({ secrets: raw.secrets, llmApiKeys: raw.llmApiKeys, sessionSourceTokens: tokenBlobs, sessionSourceDevices: raw.sessionSourceDevices });
-  return current;
-}
-
-/** @returns {{ deviceId: string, publicKey: string, privateKeyPem: string } | null} */
-export function loadSessionSourceDevice(id) {
-  if (!id) return null;
+export function saveHelperTokens(helperTokens) {
+  let secrets;
+  let llmApiKeys;
+  let alertChannels;
   try {
-    const raw = readRawStore();
-    const blob = raw.sessionSourceDevices?.[id];
-    if (typeof blob !== "string" || !blob) return null;
-    const parsed = JSON.parse(decrypt(blob, resolveKey()));
-    if (parsed?.deviceId && parsed?.publicKey && parsed?.privateKeyPem) return parsed;
+    secrets = readRawSection("secrets");
+    llmApiKeys = readRawSection("llmApiKeys");
+    alertChannels = readRawSection("alertChannels");
   } catch (err) {
-    console.error(`[secretsStore] Failed to load session source device for ${id}: ${err.message}`);
+    throw new Error(`secrets file is corrupt: ${err.message}`);
   }
-  return null;
+  const entries = helperTokens ? [...helperTokens.entries()].filter(([id, token]) => id && token) : [];
+  const key = entries.length > 0 ? resolveKey() : null;
+  /** @type {Record<string, string>} */
+  const helpers = {};
+  for (const [id, token] of entries) helpers[String(id)] = encrypt(String(token), key);
+  if (
+    Object.keys(secrets).length === 0 &&
+    Object.keys(llmApiKeys).length === 0 &&
+    Object.keys(alertChannels).length === 0 &&
+    Object.keys(helpers).length === 0
+  ) {
+    clearSecretsFile();
+    return;
+  }
+  writeSecretsFile({ secrets, llmApiKeys, alertChannels, helperTokens: helpers });
 }
 
-/** Persist OpenClaw gateway device identity for one attach id. */
-export function saveSessionSourceDevice(id, identity) {
-  if (!id || !identity) return;
-  const raw = readRawStore();
-  const devices = { ...raw.sessionSourceDevices };
-  devices[id] = encrypt(JSON.stringify(identity), resolveKey());
-  persistStore({ secrets: raw.secrets, llmApiKeys: raw.llmApiKeys, sessionSourceTokens: raw.sessionSourceTokens, sessionSourceDevices: devices });
+// ─── File sections ───────────────────────────────────────
+
+/**
+ * One section of the file as stored (still encrypted); {} when the file or the section is absent.
+ * Throws when the file exists but cannot be parsed: callers that go on to rewrite the file
+ * must not treat that as "nothing stored", or the other sections would be lost.
+ */
+function readRawSection(name) {
+  if (!fs.existsSync(SPARKS_SECRETS_PATH)) return {};
+  let data;
+  try {
+    data = JSON.parse(fs.readFileSync(SPARKS_SECRETS_PATH, "utf8"));
+  } catch (err) {
+    throw new Error(
+      `${SPARKS_SECRETS_PATH} exists but cannot be read (${err.message}); not overwriting it. ` +
+        "Fix or move the file aside to continue."
+    );
+  }
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new Error(`${SPARKS_SECRETS_PATH} is not a JSON object; not overwriting it. Fix or move the file aside to continue.`);
+  }
+  const section = data[name];
+  if (!section || typeof section !== "object" || Array.isArray(section)) return {};
+  return Object.fromEntries(Object.entries(section).filter(([id, blob]) => id && typeof blob === "string"));
 }
 
-/** Drop device identities whose attach ids are no longer present. */
-export function dropSessionSourceDevices(keepIds) {
-  const keep = new Set(Array.isArray(keepIds) ? keepIds : []);
-  const raw = readRawStore();
-  const devices = {};
-  for (const [id, blob] of Object.entries(raw.sessionSourceDevices || {})) {
-    if (keep.has(id) && typeof blob === "string" && blob) devices[id] = blob;
+function clearSecretsFile() {
+  if (!fs.existsSync(SPARKS_SECRETS_PATH)) return;
+  try {
+    fs.accessSync(SPARKS_SECRETS_PATH, fs.constants.W_OK);
+    fs.unlinkSync(SPARKS_SECRETS_PATH);
+  } catch (err) {
+    throw new Error(
+      `Failed to clear secrets file (permission?): ${err.message}. ` +
+        `Run: sudo chown -R $(id -u):$(id -g) config/sparks-secrets.json`
+    );
   }
-  persistStore({ secrets: raw.secrets, llmApiKeys: raw.llmApiKeys, sessionSourceTokens: raw.sessionSourceTokens, sessionSourceDevices: devices });
+}
+
+/** Write every section. Empty alertChannels and helperTokens sections are left out of the file. */
+function writeSecretsFile({ secrets, llmApiKeys, alertChannels, helperTokens }) {
+  const body = { version: 2, secrets, llmApiKeys };
+  if (alertChannels && Object.keys(alertChannels).length > 0) body.alertChannels = alertChannels;
+  if (helperTokens && Object.keys(helperTokens).length > 0) body.helperTokens = helperTokens;
+  atomicWrite(SPARKS_SECRETS_PATH, JSON.stringify(body, null, 2) + "\n", 0o644);
+}
+
+// ─── Alert channel URLs ──────────────────────────────────
+
+/**
+ * Decrypted alert channel URLs, channel id → URL. A URL that cannot be
+ * decrypted is left out (and logged); never throws.
+ * @returns {Map<string, string>}
+ */
+export function loadAlertChannelUrls() {
+  /** @type {Map<string, string>} */
+  const urls = new Map();
+  let section;
+  try {
+    section = readRawSection("alertChannels");
+  } catch (err) {
+    console.error(`[secretsStore] Failed to load alert channel URLs: ${err.message}`);
+    return urls;
+  }
+  if (Object.keys(section).length === 0) return urls;
+  let failed = 0;
+  try {
+    const key = resolveKey();
+    for (const [id, blob] of Object.entries(section)) {
+      try {
+        const url = decrypt(blob, key);
+        if (url) urls.set(id, url);
+      } catch {
+        failed += 1;
+      }
+    }
+  } catch (err) {
+    console.error(`[secretsStore] Failed to load alert channel URLs: ${err.message}`);
+    return urls;
+  }
+  if (failed > 0) {
+    console.warn(`[secretsStore] ${failed} alert channel URL(s) could not be decrypted — enter them again under Settings → Alerts`);
+  }
+  return urls;
+}
+
+/**
+ * Replace the stored alert channel URLs (encrypted). SSH passwords, LLM API
+ * keys and helper tokens stay exactly as they are on disk. Throws when the file cannot be read or written.
+ * A stored URL that cannot be decrypted (for example after a key change) is kept as is
+ * while its channel is still configured, so entering the key again brings it back.
+ * @param {Map<string, string>} urls channel id → URL
+ * @param {{ keepIds?: Iterable<string> }} [opts] ids of the channels that are still configured
+ */
+export function saveAlertChannelUrls(urls, opts = {}) {
+  const secrets = readRawSection("secrets");
+  const llmApiKeys = readRawSection("llmApiKeys");
+  const helperTokens = readRawSection("helperTokens");
+  const existing = readRawSection("alertChannels");
+  /** @type {Record<string, string>} */
+  const alertChannels = {};
+  const entries = urls ? [...urls.entries()].filter(([id, url]) => id && url) : [];
+  const keep = new Set(opts.keepIds || []);
+  const needKey = entries.length > 0 || Object.keys(existing).length > 0;
+  const key = needKey ? resolveKey() : null;
+  for (const [id, url] of entries) alertChannels[id] = encrypt(String(url), key);
+  for (const [id, blob] of Object.entries(existing)) {
+    if (alertChannels[id] || !keep.has(id)) continue;
+    try {
+      decrypt(blob, key);
+    } catch {
+      alertChannels[id] = blob;
+    }
+  }
+  if (
+    Object.keys(secrets).length === 0 &&
+    Object.keys(llmApiKeys).length === 0 &&
+    Object.keys(alertChannels).length === 0 &&
+    Object.keys(helperTokens).length === 0
+  ) {
+    clearSecretsFile();
+    return;
+  }
+  writeSecretsFile({ secrets, llmApiKeys, alertChannels, helperTokens });
 }

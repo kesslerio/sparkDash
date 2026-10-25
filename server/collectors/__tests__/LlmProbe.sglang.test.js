@@ -195,7 +195,7 @@ test("_detectServerType: OpenAI models + get_server_info → sglang", async () =
       return {
         ok: true,
         status: 200,
-        json: async () => ({ version: "0.5.0" }),
+        json: async () => ({ version: "0.5.0", model_path: "/models/qwen" }),
       };
     }
     return { ok: false, status: 404, json: async () => ({}) };
@@ -313,8 +313,8 @@ test("_applySglangServerInfo: prefers total_* counter diffs over last_gen", () =
     },
     2
   );
-  assert.equal(probe.generationTps, 50); // (150-50)/2
-  assert.equal(probe.prefillTps, 100); // (300-100)/2
+  assert.ok(Math.abs(probe.generationTps - 50) <= 0.5, `probe.generationTps ${probe.generationTps}`); // (150-50)/2 (measured over the real clock: allow jitter)
+  assert.ok(Math.abs(probe.prefillTps - 100) <= 1.0, `probe.prefillTps ${probe.prefillTps}`); // (300-100)/2 (measured over the real clock: allow jitter)
   assert.equal(probe.totalOutputTokens, 150);
   assert.equal(probe.totalPromptTokens, 300);
   assert.equal(probe.totalCachedTokens, null); // server_info without total_cached_tokens
@@ -502,7 +502,61 @@ test("probe: /v1/loads inflight keeps last_gen on the first sample", async () =>
   assert.equal(snap.requestsWaiting, 1);
 });
 
-test("_applySglangMetrics: cached_tokens_total vs prompt_tokens_total", () => {
+test("_applySglangMetrics: prefill tile tracks computed tokens only, not prompt totals", () => {
+  const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 30000);
+  // Warm turn: the prompt counter grows by 500, but only 100 of those tokens
+  // were computed and 300 came from cache. The headline tile follows the
+  // computed share only (same rule as vLLM's prompt_tokens_by_source fix):
+  // prefix-cache hits are real work for the engine's cache, not the GPU, so
+  // counting them would read as a prefill burst that never ran a GEMM. The
+  // prompt counter alone would have reported (500)/2, an even larger error.
+  probe._applySglangMetrics(
+    [
+      "sglang:generation_tokens_total 10",
+      "sglang:prompt_tokens_total 1000",
+      'sglang:realtime_tokens_total{mode="prefill_compute"} 500',
+      'sglang:realtime_tokens_total{mode="prefill_cache"} 9000',
+      "sglang:num_running_reqs 1",
+    ].join("\n") + "\n",
+    2
+  );
+  assert.equal(probe.cachedPrefillTps, 0);
+  assert.equal(probe.uncachedPrefillTps, 0);
+
+  probe._applySglangMetrics(
+    [
+      "sglang:generation_tokens_total 30",
+      "sglang:prompt_tokens_total 1500",
+      'sglang:realtime_tokens_total{mode="prefill_compute"} 600',
+      'sglang:realtime_tokens_total{mode="prefill_cache"} 9300',
+      "sglang:num_running_reqs 1",
+    ].join("\n") + "\n",
+    2
+  );
+  assert.ok(Math.abs(probe.generationTps - 10) <= 0.5, `probe.generationTps ${probe.generationTps}`); // (30-10)/2 (measured over the real clock: allow jitter)
+  assert.ok(Math.abs(probe.prefillTps - 50) <= 2.0, `probe.prefillTps ${probe.prefillTps}`); // computed only: (600-500)/2 (measured over the real clock: allow jitter)
+  assert.equal(probe.uncachedPrefillTps, 50); // (600-500)/2
+  assert.equal(probe.cachedPrefillTps, 150); // (9300-9000)/2
+  assert.equal(probe.prefixCacheHitRate, 0.9394); // 9300/(9300+600)
+
+  // Decode-only window: nothing was pre-filled, an unrelated request still
+  // runs — the tile must be 0, not the held 200 from the previous window.
+  probe._applySglangMetrics(
+    [
+      "sglang:generation_tokens_total 50",
+      "sglang:prompt_tokens_total 1500",
+      'sglang:realtime_tokens_total{mode="prefill_compute"} 600',
+      'sglang:realtime_tokens_total{mode="prefill_cache"} 9300',
+      "sglang:num_running_reqs 1",
+    ].join("\n") + "\n",
+    2
+  );
+  assert.equal(probe.prefillTps, 0);
+  assert.equal(probe.uncachedPrefillTps, 0);
+  assert.equal(probe.cachedPrefillTps, 0);
+});
+
+test("_applySglangMetrics: prompt − cached fallback without per-mode counters", () => {
   const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 30000);
   probe._applySglangMetrics(
     [
@@ -723,7 +777,8 @@ function sglangCounterProbe(state) {
   return probe;
 }
 
-test("probe: SGLang prefill tok/s returns to 0 once the engine goes idle (#99)", async () => {
+test("probe: SGLang prefill tok/s returns to 0 once the engine goes idle (#99)", async (t) => {
+  t.mock.method(Date, "now", () => 1_800_000_000_000);
   const state = { prompt: 1000, gen: 500, running: 0 };
   const probe = sglangCounterProbe(state);
 
@@ -998,4 +1053,99 @@ test("_applySglangMetrics reseeds counters after a reset", () => {
     2
   );
   assert.equal(probe.generationTps, 0);
+});
+
+/** Captured from SGLang on the RTX PRO 6000 host (qwen38-exl3-ple8, idle, warm radix cache). */
+const SGLANG_KV_LABELS =
+  'engine_type="unified",model_name="qwen38-exl3-ple8",moe_ep_rank="0",pp_rank="0",tp_rank="0"';
+const SGLANG_KV_METRICS =
+  [
+    `sglang:max_total_num_tokens{${SGLANG_KV_LABELS}} 1.499968e+06`,
+    `sglang:kv_cache_memory_usage_gb{${SGLANG_KV_LABELS}} 10.729261010885239`,
+    `sglang:token_usage{${SGLANG_KV_LABELS}} 0.0`,
+    `sglang:kv_available_tokens{${SGLANG_KV_LABELS}} 1.07968e+06`,
+    `sglang:kv_evictable_tokens{${SGLANG_KV_LABELS}} 420288.0`,
+    `sglang:kv_used_tokens{${SGLANG_KV_LABELS}} 0.0`,
+  ].join("\n") + "\n";
+const SGLANG_MEMORY_USAGE = {
+  weight: 71.066,
+  kvcache: 10.729,
+  startup_available: 3.33,
+  token_capacity: 1499968,
+  token_capacity_swa: null,
+  graph: { prefill: 0.0, decode: 0.0, target_verify: 0.527 },
+};
+
+function sglangPoolProbe({ serverInfo, metrics }) {
+  const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 30000);
+  probe.serverIsOpenAI = true;
+  probe.backendType = "sglang";
+  probe.authOpen = true;
+  probe._lastDetectAt = Date.now();
+  const hits = [];
+  const json = (payload) => ({
+    ok: true,
+    status: 200,
+    json: async () => payload,
+    text: async () => JSON.stringify(payload),
+  });
+  probe._fetch = async (url) => {
+    const u = String(url);
+    hits.push(u.slice(u.lastIndexOf("/")));
+    if (u.endsWith("/v1/models")) {
+      return json({ data: [{ id: "qwen38-exl3-ple8", owned_by: "sglang" }] });
+    }
+    if (u.endsWith("/server_info")) return json(serverInfo);
+    if (u.endsWith("/metrics") && metrics != null) {
+      return { ok: true, status: 200, json: async () => ({}), text: async () => metrics };
+    }
+    return { ok: false, status: 404, json: async () => ({}), text: async () => "" };
+  };
+  return { probe, hits };
+}
+
+test("probe: SGLang reports KV fill and the weight / KV pool split from the payloads it already reads", async () => {
+  const { probe, hits } = sglangPoolProbe({
+    serverInfo: {
+      model_path: "/model",
+      internal_states: [{ last_gen_throughput: 0, memory_usage: SGLANG_MEMORY_USAGE }],
+    },
+    metrics: SGLANG_KV_METRICS,
+  });
+  const snap = await probe.probe();
+  assert.equal(snap.kvCacheUsage, 0); // token_usage, not the evictable radix share
+  assert.equal(snap.weightsGb, 71.066);
+  assert.equal(snap.kvCacheGb, 10.729); // /server_info wins over the Prometheus gauge
+  assert.equal(hits.filter((h) => h === "/server_info").length, 1);
+  assert.equal(hits.filter((h) => h === "/metrics").length, 1);
+});
+
+test("probe: SGLang without token_usage or memory_usage falls back to token counts and the GB gauge", async () => {
+  const metrics = SGLANG_KV_METRICS.replace(/^sglang:token_usage.*\n/m, "").replace(
+    /^sglang:kv_used_tokens\{[^}]*\} 0\.0$/m,
+    `sglang:kv_used_tokens{${SGLANG_KV_LABELS}} 374992.0`
+  );
+  const { probe } = sglangPoolProbe({
+    serverInfo: { model_path: "/model", internal_states: [{ last_gen_throughput: 0 }] },
+    metrics,
+  });
+  const snap = await probe.probe();
+  assert.equal(snap.kvCacheUsage, 0.25); // 374992 / 1499968
+  assert.equal(snap.kvCacheGb, 10.729261010885239);
+  assert.equal(snap.weightsGb, null);
+});
+
+test("probe: SGLang without /metrics leaves KV fill unknown, not stale", async () => {
+  const { probe } = sglangPoolProbe({
+    serverInfo: {
+      model_path: "/model",
+      internal_states: [{ last_gen_throughput: 0, memory_usage: SGLANG_MEMORY_USAGE }],
+    },
+    metrics: null,
+  });
+  probe.kvCacheUsage = 0.9; // left over from an earlier poll
+  const snap = await probe.probe();
+  assert.equal(snap.kvCacheUsage, null);
+  assert.equal(snap.weightsGb, 71.066);
+  assert.equal(snap.kvCacheGb, 10.729);
 });

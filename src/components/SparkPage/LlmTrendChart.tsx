@@ -111,12 +111,10 @@ export function LlmTrendChart({
   const hasData = genWin.length > 1 || prefillWin.length > 1;
 
   return (
-    <div className="border-t border-border pt-3 space-y-1.5">
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-[10px] uppercase tracking-wide text-muted">
-          tok/s history
-        </span>
-        <span className="text-[10px] text-muted">{historyLabel()}</span>
+    <div className="sp-section">
+      <div className="sp-section__head">
+        <span className="eyebrow">tok/s history</span>
+        <span className="sp-muted">{historyLabel()}</span>
       </div>
       {!hasData ? (
         <div
@@ -129,18 +127,17 @@ export function LlmTrendChart({
         <svg
           viewBox={`0 0 ${VIEW_W} ${VIEW_H}`}
           preserveAspectRatio="none"
-          className="block w-full"
-          style={{ height: 64 }}
+          className="sp-trend-svg"
           role="img"
           aria-label="Generation and prefill tokens per second over the last 30 minutes"
         >
           {prefillPts.map((points, index) => (
             <g key={`prefill-${index}`}>
-              <path d={areaPath(points)} fill="var(--color-text)" opacity={0.1} />
+              <path d={areaPath(points)} fill="var(--color-info)" opacity={0.12} />
               <polyline
                 points={points}
                 fill="none"
-                stroke="var(--color-text)"
+                stroke="var(--color-info)"
                 strokeWidth="1.5"
                 vectorEffect="non-scaling-stroke"
                 strokeLinejoin="round"
@@ -164,7 +161,7 @@ export function LlmTrendChart({
           ))}
         </svg>
       )}
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-muted">
+      <div className="sp-trend-foot">
         <span className="inline-flex items-center gap-1.5">
           <span
             aria-hidden
@@ -191,6 +188,7 @@ export function LlmTrendChart({
             {ttftAvg != null ? `${ttftAvg.toFixed(3)}s` : "—"}
           </span>
         </span>
+        <span className="text-[9px]">avg over busy samples only</span>
       </div>
       <p className="text-[9px] leading-snug text-muted/80">
         Each series is scaled to its own peak, so line height is not comparable

@@ -25,6 +25,7 @@ test("startup preflight permits loopback and fails closed on direct LAN binding"
     localCollectors: { available: true },
   });
   assert.equal(exposed.fatal, true);
+  assert.equal(exposed.authMode, "required-missing");
   assert.match(exposed.errors.join(" "), /SPARKDASH_TOKEN|loopback|reverse proxy|Tailscale/i);
 
   const authed = evaluateStartupPreflight({
@@ -39,6 +40,25 @@ test("startup preflight permits loopback and fails closed on direct LAN binding"
   assert.equal(authed.authMode, "bearer");
 });
 
+test("startup preflight says plainly when a tokenless remote bind is left open", () => {
+  const open = evaluateStartupPreflight({
+    bindHost: "0.0.0.0",
+    tokenConfigured: false,
+    allowOpenRemote: true,
+    configWritable: true,
+    secretsKey: { present: true, source: "file" },
+    sshIdentity: { configured: false },
+    localCollectors: { available: true },
+  });
+  assert.equal(open.fatal, false);
+  assert.equal(open.authMode, "open-remote");
+  const warning = open.warnings.find((w) => w.includes("0.0.0.0"));
+  assert.ok(warning, "expected an open-bind warning");
+  assert.match(warning, /is open/);
+  assert.match(warning, /SPARKDASH_ALLOW_OPEN_REMOTE is unset or 1/);
+  assert.match(warning, /SPARKDASH_TOKEN/);
+});
+
 test("Compose files default to loopback and do not hard-code 0.0.0.0", async () => {
   const root = join(dirname(fileURLToPath(import.meta.url)), "../../..");
   for (const file of ["docker-compose.yml", "docker-compose.dev.yml"]) {
@@ -46,4 +66,21 @@ test("Compose files default to loopback and do not hard-code 0.0.0.0", async () 
     assert.match(text, /BIND_HOST=\$\{BIND_HOST:-127\.0\.0\.1\}/);
     assert.equal(text.includes("BIND_HOST=0.0.0.0"), false);
   }
+});
+
+test("Compose files build for the host platform and cover both architectures", async () => {
+  const root = join(dirname(fileURLToPath(import.meta.url)), "../../..");
+  for (const file of ["docker-compose.yml", "docker-compose.dev.yml"]) {
+    const text = await readFile(join(root, file), "utf8");
+    // A hard-coded build platform produces an arm64 image on every host, and
+    // `docker compose up` then runs it under emulation after warning that the
+    // image platform does not match the host. Docker detects the host itself.
+    assert.equal(/^\s+platforms:/m.test(text), false, `${file} must not pin build platforms`);
+    // Cross-builds pin the build and the container platform together instead.
+    assert.match(text, /platform: \$\{DOCKER_DEFAULT_PLATFORM:-\}/);
+  }
+  // The opt-in override builds every supported architecture into one index.
+  const multiarch = await readFile(join(root, "docker-compose.multiarch.yml"), "utf8");
+  assert.match(multiarch, /-\s+linux\/arm64/);
+  assert.match(multiarch, /-\s+linux\/amd64/);
 });

@@ -10,6 +10,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ChevronDownIcon } from "../ui/icons";
+import { CardPreview } from "./CardPreview";
 import { shareCardFileName, type ShareCardModel } from "./benchShareCard";
 import { canCopyImages, copyCardImage, copyTextOnly, renderCardObjectUrl } from "./shareImage";
 
@@ -21,7 +22,7 @@ interface BenchCopyButtonProps {
   /** Builds the share card lazily; only called when an image is requested. */
   buildCard: () => ShareCardModel;
   /** Which benchmark the card came from — used for the download name. */
-  kind: "decode" | "prefill";
+  kind: "decode" | "prefill" | "quality";
   /** Settings → Benchmark share image: adds the format menu to the button. */
   shareImage: boolean;
   onError: (message: string) => void;
@@ -347,40 +348,19 @@ export function BenchCopyButton({
         )}
       {preview &&
         createPortal(
-          <span
-            role="dialog"
-            aria-label="Benchmark share card"
-            className="fixed inset-0 z-[10000] flex flex-col items-center justify-center gap-3 bg-black/75 p-5"
-            onMouseDown={(e) => {
-              if (e.target === e.currentTarget) closePreview();
-            }}
-          >
-            {/* eslint-disable-next-line jsx-a11y/alt-text -- alt text is on the img below */}
-            <img
-              src={preview}
-              alt="Benchmark result card — right-click to copy it"
-              className="max-h-[68vh] max-w-full rounded-lg border border-border shadow-card"
-            />
-            <span className="flex max-w-lg flex-col items-center gap-2">
-              <span className="text-center text-[11px] leading-snug text-white/85">
-                Right-click → <strong>Copy Image</strong>, or drag the card straight into your post.
-                Browsers only let a page write images to the clipboard over HTTPS or localhost, which
-                this page is not — so the image is here for your browser to copy.
-              </span>
-              <span className="flex gap-2">
-                <button
-                  type="button"
-                  className="bench-btn bench-btn--ghost"
-                  onClick={downloadPreview}
-                >
-                  Download PNG
-                </button>
-                <button type="button" className="bench-btn bench-btn--primary" onClick={closePreview}>
-                  Close
-                </button>
-              </span>
-            </span>
-          </span>,
+          <CardPreview
+            url={preview}
+            label="Benchmark share card"
+            imgAlt="Benchmark result card — right-click to copy it"
+            hint={
+              <>
+                Right-click → <strong>Copy Image</strong>, or drag the card into your post. Browsers only let a page copy
+                images over HTTPS or localhost, so the card is shown here for your browser to copy.
+              </>
+            }
+            onClose={closePreview}
+            onDownload={downloadPreview}
+          />,
           document.body
         )}
     </span>

@@ -1,22 +1,107 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { SparkSnapshot } from "../../api/types";
+import type { AlertInstance, SparkSnapshot } from "../../api/types";
+import { fleetExceptions } from "../../shared/fleetExceptions";
+import { AlertTriangleIcon, ChevronRightIcon } from "../ui/icons";
 
-type Alert = { key: string; spark: SparkSnapshot; label: string; severity: "critical" | "warning" };
+export type FleetAlert = {
+  /** `${unitId}:${id}` — the server's alerts use the same keys. */
+  key: string;
+  unitId: string;
+  unitName: string;
+  label: string;
+  detail?: string;
+  severity: "critical" | "warning";
+  /** Thermal / hardware throttle: safety-relevant, shown even with the full list off. */
+  throttle?: boolean;
+  /** When the server says the condition began (survives reloads); null = counted from first sight here. */
+  startsAt: number | null;
+};
 
-function derive(sparks: SparkSnapshot[]): Alert[] {
-  const alerts: Alert[] = [];
+/** The strip's own conditions, from the module the server's alert notifications use too. */
+export function deriveAlerts(sparks: SparkSnapshot[], unit: "celsius" | "fahrenheit" = "celsius"): FleetAlert[] {
+  const alerts: FleetAlert[] = [];
   for (const spark of sparks) {
-    if (!spark.online) alerts.push({ key: `${spark.id}:offline`, spark, label: "Host unreachable", severity: "critical" });
-    if (spark.metrics.gpu?.throttle?.active) alerts.push({ key: `${spark.id}:throttle`, spark, label: `GPU throttled: ${spark.metrics.gpu.throttle.detail}`, severity: "critical" });
-    if (spark.metrics.storage.some((disk) => disk.percentage >= 90)) alerts.push({ key: `${spark.id}:disk`, spark, label: "Storage at or above 90%", severity: "warning" });
-    if (spark.llmMonitoring !== false && spark.metrics.llm.length > 0 && spark.metrics.llm.every((llm) => !llm.available)) alerts.push({ key: `${spark.id}:llm`, spark, label: "LLM unavailable", severity: "warning" });
-    if (spark.tailscaleMonitoring && spark.metrics.tailscale && (!spark.metrics.tailscale.available || spark.metrics.tailscale.online === false)) alerts.push({ key: `${spark.id}:tailnet`, spark, label: "Tailnet unavailable", severity: "warning" });
+    for (const ex of fleetExceptions(spark, unit)) {
+      alerts.push({
+        key: `${spark.id}:${ex.id}`,
+        unitId: spark.id,
+        unitName: spark.name,
+        label: ex.label,
+        ...(ex.detail ? { detail: ex.detail } : {}),
+        severity: ex.severity,
+        ...(ex.id === "throttle" ? { throttle: true } : {}),
+        startsAt: null,
+      });
+    }
   }
   return alerts;
 }
 
-export function FleetAlertStrip({ sparks, onSelect }: { sparks: SparkSnapshot[]; onSelect?: (id: string) => void }) {
-  const alerts = useMemo(() => derive(sparks), [sparks]);
+/**
+ * The server's firing alerts as strip rows. A strip condition the browser can
+ * still see takes its text from the live snapshot, so it honours the
+ * temperature unit; a Health finding keeps the server's words.
+ */
+export function serverAlertRows(alerts: AlertInstance[], sparks: SparkSnapshot[], unit: "celsius" | "fahrenheit" = "celsius"): FleetAlert[] {
+  const live = new Map(deriveAlerts(sparks, unit).map((a) => [a.key, a]));
+  return alerts.map((a) => {
+    const here = live.get(a.key);
+    return {
+      key: a.key,
+      unitId: a.unitId,
+      unitName: here?.unitName ?? a.unitName,
+      label: here?.label ?? a.label,
+      ...(here ? (here.detail ? { detail: here.detail } : {}) : a.summary && a.summary !== a.label ? { detail: a.summary } : {}),
+      severity: a.severity,
+      ...(a.ruleId === "throttle" ? { throttle: true } : {}),
+      startsAt: a.startsAt,
+    };
+  });
+}
+
+/**
+ * What the strip lists: the server's alerts while alert notifications are on
+ * (and have arrived), otherwise its own derivation. `showExceptions` is the user
+ * setting for the full list; throttle alerts are safety-relevant and always show.
+ */
+export function stripAlerts({
+  sparks,
+  alertsEnabled = false,
+  serverAlerts = null,
+  showExceptions = true,
+  temperatureUnit = "celsius",
+}: {
+  sparks: SparkSnapshot[];
+  alertsEnabled?: boolean;
+  serverAlerts?: AlertInstance[] | null;
+  showExceptions?: boolean;
+  temperatureUnit?: "celsius" | "fahrenheit";
+}): FleetAlert[] {
+  const all = alertsEnabled && serverAlerts ? serverAlertRows(serverAlerts, sparks, temperatureUnit) : deriveAlerts(sparks, temperatureUnit);
+  return showExceptions ? all : all.filter((a) => a.throttle);
+}
+
+/** Fleet exception strip. */
+export function FleetAlertStrip({
+  sparks,
+  onSelect,
+  showExceptions = true,
+  temperatureUnit = "celsius",
+  alertsEnabled = false,
+  serverAlerts = null,
+}: {
+  sparks: SparkSnapshot[];
+  onSelect?: (id: string) => void;
+  showExceptions?: boolean;
+  temperatureUnit?: "celsius" | "fahrenheit";
+  /** Alert notifications on: list the server's firing alerts, with their real durations. */
+  alertsEnabled?: boolean;
+  serverAlerts?: AlertInstance[] | null;
+}) {
+  const alerts = useMemo(
+    () => stripAlerts({ sparks, alertsEnabled, serverAlerts, showExceptions, temperatureUnit }),
+    [sparks, alertsEnabled, serverAlerts, showExceptions, temperatureUnit]
+  );
   const firstSeen = useRef(new Map<string, number>());
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
@@ -26,17 +111,26 @@ export function FleetAlertStrip({ sparks, onSelect }: { sparks: SparkSnapshot[];
     const timer = window.setInterval(() => setNow(Date.now()), 30_000);
     return () => window.clearInterval(timer);
   }, [alerts]);
-  if (alerts.length === 0) return <p className="text-xs text-success" role="status">No active fleet exceptions.</p>;
+  if (alerts.length === 0) return null;
   return (
-    <section className="panel p-3" aria-labelledby="fleet-alerts-title">
-      <h2 id="fleet-alerts-title" className="text-xs font-semibold text-text-strong">Active fleet exceptions · {alerts.length}</h2>
-      <ul className="mt-2 flex flex-wrap gap-2">
-        {alerts.map((alert) => <li key={alert.key}>
-          <button type="button" onClick={() => onSelect?.(alert.spark.id)} className={`min-h-11 rounded border px-3 py-2 text-left text-xs ${alert.severity === "critical" ? "border-danger/50 text-danger" : "border-warning/50 text-warning"}`}>
-            <strong>{alert.spark.name}</strong> · {alert.label} · {Math.max(0, Math.floor((now - (firstSeen.current.get(alert.key) ?? now)) / 60_000))}m
-          </button>
-        </li>)}
-      </ul>
+    <section className="ov-alerts" aria-label="Active fleet exceptions">
+      {alerts.map((alert) => {
+        const since = alert.startsAt ?? firstSeen.current.get(alert.key) ?? now;
+        const mins = Math.max(0, Math.floor((now - since) / 60_000));
+        return (
+          <div key={alert.key} className={`alert-strip ov-alert ${alert.severity === "critical" ? "ov-alert--bad" : ""}`} role="status">
+            <AlertTriangleIcon className="h-[18px] w-[18px] shrink-0" />
+            <div className="ov-alert__text">
+              <b>{alert.unitName}</b> {alert.label}.
+              <small>{[alert.detail, `${mins}m active`].filter(Boolean).join(" · ")}</small>
+            </div>
+            <button type="button" className="btn btn--sm" onClick={() => onSelect?.(alert.unitId)}>
+              Open {alert.unitName}
+              <ChevronRightIcon className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        );
+      })}
     </section>
   );
 }

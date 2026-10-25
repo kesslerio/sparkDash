@@ -161,12 +161,22 @@ test("LlmTokenLedger: daily buckets credit deltas and serve ranged snapshots", (
   const all = ledger.snapshot("all", d2).series[0];
   assert.equal(all.models[0].completionTokens, 200);
 
-  // "today" (day of d2) only includes the d2 delta.
+  // "today" is a rolling last-24-hours window (hourly buckets), so the d1
+  // delta (23:00 UTC, 11 h before d2) is included.
   const today = ledger.snapshot("today", d2).series[0];
   assert.equal(today.models.length, 1);
-  assert.equal(today.models[0].completionTokens, 100);
-  assert.equal(today.models[0].promptTokens, 20);
+  assert.equal(today.models[0].completionTokens, 200);
+  assert.equal(today.models[0].promptTokens, 30);
   assert.equal(today.models[0].lastSeenAt, null);
+
+  // 6h window: d1 (11 h before d2) falls outside, only the d2 delta counts.
+  const six = ledger.snapshot("6h", d2).series[0];
+  assert.equal(six.models[0].completionTokens, 100);
+  assert.equal(six.models[0].promptTokens, 20);
+
+  // 1h window: same — only the d2 delta.
+  const one = ledger.snapshot("1h", d2).series[0];
+  assert.equal(one.models[0].completionTokens, 100);
 
   // 7d/14d/30d windows include both days.
   const seven = ledger.snapshot("7d", d2).series[0];
@@ -210,6 +220,75 @@ test("LlmTokenLedger: backends without the split keep cachedTokens at 0", () => 
   const s = ledger.snapshot().series[0];
   assert.equal(s.models[0].cachedTokens, 0);
   assert.equal(s.models[0].promptTokens, 1000);
+});
+
+test("LlmTokenLedger: an engine that never reports the split is flagged, not read as 0 % hits", () => {
+  const ledger = tmpLedger();
+  const t0 = Date.UTC(2026, 9, 28, 12, 0, 0);
+  ledger.record([obs("spark-a", 8888, "org/a", 100, 1000)], t0);
+  ledger.record([obs("spark-a", 8888, "org/a", 150, 2000)], t0 + 60_000);
+  const s = ledger.snapshot().series[0];
+  assert.equal(s.models[0].cachedTokens, 0);
+  assert.equal(s.models[0].cacheReported, false);
+  assert.equal(s.totals.cacheReported, false);
+  // Range buckets and the detailed history carry the same verdict.
+  assert.equal(ledger.snapshot("today", t0 + 120_000).series[0].models[0].cacheReported, false);
+  const row = ledger.history(t0 + 120_000).hour.at(-1);
+  assert.equal(row.cacheReported, false);
+});
+
+test("LlmTokenLedger: a reporting engine stays reported even when nothing hit", () => {
+  const ledger = tmpLedger();
+  const t0 = 1_730_000_000_000;
+  ledger.record([obs("spark-a", 8888, "org/a", 100, 1000, 0)], t0);
+  ledger.record([obs("spark-a", 8888, "org/a", 150, 2000, 0)], t0 + 60_000);
+  const s = ledger.snapshot().series[0];
+  assert.equal(s.models[0].cachedTokens, 0);
+  assert.equal(s.models[0].cacheReported, true); // a measured zero, i.e. real misses
+  assert.equal(s.totals.cacheReported, true);
+});
+
+test("LlmTokenLedger: the reported flag survives a restart", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llm-tokens-"));
+  const file = path.join(dir, "llm-token-totals.json");
+  const t0 = 1_730_000_000_000;
+  const first = new LlmTokenLedger(file);
+  first.record([obs("spark-a", 8888, "org/a", 100, 1000)], t0);
+  first.record([obs("spark-a", 8888, "org/a", 150, 2000)], t0 + 60_000);
+  first.close();
+  const second = new LlmTokenLedger(file);
+  assert.equal(second.snapshot().series[0].models[0].cacheReported, false);
+});
+
+test("LlmTokenLedger: legacy rows fall back to the endpoint's cached counter", () => {
+  // A file written before the flag existed carries no cacheReported anywhere.
+  const legacy = (counterCached, rowCached) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llm-tokens-"));
+    const file = path.join(dir, "llm-token-totals.json");
+    fs.writeFileSync(
+      file,
+      JSON.stringify({
+        version: 1,
+        series: {
+          "spark-a:8888": {
+            updatedAt: 1,
+            lastModelId: "org/a",
+            counters: { output: 100, prompt: 1000, cached: counterCached },
+            models: {
+              "org/a": { promptTokens: 1000, completionTokens: 100, cachedTokens: rowCached, lastSeenAt: 1 },
+            },
+          },
+        },
+      })
+    );
+    return new LlmTokenLedger(file).snapshot().series[0];
+  };
+  // Endpoint publishes the counter: a zero really is a cache miss.
+  assert.equal(legacy(0, 0).models[0].cacheReported, true);
+  // Endpoint never publishes it: the stored zero is not a measurement.
+  assert.equal(legacy(null, 0).models[0].cacheReported, false);
+  // Rows that did record cached tokens prove the backend reports the split.
+  assert.equal(legacy(null, 500).models[0].cacheReported, true);
 });
 
 test("LlmTokenLedger: daily buckets carry the cached split", () => {
@@ -318,11 +397,70 @@ test("LlmTokenRuntime: tick pulls observations via orderedSnapshots and route re
   assert.equal(s.models[0].completionTokens, 5); // second tick: 20 - 15
 
   const routes = [];
-  const app = { get: (p, h) => routes.push({ p, h }) };
+  const app = { get: (p, h) => routes.push({ p, h }), delete: () => {} };
   registerLlmTokenTotalsRoute(app, ledger);
-  assert.equal(routes.length, 1);
-  assert.equal(routes[0].p, "/api/llm-token-totals");
+  assert.deepEqual(routes.map((r) => r.p), ["/api/llm-token-totals/history", "/api/llm-token-totals"]);
   let sent = null;
-  routes[0].h({}, { json: (v) => (sent = v) });
+  routes[1].h({}, { json: (v) => (sent = v) });
   assert.equal(sent.series[0].sparkId, "spark-a");
+  let hist = null;
+  routes[0].h({}, { json: (v) => (hist = v) });
+  assert.ok(Array.isArray(hist.day) && Array.isArray(hist.hour));
+});
+
+test("LlmTokenLedger.history: day and hour rows carry the same credited deltas, oldest first", () => {
+  const ledger = tmpLedger();
+  const obs = (output, prompt, cached) => [
+    { sparkId: "s1", port: 8888, modelId: "m/a", output, prompt, cached },
+  ];
+  const t0 = Date.UTC(2026, 9, 6, 23, 50); // 23:50 UTC on Oct 6
+  ledger.record(obs(100, 1000, 200), t0); // baseline only
+  ledger.record(obs(150, 1500, 400), t0 + 5 * 60_000); // 23:55 -> Oct 6 / hour 23
+  ledger.record(obs(170, 1600, 400), t0 + 20 * 60_000); // 00:10 -> Oct 7 / hour 00
+  const h = ledger.history(t0 + 30 * 60_000);
+  assert.deepEqual(h.day.map((r) => [r.t, r.completionTokens, r.promptTokens, r.cachedTokens]), [
+    ["2026-10-06", 50, 500, 200],
+    ["2026-10-07", 20, 100, 0],
+  ]);
+  assert.deepEqual(h.hour.map((r) => r.t), ["2026-10-06T23", "2026-10-07T00"]);
+  assert.equal(h.firstDay, "2026-10-06");
+  assert.equal(h.retention.hours, 72);
+  assert.equal(h.day[0].sparkId, "s1");
+  assert.equal(h.day[0].port, 8888);
+});
+
+test("LlmTokenLedger: hourly buckets are pruned to 72 hours and survive a save/load round trip", () => {
+  const ledger = tmpLedger();
+  const base = Date.UTC(2026, 0, 1, 0, 0);
+  let out = 0;
+  ledger.record([{ sparkId: "s1", port: 1, modelId: "m", output: out, prompt: 0, cached: 0 }], base);
+  for (let h = 1; h <= 100; h++) {
+    out += 10;
+    ledger.record([{ sparkId: "s1", port: 1, modelId: "m", output: out, prompt: 0, cached: 0 }], base + h * 3_600_000);
+  }
+  const hours = ledger.history(base + 100 * 3_600_000).hour;
+  assert.equal(hours.length, 72);
+  assert.equal(hours.at(-1).completionTokens, 10);
+  ledger.flush();
+  const reloaded = new LlmTokenLedger(ledger.filePath);
+  assert.equal(reloaded.history().hour.length, 72);
+});
+
+test("reset() zeroes totals and history, per Spark or for all, and keeps counter baselines", () => {
+  const ledger = tmpLedger();
+  const t0 = Date.UTC(2026, 8, 1, 10, 0, 0);
+  ledger.record([obs("a", 8000, "m1", 100, 1000), obs("b", 8000, "m2", 50, 500)], t0);
+  ledger.record([obs("a", 8000, "m1", 160, 1400), obs("b", 8000, "m2", 80, 700)], t0 + 15_000);
+  const total = (id) => ledger.snapshot("all").series.find((s) => s.sparkId === id)?.models.reduce((n, m) => n + m.completionTokens, 0) ?? 0;
+  assert.equal(total("a"), 60);
+  assert.equal(total("b"), 30);
+  assert.equal(ledger.reset({ sparkId: "a" }), 1);
+  assert.equal(total("a"), 0);
+  assert.equal(total("b"), 30, "other Sparks are untouched");
+  // The engine counter kept its baseline: only the new 40 tokens are credited, not all 200.
+  ledger.record([obs("a", 8000, "m1", 200, 1500)], t0 + 30_000);
+  assert.equal(total("a"), 40);
+  assert.equal(ledger.reset(), 2);
+  assert.equal(total("b"), 0);
+  assert.equal(ledger.reset(), 0);
 });

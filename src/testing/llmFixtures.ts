@@ -208,7 +208,6 @@ export function makeSessionRows(now: number): ConversationRow[] {
       badge: "unknown",
       port: DEEPSEEK_PORT,
       lastUsedAt: now - 8 * 60_000,
-      gateway: "mac-mini",
       contextUsed: 64_000,
       contextWindow: 1_048_576,
       contextApprox: true,

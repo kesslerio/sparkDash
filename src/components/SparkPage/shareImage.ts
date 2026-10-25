@@ -11,11 +11,13 @@
  * download that keeps the image usable when the clipboard refuses.
  */
 import {
+  detectShareCardTheme,
   SHARE_CARD_SCALE,
   SHARE_CARD_WIDTH,
   paintShareCard,
   shareCardHeight,
   type ShareCardModel,
+  type ShareCardTheme,
 } from "./benchShareCard";
 
 export interface ShareImageDeps {
@@ -26,13 +28,18 @@ export interface ShareImageDeps {
   /** Clipboard writer for the text; `null` disables it. */
   writeText?: ((text: string) => Promise<void>) | null;
   download?: (blob: Blob, fileName: string) => void;
+  /** Card theme; default follows the app's active theme (dark for Dark/OLED, light for White/Light). */
+  theme?: ShareCardTheme;
+  /** Resolves once the card font is ready to draw with; tests pass a stub, `null` skips waiting. */
+  loadFonts?: (() => Promise<void>) | null;
 }
 
 function defaultCreateCanvas(): HTMLCanvasElement {
   return document.createElement("canvas");
 }
 
-async function defaultWriteClipboard(blob: Blob): Promise<void> {
+/** Put a PNG on the clipboard; rejects where the page cannot (see `canCopyImages`). */
+export async function copyPngToClipboard(blob: Blob): Promise<void> {
   if (typeof ClipboardItem === "undefined" || !navigator.clipboard?.write) {
     throw new Error("clipboard image write unsupported");
   }
@@ -71,24 +78,40 @@ export async function copyTextOnly(text: string, deps: ShareImageDeps = {}): Pro
   document.body.removeChild(ta);
 }
 
-/** Paint the card at 2× and encode it, or `null` when the browser cannot. */
-export function renderShareCardPng(
+async function defaultLoadFonts(): Promise<void> {
+  // A canvas silently uses the fallback font unless the face is already loaded.
+  const fonts = typeof document !== "undefined" ? document.fonts : undefined;
+  if (!fonts?.load) return;
+  await Promise.race([
+    Promise.all([
+      fonts.load('400 24px "Geist Variable"'),
+      fonts.load('500 24px "Geist Variable"'),
+      fonts.load('600 24px "Geist Variable"'),
+      fonts.load('700 24px "Geist Variable"'),
+    ]),
+    new Promise((resolve) => setTimeout(resolve, 1500)),
+  ]);
+}
+
+/** Paint the card at 2× in the active theme and encode it, or `null` when the browser cannot. */
+export async function renderShareCardPng(
   model: ShareCardModel,
   deps: ShareImageDeps = {}
 ): Promise<Blob | null> {
   try {
+    if (deps.loadFonts !== null) await (deps.loadFonts ?? defaultLoadFonts)().catch(() => {});
     const canvas = (deps.createCanvas ?? defaultCreateCanvas)();
     canvas.width = SHARE_CARD_WIDTH * SHARE_CARD_SCALE;
     canvas.height = shareCardHeight(model) * SHARE_CARD_SCALE;
     const ctx = canvas.getContext("2d");
-    if (!ctx) return Promise.resolve(null);
+    if (!ctx) return null;
     ctx.scale(SHARE_CARD_SCALE, SHARE_CARD_SCALE);
-    paintShareCard(ctx, model);
-    return new Promise((resolve) => {
+    paintShareCard(ctx, model, deps.theme ?? detectShareCardTheme());
+    return await new Promise<Blob | null>((resolve) => {
       canvas.toBlob((blob) => resolve(blob ?? null), "image/png");
     });
   } catch {
-    return Promise.resolve(null);
+    return null;
   }
 }
 
@@ -127,7 +150,7 @@ export async function copyCardImage(
 
   if (deps.writeClipboard !== null) {
     try {
-      await (deps.writeClipboard ?? defaultWriteClipboard)(png);
+      await (deps.writeClipboard ?? copyPngToClipboard)(png);
       return "copied";
     } catch {
       /* fall through to the download — the user still gets the image */

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { LlmMetrics, LlmTelemetryPoint } from "../../api/types";
-import { fetchLlmTelemetry } from "../../api/client";
+import { fetchLlmTelemetry } from "../../api/llmTelemetryClient";
 import { llmConcurrency, summarizeLlmHour, type LlmHourSummary } from "./llmHour";
 
 const HOUR_MS = 60 * 60_000;
@@ -115,55 +115,138 @@ function RequestPips({ running, waiting, extent }: { running: number; waiting: n
 export function OverviewLlmFooter({ sparkId, port, llm }: { sparkId: string; port: number | null; llm: LlmMetrics }) {
   const hour = useLlmHour(sparkId, port);
   const { running, waiting, capacity } = llmConcurrency(llm);
+  // An endpoint that answered but whose stats could not be read has unknown
+  // rates this poll, not zero ones.
+  const unreadable = llm.measurementValid === false;
+  const unreadableWhy = unreadable ? llm.measurementError ?? "Stats could not be read" : undefined;
+  const decodeNow = unreadable ? null : llm.generationTps;
+  const prefillNow = unreadable ? null : llm.prefillTps;
+  // Engines that report a rate only when a request finishes still say work is in flight.
+  const decoding = !unreadable && llm.decodeActive === true && !((decodeNow ?? 0) > 0);
+  const prefilling = !unreadable && llm.prefillActive === true && !((prefillNow ?? 0) > 0);
+  const isStrata = llm.backend === "strata";
+  const perStream = !unreadable ? llm.perStreamTps ?? null : null;
+  const perRequestPrefill = !unreadable ? llm.perStreamPrefillTps ?? null : null;
   const extent = capacity ?? hour?.peakRunning ?? 0;
-  const requestsTitle =
-    running == null
-      ? "This engine does not report running requests"
-      : `${running} running${waiting ? `, ${waiting} queued` : ""}${
-          capacity != null ? ` of ${capacity} slots` : hour?.peakRunning != null ? `; peak ${hour.peakRunning} in the last hour` : ""
-        }`;
 
   return (
-    <div className="mt-3.5 flex flex-col gap-3 border-t border-border pt-3">
+    <div className="ov-llm-footer mt-3.5 flex flex-col gap-3 border-t border-border pt-3">
       <div className="flex items-end justify-between gap-3">
-        <div className="flex min-w-0 flex-col gap-1">
+        <div
+          className="flex min-w-0 flex-col gap-1"
+          title={
+            isStrata
+              ? "Live sliding-window decode rate. When that window is unavailable, the active-slot mean sums each active slot’s generated tokens divided by its elapsed time since first token; it excludes prefill time."
+              : undefined
+          }
+        >
           <div>
-            <span className="font-tabular text-[28px] font-bold leading-none text-text-strong">
-              {formatRate(llm.generationTps)}
-            </span>
-            <span className="text-sm font-normal text-muted"> tok/s</span>
+            {decoding ? (
+              <span className="text-sm font-semibold text-text-strong">decoding</span>
+            ) : (
+              <>
+                <span className="font-tabular text-[28px] font-bold leading-none text-text-strong" title={unreadableWhy}>
+                  {formatRate(decodeNow)}
+                </span>
+                <span className="text-sm font-normal text-muted"> tok/s</span>
+              </>
+            )}
           </div>
           <div className="font-tabular text-[11px] text-muted" title="Median decode tok/s over busy ten-second samples in the last hour">
             p50 <span className="text-text">{formatRate(hour?.decodeP50)}</span> · {busyCaption(hour)}
           </div>
+          {isStrata && llm.generationTpsSource === "slot-mean" ? (
+            <div className="text-[11px] text-muted">active-slot mean</div>
+          ) : null}
+          {perStream != null ? (
+            <div
+              className="font-tabular text-[11px] text-muted"
+              title="Average decode throughput of one running stream (1 / mean seconds per output token). Only engines that publish a per-token latency histogram report it."
+            >
+              {perStream.toFixed(1)} tok/s per stream
+            </div>
+          ) : null}
         </div>
         <DecodeSparkline points={hour?.points ?? []} p50={hour?.decodeP50 ?? null} now={Date.now()} />
       </div>
       <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5 text-[12px]">
-        <div className="flex items-center gap-2 whitespace-nowrap" title={requestsTitle}>
-          <span className="text-muted">Requests</span>
-          {running == null ? (
-            <span className="text-muted">—</span>
-          ) : (
-            <>
-              <RequestPips running={running} waiting={waiting ?? 0} extent={extent} />
-              <span className="font-tabular text-text">
-                {running}
-                {capacity != null ? <span className="text-muted">/{capacity}</span> : null}
-                {waiting ? <span className="text-warning"> +{waiting}q</span> : null}
-                {capacity == null && hour?.peakRunning ? <span className="text-muted"> · pk {hour.peakRunning}</span> : null}
-              </span>
-            </>
-          )}
-        </div>
+        <RequestsRow running={running} waiting={waiting} capacity={capacity} peak={hour?.peakRunning ?? null} extent={extent} />
         <div
           className="whitespace-nowrap font-tabular text-muted"
-          title="Live prefill tok/s · median over busy ten-second samples in the last hour"
+          title={
+            isStrata
+              ? "Engine-reported mean for computed/new prompt tokens. It may be from an earlier prefill and is not an aggregate across slots."
+              : "Live prefill tok/s · median over busy ten-second samples in the last hour"
+          }
         >
-          prefill <span className="font-semibold text-text">{formatRate(llm.prefillTps)}</span>
+          prefill{" "}
+          <span className="font-semibold text-text" title={unreadableWhy}>
+            {prefilling ? "prefilling" : formatRate(prefillNow)}
+          </span>
           <span> · p50 {formatRate(hour?.prefillP50)}</span>
+          {isStrata && (prefillNow ?? 0) > 0 ? <span> · last reported mean</span> : null}
         </div>
       </div>
+      {perRequestPrefill != null ? (
+        <div
+          className="font-tabular text-[11px] text-muted"
+          title="Effective prefill rate of one request (prompt tokens ÷ prefill seconds over finished requests). The prompt counter includes prefix-cache tokens, so this is an effective speed, not raw GPU speed; it is held between completions."
+        >
+          {Math.round(perRequestPrefill).toLocaleString()} tok/s per request — effective (incl. cached tokens)
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * Concurrent requests: pips plus a plain count. A queue the engine does not
+ * report reads "queue unknown", and running requests it does not report read
+ * "?" against a known slot count, so neither is shown as 0.
+ */
+function RequestsRow({
+  running,
+  waiting,
+  capacity,
+  peak,
+  extent,
+}: {
+  running: number | null;
+  waiting: number | null;
+  capacity: number | null;
+  peak: number | null;
+  extent: number;
+}) {
+  if (running == null && capacity == null) {
+    return (
+      <div className="flex items-center gap-2 whitespace-nowrap" title="This engine does not report running requests">
+        <span className="text-muted">Requests</span>
+        <span className="text-muted">—</span>
+      </div>
+    );
+  }
+  const parts = [
+    running == null ? `?/${capacity} slots` : `${running} running`,
+    ...(running == null ? [] : [waiting == null ? "queue unknown" : `${waiting} queued`]),
+    ...(running != null && capacity != null ? [`${capacity} slots`] : []),
+    ...(capacity == null && peak ? [`peak ${peak}`] : []),
+  ];
+  return (
+    <div
+      className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1"
+      title={capacity != null && running != null ? `${capacity} requests decode in parallel on this engine` : undefined}
+    >
+      <span className="text-muted">Requests</span>
+      {running != null ? <RequestPips running={running} waiting={waiting ?? 0} extent={extent} /> : null}
+      {/* Each part stays whole; the list wraps between parts on a narrow card. */}
+      <span className="font-tabular text-text">
+        {parts.map((part, i) => (
+          <span key={part} className="whitespace-nowrap">
+            {i > 0 ? " · " : ""}
+            {part}
+          </span>
+        ))}
+      </span>
     </div>
   );
 }

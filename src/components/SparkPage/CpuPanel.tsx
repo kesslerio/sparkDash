@@ -1,5 +1,5 @@
 import type { CpuMetrics, HardwareInfo, MetricGap } from "../../api/types";
-import { Sparkline } from "../ui/Sparkline";
+import { TrendLine } from "../ui/TrendLine";
 import { Panel } from "../ui/Panel";
 import { CpuIcon } from "../ui/icons";
 import { honestGap } from "../ui/platform";
@@ -19,28 +19,6 @@ interface CpuPanelProps {
 
 function celsiusToFahrenheit(c: number): number {
   return Math.round((c * 9) / 5 + 32);
-}
-
-function MetricRow({
-  label,
-  spark,
-  value,
-  color = "var(--color-accent)",
-}: {
-  label: string;
-  spark: React.ReactNode;
-  value: React.ReactNode;
-  color?: string;
-}) {
-  return (
-    <div className="flex items-center justify-between text-sm">
-      <span className="text-muted">{label}</span>
-      <div className="flex items-center gap-3">
-        <span style={{ color }}>{spark}</span>
-        <span className="font-tabular text-sm font-semibold text-text">{value}</span>
-      </div>
-    </div>
-  );
 }
 
 /**
@@ -68,15 +46,20 @@ export function CpuPanel({
   const draw = cpu?.draw ?? 0;
   const tdp = cpu?.tdp ?? 0;
 
-  const displayTemp =
-    temperatureUnit === "fahrenheit" ? celsiusToFahrenheit(temperature) : temperature;
-  const tempLabel = temperatureUnit === "fahrenheit" ? `${displayTemp}°F` : `${displayTemp}°C`;
+  // No sensor (Windows exposes none without a driver): show a dash, not 0 °C.
+  const hasTemp = temperature > 0 || Boolean(cpu?.temperatureSource);
+  const displayTemp = !hasTemp
+    ? "—"
+    : temperatureUnit === "fahrenheit"
+      ? celsiusToFahrenheit(temperature)
+      : temperature;
 
   // A missing Mac temperature stays unavailable. A finite reading from the
   // privileged collector is a real value, not a platform gap.
   const hasTemperature =
     typeof cpu?.temperature === "number" && Number.isFinite(cpu.temperature) && cpu.temperature > 0;
-  const tempView = honestGap(unavailable, "cpu.temperature", tempLabel, {
+  const tempValueText = hasTemp ? `${displayTemp}${temperatureUnit === "fahrenheit" ? "°F" : "°C"}` : "—";
+  const tempView = honestGap(unavailable, "cpu.temperature", tempValueText, {
     nonDgx: !hasTemperature && (mac || cpu?.temperature == null),
   });
   const powerView = honestGap(unavailable, "cpu.power", `${draw}W${tdp > 0 ? ` / ${tdp}W` : ""}`, {
@@ -94,46 +77,75 @@ export function CpuPanel({
 
   const model = hardware?.cpuModel;
   const cores = hardware?.cpuCores;
+  const socPackage = cpu?.temperatureSource === "acpitz";
 
   return (
     <Panel
       title="CPU"
+      hint={
+        socPackage
+          ? "ACPI package zone (TSOC on GB10). This is the SoC, not a CPU die and not the GPU junction temperature from nvidia-smi."
+          : undefined
+      }
       icon={<CpuIcon />}
       className={`panel-cpu ${className ?? ""}`}
-      bodyClassName="space-y-3"
+      bodyClassName="sp-stack"
     >
-      <MetricRow
-        label="Usage"
-        color="var(--color-accent)"
-        spark={<Sparkline data={usageHistory} color="var(--color-accent)" width={180} />}
-        value={<span className="text-text-strong">{usage}%</span>}
-      />
-      <MetricRow
-        label="Temperature"
-        color={tempColor}
-        spark={tempView.muted ? null : <Sparkline data={tempHistory} color={tempColor} width={180} />}
-        value={
+      <div className="sp-duo">
+        <div className="sp-metric">
+          <span className="eyebrow">Usage</span>
+          <div className="big-num sp-big-md">
+            {usage}
+            <small>%</small>
+          </div>
+          <TrendLine data={usageHistory} height={36} color="var(--color-accent)" min={0} max={100} />
+        </div>
+        <div className="sp-metric">
           <span
-            className={`text-text-strong ${tempView.muted ? "font-normal text-muted" : ""}`}
-            title={tempView.title}
+            className="eyebrow"
+            // GB10 exposes no CPU package sensor, so the reading is an ACPI/SoC zone:
+            // say so rather than letting the tile claim it is the CPU (#142).
+            title={
+              tempView.muted
+                ? tempView.title
+                : cpu?.temperatureSource
+                  ? `Reading from ${cpu.temperatureSource} — ${
+                      cpu.temperatureLabel === "CPU"
+                        ? "the CPU package sensor"
+                        : "an ACPI/board thermal zone, not a CPU package sensor"
+                    }`
+                  : undefined
+            }
           >
-            {tempView.muted ? `unavailable: ${tempView.title}` : tempView.text}
+            {cpu?.temperatureLabel && cpu.temperatureLabel !== "CPU"
+              ? `Temperature (${cpu.temperatureLabel})`
+              : "Temperature"}
           </span>
-        }
-      />
-      <div className="flex justify-between text-sm">
-        <span className="text-muted">CPU Power</span>
-        <span
-          className={`font-tabular text-sm ${powerView.muted ? "text-muted" : "text-text"}`}
-          title={powerView.title}
-        >
+          {tempView.muted ? (
+            <div className="big-num sp-big-md font-normal text-muted" title={tempView.title}>
+              unavailable: {tempView.title}
+            </div>
+          ) : (
+            <>
+              <div className="big-num sp-big-md">
+                {displayTemp}
+                {hasTemp && <small>{temperatureUnit === "fahrenheit" ? "°F" : "°C"}</small>}
+              </div>
+              {hasTemp && <TrendLine data={tempHistory} height={36} color={tempColor} />}
+            </>
+          )}
+        </div>
+      </div>
+      <div className="sp-row">
+        <span className="text-muted">CPU power</span>
+        <span className={`mono ${powerView.muted ? "text-muted" : "text-text"}`} title={powerView.title}>
           {powerView.text}
         </span>
       </div>
       {model && (
-        <div className="flex justify-between border-t border-border pt-3 text-xs">
+        <div className="sp-row sp-row--rule">
           <span className="text-muted">Model</span>
-          <span className="font-tabular text-text" title={model}>
+          <span className="mono sp-clip text-text" title={model}>
             {model}
             {cores != null ? ` · ${cores} cores` : ""}
           </span>

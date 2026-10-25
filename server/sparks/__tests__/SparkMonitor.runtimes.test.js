@@ -115,8 +115,10 @@ test("only a configured Mac agent gets a runtimes interval", async (t) => {
       const { monitor, timers, startup } = harness(t, overrides);
       monitor.start();
       await startup();
+      // _runtimesIntervalId is the single source of truth for whether the
+      // Mac-agent runtimes poll is armed. A bare 30s-delay check would also
+      // match the always-on residentModels timer, which every kind gets.
       assert.equal(monitor._runtimesIntervalId, null);
-      assert.equal([...timers.values()].some((timer) => timer.delay === 30_000), false);
       assert.equal(monitor.snapshot().metrics.agentOnline, null);
       assert.equal(monitor.snapshot().metrics.runtimes, null);
     });
