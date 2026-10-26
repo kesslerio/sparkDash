@@ -632,3 +632,18 @@ vllm:time_to_first_token_seconds_sum{engine="0"} ${ttft}
   probe._applyVllmMetrics(body(1, 1, 1, 0), 1);
   assert.equal(probe.prefillTps, 0); // restart seeds without a spike
 });
+
+
+test("vLLM prompt-minus-cache counters win over iteration estimates", () => {
+  const probe = new LlmProbe({ lanIp: "127.0.0.1" }, 8888);
+  const body = (prompt, cached, gen, iter) => `vllm:prompt_tokens_total{engine="0"} ${prompt}
+vllm:prompt_tokens_cached_total{engine="0"} ${cached}
+vllm:generation_tokens_total{engine="0"} ${gen}
+vllm:iteration_tokens_total_sum{engine="0"} ${iter}
+`;
+  probe._applyVllmMetrics(body(1000, 900, 500, 2000), 1);
+  probe._applyVllmMetrics(body(1100, 960, 900, 2460), 1);
+  assert.equal(probe.prefillTps, 40);
+  assert.equal(probe.uncachedPrefillTps, 40);
+  assert.equal(probe.cachedPrefillTps, 60);
+});

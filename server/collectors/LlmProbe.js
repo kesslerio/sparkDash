@@ -2930,7 +2930,8 @@ export class LlmProbe {
       const srcExternal = this._getPromMetricLabeled(
         txt, "vllm:prompt_tokens_by_source_total", "source", "external_kv_transfer");
       let deltaCompute = null;
-      if (srcCompute != null && srcHit != null) {
+      let computedCounterAvailable = srcCompute != null && srcHit != null;
+      if (computedCounterAvailable) {
         this._setPrefillSplitRates(srcHit + (srcExternal ?? 0), srcCompute, dtSec, "cumulative");
         deltaCompute =
           this.lastPromptCompute != null ? Math.max(0, srcCompute - this.lastPromptCompute) : 0;
@@ -2941,6 +2942,7 @@ export class LlmProbe {
         // prompt would otherwise read as 100k+ tok/s "prefill". Only the
         // computed share is real prefill work.
         const prevCached = this.lastPrefillKinds?.cached;
+        computedCounterAvailable = cachedTok != null && prevCached != null;
         const deltaCached =
           cachedTok != null && prevCached != null ? Math.max(0, cachedTok - prevCached) : 0;
         deltaCompute = Math.max(0, deltaIn - deltaCached);
@@ -2964,7 +2966,7 @@ export class LlmProbe {
         // count on builds without it. TTFT includes queueing and belongs only
         // in the latency tiles, never in this throughput denominator.
         const iterationReady = iterSum != null && this.lastIterSum != null && deltaIter >= 0;
-        const deltaWork = srcCompute != null && srcHit != null
+        const deltaWork = computedCounterAvailable
           ? deltaCompute
           : iterationReady
             ? Math.max(0, deltaIter - Math.max(0, deltaOut))
