@@ -166,7 +166,7 @@ test("vLLM idle: flat counters → 0 tok/s (not sticky gauge logic)", async () =
   assert.equal(snap.prefillTps, 0);
 });
 
-test("vLLM prefill uses TTFT histogram sum when it advances", () => {
+test("vLLM prefill uses poll duration even when TTFT advances", () => {
   const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 8000);
   probe.lastTokenCounts = { input: 1000, output: 500 };
   probe.lastTtftSum = 10;
@@ -175,8 +175,8 @@ vllm:time_to_first_token_seconds_sum{engine="0"} 10.05
 `;
   probe._applyVllmMetrics(body, 2);
   assert.equal(probe.generationTps, 200); // (900-500)/2
-  // Δprompt 200 / Δttft 0.05s = 4000 tok/s, not smeared 200/2=100
-  assert.equal(probe.prefillTps, 4000);
+  // TTFT is a latency metric; throughput uses 200 tokens / 2 seconds.
+  assert.equal(probe.prefillTps, 100);
 });
 
 test("vLLM prefill falls back to poll dt when TTFT sum is flat", () => {
@@ -218,7 +218,7 @@ vllm:iteration_tokens_total_sum{engine="0"} 4200.0
   assert.equal(probe.generationTps, 100);
 });
 
-test("vLLM decode-only iteration surplus is treated as spec noise, not prefill", () => {
+test("vLLM small computed iteration work is retained alongside heavy decode", () => {
   const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 8000);
   probe.lastTokenCounts = { input: 1000, output: 500 };
   probe.lastIterSum = 2000;
@@ -228,9 +228,9 @@ vllm:iteration_tokens_total_sum{engine="0"} 2480.0
 `,
     2
   );
-  // Δiter 480, Δgen 400 → surplus 80 < 50% of decode → ignore
+  // Δiter 480 − Δgen 400 = 80 computed prompt tokens, even beside heavy decode.
   assert.equal(probe.generationTps, 200);
-  assert.equal(probe.prefillTps, 0);
+  assert.equal(probe.prefillTps, 40);
 });
 
 test("vLLM prompt_tokens_by_source: prefill counts computed tokens only", () => {
@@ -248,8 +248,8 @@ vllm:time_to_first_token_seconds_sum{engine="0"} 10.05
 `;
   probe._applyVllmMetrics(body, 2);
   assert.equal(probe.generationTps, 200); // (900-500)/2
-  // Δcompute 40 / Δttft 0.05s = 800 — not Δprompt 200 / 0.05 = 4000 inflated by cache hits
-  assert.equal(probe.prefillTps, 800);
+  // Both live prefill tiles use the same computed work and poll window.
+  assert.equal(probe.prefillTps, 20);
   assert.equal(probe.uncachedPrefillTps, 20); // (140-100)/2
   assert.equal(probe.cachedPrefillTps, 30); // (860-800)/2
 });
@@ -520,7 +520,7 @@ vllm:time_to_first_token_seconds_sum{engine="0"} ${ttft}
   probe._applyVllmMetrics(base(100000, 90000, 10), 2); // seed
   // 50,000 new prompt tokens, 49,000 of them from the prefix cache, TTFT +0.5 s
   probe._applyVllmMetrics(base(150000, 139000, 10.5), 2);
-  assert.equal(probe.prefillTps, 2000); // 1,000 computed / 0.5 s, not 100,000
+  assert.equal(probe.prefillTps, 500); // 1,000 computed / 2-second poll
   assert.equal(probe.cachedPrefillTps, 24500);
   assert.equal(probe.uncachedPrefillTps, 500);
   assert.equal(probe.totalCachedTokens, 139000);
@@ -536,7 +536,7 @@ vllm:time_to_first_token_seconds_sum{engine="0"} ${ttft}
 `;
   probe._applyVllmMetrics(base(10000, 8000, 5), 2);
   probe._applyVllmMetrics(base(20000, 17000, 6), 2);
-  assert.equal(probe.prefillTps, 1000); // 1,000 computed / 1 s
+  assert.equal(probe.prefillTps, 500); // 1,000 computed / 2-second poll
   assert.equal(probe.uncachedPrefillTps, 500);
   assert.equal(probe.cachedPrefillTps, 4500);
 });
@@ -611,4 +611,24 @@ test("llama.cpp: a slot starting a new request does not cancel another slot's to
   const snap = await probe.probe();
   assert.equal(snap.generationTps, 50); // slot 1 only: 100 / 2 s
   assert.equal(snap.prefillTps, 20); // slot 1 only: 40 / 2 s
+});
+
+
+test("vLLM exact computed counter wins over iteration estimates and unrelated TTFT", () => {
+  const probe = new LlmProbe({ lanIp: "127.0.0.1" }, 8888);
+  const body = (compute, gen, iter, ttft) => `vllm:prompt_tokens_total{engine="0"} ${compute}
+vllm:generation_tokens_total{engine="0"} ${gen}
+vllm:iteration_tokens_total_sum{engine="0"} ${iter}
+vllm:prompt_tokens_by_source_total{engine="0",source="local_compute"} ${compute}
+vllm:prompt_tokens_by_source_total{engine="0",source="local_cache_hit"} 0
+vllm:time_to_first_token_seconds_sum{engine="0"} ${ttft}
+`;
+  probe._applyVllmMetrics(body(1000, 1000, 2000, 10), 1);
+  probe._applyVllmMetrics(body(1100, 1400, 2500, 10.25), 1);
+  assert.equal(probe.prefillTps, 100);
+  assert.equal(probe.uncachedPrefillTps, 100);
+  probe._applyVllmMetrics(body(1100, 1800, 3000, 10.25), 1);
+  assert.equal(probe.prefillTps, 0); // exact computed counter stays flat
+  probe._applyVllmMetrics(body(1, 1, 1, 0), 1);
+  assert.equal(probe.prefillTps, 0); // restart seeds without a spike
 });
