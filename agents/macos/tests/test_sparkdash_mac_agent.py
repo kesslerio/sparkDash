@@ -89,6 +89,35 @@ class InventoryDetectionTests(unittest.TestCase):
         # The API's own id is what clients call, so it wins over argv.
         self.assertEqual(row["model"], "qwen3.8-27b")
 
+    def test_tensorfold_native_listener_is_serving_with_the_api_model(self):
+        procs = {2303: proc(
+            2303,
+            "/opt/models/runtime/engine/pinned/zig-out/native/bin/tensorfold-native "
+            "serve --host 127.0.0.1 --port 8890 --parallel 3 /models/deepseek-flash",
+        )}
+        found = self.detect(procs, owned(2303, 8890),
+                            health=ok(8890, "DeepSeek-V4.1-Flash"))
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["name"], "tensorfold")
+        self.assertEqual(found[0]["port"], 8890)
+        self.assertEqual(found[0]["state"], "serving")
+        self.assertEqual(found[0]["model"], "DeepSeek-V4.1-Flash")
+
+    def test_tensorfold_native_requires_the_real_executable_and_serve_command(self):
+        for argv in [
+            "/opt/tensorfold-native-helper serve --port 8890 /models/example",
+            "/opt/tensorfold-native validate --port 8890 /models/example",
+            "/usr/bin/python3 /opt/report.py --engine tensorfold-native --port 8890",
+        ]:
+            found = self.detect({2303: proc(2303, argv)}, owned(2303, 8890),
+                                health=ok(8890, "example"))
+            self.assertFalse(any(row["name"] == "tensorfold" for row in found), argv)
+
+    def test_tensorfold_native_without_a_listener_is_not_serving(self):
+        argv = "/opt/tensorfold-native serve --port 8890 /models/example"
+        found = self.detect({2303: proc(2303, argv)}, {}, health=ok(8890, "example"))
+        self.assertFalse(any(row["state"] == "serving" for row in found))
+
     def test_variant_entry_wins_over_its_catch_all_parent(self):
         procs = {10: proc(
             10,

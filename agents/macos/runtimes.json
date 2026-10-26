@@ -111,9 +111,9 @@
     {
       "name": "tensorfold",
       "label": "TensorFold",
-      "ports": [8300],
-      "exe": "(^|/)tensorfold$",
-      "argvAll": ["(^|/)tensorfold([\\s/]|$)"]
+      "ports": [8300, 8890],
+      "exe": "(^|/)tensorfold(-native)?$",
+      "argvAll": ["(^|/)tensorfold(-native)?\\s+serve(\\s|$)"]
     }
   ]
 }
