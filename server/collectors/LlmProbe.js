@@ -2930,7 +2930,8 @@ export class LlmProbe {
       const srcExternal = this._getPromMetricLabeled(
         txt, "vllm:prompt_tokens_by_source_total", "source", "external_kv_transfer");
       let deltaCompute = null;
-      if (srcCompute != null && srcHit != null) {
+      let computedCounterAvailable = srcCompute != null && srcHit != null;
+      if (computedCounterAvailable) {
         this._setPrefillSplitRates(srcHit + (srcExternal ?? 0), srcCompute, dtSec, "cumulative");
         deltaCompute =
           this.lastPromptCompute != null ? Math.max(0, srcCompute - this.lastPromptCompute) : 0;
@@ -2941,6 +2942,7 @@ export class LlmProbe {
         // prompt would otherwise read as 100k+ tok/s "prefill". Only the
         // computed share is real prefill work.
         const prevCached = this.lastPrefillKinds?.cached;
+        computedCounterAvailable = cachedTok != null && prevCached != null;
         const deltaCached =
           cachedTok != null && prevCached != null ? Math.max(0, cachedTok - prevCached) : 0;
         deltaCompute = Math.max(0, deltaIn - deltaCached);
@@ -2959,30 +2961,19 @@ export class LlmProbe {
         this.generationTps = !baselineReady || counterReset
           ? 0
           : Math.max(0, Math.round((deltaOut / dtSec) * 100) / 100);
-        if (!baselineReady || counterReset) this.prefillTps = 0;
-        const deltaTtft =
-          ttftSum != null && this.lastTtftSum != null ? ttftSum - this.lastTtftSum : 0;
-        // Engine-step tokens include prefill+decode. Surplus over generation is
-        // prefill, including the common case where a short/cached prefill lands
-        // in the same poll as the first decode tokens.
-        const prefillIter =
-          !baselineReady || counterReset ? 0 : Math.max(0, deltaIter - Math.max(0, deltaOut));
-        const specNoise = deltaOut > 0 && prefillIter > 0 && prefillIter < deltaOut * 0.5;
-        const livePrefill =
-          prefillIter > 0 && !specNoise ? prefillIter / dtSec : 0;
-        // The computed-source delta is the real prefill work when vLLM reports
-        // it; a fully cached prompt then reads 0 instead of a fake burst.
-        const deltaWork = deltaCompute ?? deltaIn;
-        const finishedPrefill =
-          deltaWork > 0 && deltaTtft > 0
-            ? deltaWork / deltaTtft
-            : deltaWork > 0 && livePrefill <= 0
-              ? deltaWork / dtSec
-              : 0;
-        this.prefillTps = Math.max(
-          0,
-          Math.round((livePrefill > 0 ? livePrefill : finishedPrefill) * 100) / 100
-        );
+        // All live rates share the wall-clock scrape window. Prefer the exact
+        // computed-source counter; engine-step tokens provide the same work
+        // count on builds without it. TTFT includes queueing and belongs only
+        // in the latency tiles, never in this throughput denominator.
+        const iterationReady = iterSum != null && this.lastIterSum != null && deltaIter >= 0;
+        const deltaWork = computedCounterAvailable
+          ? deltaCompute
+          : iterationReady
+            ? Math.max(0, deltaIter - Math.max(0, deltaOut))
+            : deltaCompute;
+        this.prefillTps = !baselineReady || counterReset
+          ? 0
+          : Math.max(0, Math.round((deltaWork / dtSec) * 100) / 100);
       }
       // Live mean TTFT over the last poll window from histogram sum/count deltas.
       // Computed BEFORE lastTtftSum is advanced so the delta is real, not 0.

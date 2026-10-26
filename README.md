@@ -640,6 +640,9 @@ Strata's model aliases share the loaded engine's native context limit, shown on 
 
 vLLM, SGLang and friends publish cumulative token counters, and the dashboard diffs them per poll. LM Studio and Ollama publish none, so their tok/s tiles stay at 0 in the LLM panel. sparkDash never sends a request of its own to a model server to measure speed (that would load models, keep them resident and add traffic you did not ask for). The decode and prefill benchmarks and the Prompt Showcase measure real speed on demand.
 
+vLLM's live prefill tile reports prompt work divided by the wall-clock poll interval, preferring the computed-token counter and excluding cache hits when the engine provides that information. It can read zero while requests decode. It does not divide by time-to-first-token or represent an individual request's GPU prefill speed; the chart average includes positive samples only. Older engines without computed-work or cache counters fall back to prompt intake. Cached and uncached tiles show their separate poll-window rates when supported.
+
+
 ### Multiple LLM ports
 
 Any unit can monitor several LLM servers on different ports at once; each port gets its own panel with independent backend detection, metrics and history. Panels are matched to their port explicitly, so adding, removing or switching ports never shows one port's data on another's panel.

@@ -1056,6 +1056,8 @@ export function LlmPanel({
                     title={
                       isStrata
                         ? "Engine-reported mean for computed/new prompt tokens. It may be from an earlier prefill and is not an aggregate across slots."
+                        : llm?.backend === "vllm"
+                          ? "Prompt work per second over the last poll window, excluding cached tokens when the engine reports computed work or cache counters. This is aggregate wall-clock throughput, not speed during an individual prefill. Zero means no prompt work was observed in that window."
                         : "Prompt tokens/sec taken in during the last poll window — cache-served + computed. Opening a saved chat in the UI does not hit the GPU; send (or regenerate) so the history is sent as the prompt. Cached prefill does little GPU work; uncached prefill is what builds KV cache."
                     }
                   >
