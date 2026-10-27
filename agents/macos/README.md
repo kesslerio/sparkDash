@@ -44,10 +44,18 @@ HTTP 503 during initial collection.
 sed "s|/Users/PLACEHOLDER|$HOME|g; s|REPOS/sparkDash|$(pwd)|" agents/macos/ai.onyx.sparkdash-mac-agent.plist > ~/Library/LaunchAgents/ai.onyx.sparkdash-mac-agent.plist && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.onyx.sparkdash-mac-agent.plist
 ```
 
-Run from the sparkDash checkout, after editing the plist's `--host`/`--port` if
-the defaults (bind all interfaces, port 8790 — no credentials, so keep it on a
-trusted LAN or tailnet) are wrong for you. Then add the unit in sparkDash with
-**Unit type → Apple Silicon Mac** and a **Mac node agent** port of 8790.
+Run from the sparkDash checkout. The template binds `127.0.0.1` (loopback) on
+port 8790. `/metrics` and `/health` need no credentials, so keep the listener
+on loopback. For a dashboard on another host, publish the port tailnet-only
+with Tailscale Serve on the Mac:
+
+```bash
+tailscale serve --bg --tcp 8790 tcp://127.0.0.1:8790
+```
+
+Then add the unit in sparkDash with **Unit type → Apple Silicon Mac**, the Mac's
+Tailscale address, and a **Mac node agent** port of 8790. Tailnet access rules
+govern who can reach the forwarded port; avoid binding the agent to all interfaces.
 
 Stop it with `launchctl bootout gui/$(id -u)/ai.onyx.sparkdash-mac-agent`.
 

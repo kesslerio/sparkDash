@@ -14,19 +14,19 @@
         <string>/Users/PLACEHOLDER/REPOS/sparkDash/agents/macos/sparkdash_mac_agent.py</string>
         <string>--serve</string>
         <string>--host</string>
-        <string>0.0.0.0</string>
+        <string>127.0.0.1</string>
         <string>--port</string>
         <string>8790</string>
         <string>--config</string>
         <string>/Users/PLACEHOLDER/REPOS/sparkDash/agents/macos/runtimes.json</string>
     </array>
 
-    <!-- Bind 0.0.0.0 so the sparkDash host can reach it. /metrics and
-         /health stay read-only and unauthenticated. /control start and stop
-         stay refused until SPARKDASH_MAC_CONTROL_TOKEN is set here; do not
-         put a placeholder token in this template. Keep the listener on a
-         trusted network (LAN or tailnet); use --host 127.0.0.1 when something
-         on this Mac scrapes it instead. -->
+    <!-- Bind loopback by default. For a dashboard on another host, publish
+         port 8790 tailnet-only with Tailscale Serve rather than binding all
+         interfaces; see README.md for the command. /metrics and /health stay
+         read-only and unauthenticated. /control start and stop stay refused
+         until SPARKDASH_MAC_CONTROL_TOKEN is set here; do not put a
+         placeholder token in this template. -->
     <key>RunAtLoad</key>
     <true/>
 
