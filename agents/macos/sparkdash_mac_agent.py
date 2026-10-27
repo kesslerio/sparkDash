@@ -1218,7 +1218,9 @@ class SampleCache:
             return collecting_snapshot()
         age = max(0, time.monotonic() - self._at)
         stale = age >= self._ttl
-        response = {**self._sample, "sampleAgeSeconds": age, "sampleStale": stale}
+        # Two large monotonic readings subtract to values like 60.99999999999999;
+        # report milliseconds. Staleness above still uses the exact age.
+        response = {**self._sample, "sampleAgeSeconds": round(age, 3), "sampleStale": stale}
         if stale:
             response["unavailable"] = [
                 *self._sample.get("unavailable", []),
