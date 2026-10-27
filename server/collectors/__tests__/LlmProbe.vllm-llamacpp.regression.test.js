@@ -254,6 +254,24 @@ vllm:time_to_first_token_seconds_sum{engine="0"} 10.05
   assert.equal(probe.cachedPrefillTps, 30); // (860-800)/2
 });
 
+test("vLLM prefill uses the engine's per-request prefill time when published", () => {
+  const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 8000);
+  probe.lastTokenCounts = { input: 1000, output: 500 };
+  probe._lastPrefillTotals = { count: 10, time: 100, kv: 1000, cache: 500 };
+  const body = `${VLLM_METRICS.replace("1000.0", "1200.0").replace("500.0", "900.0")}
+vllm:request_prefill_time_seconds_count{engine="0"} 11.0
+vllm:request_prefill_time_seconds_sum{engine="0"} 102.0
+vllm:request_prefill_kv_computed_tokens_sum{engine="0"} 5000.0
+vllm:prompt_tokens_by_source_total{engine="0",source="local_cache_hit"} 1500.0
+`;
+  probe._applyVllmMetrics(body, 2);
+  // Δkv 4000 over Δprefill 2 s = 2000 tok/s; the poll window would have said 100.
+  assert.equal(probe.prefillTps, 2000);
+  assert.equal(probe.uncachedPrefillTps, 2000);
+  // Δcached 1000 over the same 2 s of prefill.
+  assert.equal(probe.cachedPrefillTps, 500);
+});
+
 test("vLLM fully cached prompt reports 0 computed prefill", () => {
   const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 8000);
   probe.lastTokenCounts = { input: 1000, output: 500 };
