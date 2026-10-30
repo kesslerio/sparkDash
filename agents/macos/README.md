@@ -17,6 +17,18 @@ vitals plus an honest picture of which local model runtime, if any, is serving.
 
 ## Run it
 
+TensorFold's Python launcher (`tensorfold serve`, port 8300) and native Metal
+binary (`tensorfold-native serve`, port 8890) share the TensorFold inventory
+entry. A matching executable alone is not enough: the agent requires a serving
+command, an owned listener and a successful health probe to report it serving.
+For dashboard LLM metrics, also add the actual serving port to the Mac's LLM
+ports in Edit. Runtime inventory and configured LLM probes are separate.
+If the server only permits a trusted hostname, set **LLM host** to that hostname
+without changing the SSH or Mac-agent target. Existing privileged installations
+need the reviewed inventory copied through their installation workflow before
+the agent reports newly supported binaries; adding the LLM port alone needs
+no model or dashboard restart.
+
 ```bash
 python3 agents/macos/sparkdash_mac_agent.py --once --pretty   # one snapshot to stdout
 python3 agents/macos/sparkdash_mac_agent.py --serve --port 8790   # HTTP: /metrics, /health
