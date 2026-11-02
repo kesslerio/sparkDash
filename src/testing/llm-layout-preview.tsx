@@ -169,7 +169,7 @@ function PreviewApp({ now }: { now: number }) {
         </label>
       </div>
       {note && <p style={{ margin: 0, fontSize: 12 }}>{note}</p>}
-      {native && <section aria-label="Overview card preview" style={{ maxWidth: 400 }}>
+      {native && <section className="ov" aria-label="Overview card preview" style={{ maxWidth: 400 }}>
         <SparkCard spark={overview} temperatureUnit="celsius"
           onSelect={() => setNote("Selected synthetic mlx-serve unit; detail card is below.")} />
       </section>}
