@@ -8,6 +8,9 @@ import { StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "../index.css";
 import "../styles/shell.css";
+import "../styles/spark.css";
+import "../styles/overview.css";
+import "../styles/tokens.css";
 import { SparkCard } from "../components/OverviewPage/SparkCard";
 import { makeSpark } from "./fixtures";
 import { LlmPanel } from "../components/SparkPage/LlmPanel";
@@ -34,7 +37,7 @@ const LONG_MODEL_ID =
 const RANGES = new Set(["all", "today", "7d", "14d", "30d"]);
 const PREVIEW_ONLY = "Preview only — no live requests";
 
-type PreviewState = "active" | "idle" | "unavailable" | "unknown";
+type PreviewState = "active" | "idle" | "unavailable" | "unknown" | "prefilling";
 type Theme = "dark" | "light" | "white" | "oled";
 
 function installPreviewFetch(now: number) {
@@ -85,7 +88,12 @@ function deepseekFor(state: PreviewState, now: number, longName: boolean): LlmMe
     status: "active" as const, generationTps: null, prefillTps: null,
     requestsRunning: 1, requestsWaiting: 0, prefillActive: false, decodeActive: false,
   } : model;
-  return longName ? { ...observed, modelId: LONG_MODEL_ID } : observed;
+  const presented = native && state === "prefilling" ? { ...observed,
+    status: "active" as const, generationTps: 0, prefillTps: 1000,
+    uncachedPrefillTps: 1000, cachedPrefillTps: null,
+    requestsRunning: 1, requestsWaiting: 0, prefillActive: true, decodeActive: false,
+  } : observed;
+  return longName ? { ...presented, modelId: LONG_MODEL_ID } : presented;
 }
 
 function PreviewApp({ now }: { now: number }) {
@@ -135,6 +143,7 @@ function PreviewApp({ now }: { now: number }) {
             <option value="idle">Idle</option>
             <option value="unavailable">Unavailable</option>
             {native && <option value="unknown">Active, rates unknown</option>}
+            {native && <option value="prefilling">Computed prefill, cache rate unknown</option>}
           </select>
         </label>
         <label>
