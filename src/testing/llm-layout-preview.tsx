@@ -7,6 +7,7 @@
 import { StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "../index.css";
+import "../styles/shell.css";
 import { SparkCard } from "../components/OverviewPage/SparkCard";
 import { makeSpark } from "./fixtures";
 import { LlmPanel } from "../components/SparkPage/LlmPanel";
