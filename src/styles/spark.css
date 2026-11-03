@@ -179,20 +179,7 @@
   align-items: start;
 }
 @media (min-width: 1280px) {
-  .sp-cols {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 420px);
-    align-items: start;
-  }
-  .sp-col {
-    display: flex;
-    flex-direction: column;
-    gap: var(--sp-gap);
-    min-width: 0;
-  }
-  .sp-item {
-    order: 0;
-  }
+  /* Keep the ordered stack: LLM histories need the full content width. */
   .sp-services {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
