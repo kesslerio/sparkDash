@@ -277,6 +277,10 @@ export class LlmProbe {
     this._tensorfoldLiveDecodeAt = 0;
     this._tensorfoldLivePrefill = null;
     this._tensorfoldLivePrefillAt = 0;
+    this._tensorfoldMetricsPrompt = null;
+    this._tensorfoldMetricsCached = null;
+    this._tensorfoldMetricsPrefillSec = null;
+    this._tensorfoldMetricsLastPrefill = null;
     /** Previous TensorFold `prefill_seconds_total`. null until a sample includes it. */
     this._tensorfoldPrefillSeconds = null;
     this._tensorfoldPrevCached = null;
@@ -700,6 +704,10 @@ export class LlmProbe {
     this._tensorfoldLiveDecodeAt = 0;
     this._tensorfoldLivePrefill = null;
     this._tensorfoldLivePrefillAt = 0;
+    this._tensorfoldMetricsPrompt = null;
+    this._tensorfoldMetricsCached = null;
+    this._tensorfoldMetricsPrefillSec = null;
+    this._tensorfoldMetricsLastPrefill = null;
     this._tensorfoldPrefillSeconds = null;
     this._tensorfoldPrevCached = null;
     this._tensorfoldLastPrefill = null;
@@ -1543,7 +1551,7 @@ export class LlmProbe {
           this._applyTensorFoldHealth(health, dtSec);
           this._applyTensorFoldLive(health);
           // Newer builds report live rates in /health but cumulative totals only on Prometheus /metrics.
-          const totalRaw = health?.completion_tokens_total;
+          const totalRaw = health?.completion_tokens_total ?? health?.generation_tokens_total;
           if (totalRaw == null || !Number.isFinite(Number(totalRaw))) {
             // A decode rate the server reports itself wins over the /metrics counter diff.
             const liveDecode = health?.live?.decode_tokens_per_second;
@@ -2693,7 +2701,8 @@ export class LlmProbe {
     this.prefillActive = Number(health.streams?.prefilling ?? health.streams?.filling) > 0;
     // Number(null) is 0: a null counter means "absent", not "zero".
     const prompt = health.prompt_tokens_total == null ? NaN : Number(health.prompt_tokens_total);
-    const completion = health.completion_tokens_total == null ? NaN : Number(health.completion_tokens_total);
+    const completionRaw = health.completion_tokens_total ?? health.generation_tokens_total;
+    const completion = completionRaw == null ? NaN : Number(completionRaw);
     const prefillSec = Number(health.prefill_seconds_total);
     if (Number.isFinite(completion) && !this._tensorfoldSeeded) {
       if (Number.isFinite(prompt)) this.lastTokenCounts.input = prompt;
@@ -2851,6 +2860,27 @@ export class LlmProbe {
     if (cachedTotal != null) {
       this.totalCachedTokens =
         Number.isFinite(prompt) && prompt >= 0 ? Math.min(cachedTotal, prompt) : cachedTotal;
+    }
+    if (!queueOnly && Number.isFinite(prompt) && prompt >= 0) {
+      const prefillSec = m("request_prefill_seconds_sum");
+      const prevPrompt = this._tensorfoldMetricsPrompt;
+      const prevCached = this._tensorfoldMetricsCached;
+      const prevSec = this._tensorfoldMetricsPrefillSec;
+      if (prevPrompt != null && prevSec != null && Number.isFinite(prefillSec) && Number.isFinite(dtSec) && dtSec > 0) {
+        const dSec = prefillSec - prevSec;
+        const dIn = prompt - prevPrompt;
+        const dCached = prevCached != null && cachedTotal != null ? Math.max(0, cachedTotal - prevCached) : 0;
+        const computed = Math.max(0, dIn - dCached);
+        if (dSec > 0 && computed > 0) {
+          this._tensorfoldMetricsLastPrefill = { tps: Math.max(0, Math.round((computed / dSec) * 100) / 100), at: Date.now() };
+          this.prefillTps = this._tensorfoldMetricsLastPrefill.tps;
+        } else if (this._tensorfoldMetricsLastPrefill && Date.now() - this._tensorfoldMetricsLastPrefill.at < 20_000) {
+          this.prefillTps = this._tensorfoldMetricsLastPrefill.tps;
+        }
+      }
+      this._tensorfoldMetricsPrompt = prompt;
+      this._tensorfoldMetricsPrefillSec = Number.isFinite(prefillSec) ? prefillSec : prevSec;
+      if (cachedTotal != null) this._tensorfoldMetricsCached = cachedTotal;
     }
     // The total moves only when a request finishes; `generation_tokens_running` counts the
     // tokens of requests still decoding. Their sum grows steadily while tokens are produced
