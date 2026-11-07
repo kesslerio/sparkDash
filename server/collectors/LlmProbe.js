@@ -272,6 +272,11 @@ export class LlmProbe {
     this.lastTokenCounts = { input: 0, output: 0 };
     /** TensorFold: first /health sample with counters seeds the baseline (lifetime total is not a rate). */
     this._tensorfoldSeeded = false;
+    /** Last nonzero engine live rates, carried briefly when the gauge reports 0 mid-stream. */
+    this._tensorfoldLiveDecode = null;
+    this._tensorfoldLiveDecodeAt = 0;
+    this._tensorfoldLivePrefill = null;
+    this._tensorfoldLivePrefillAt = 0;
     /** Previous TensorFold `prefill_seconds_total`. null until a sample includes it. */
     this._tensorfoldPrefillSeconds = null;
     this._tensorfoldPrevCached = null;
@@ -691,6 +696,10 @@ export class LlmProbe {
     // reported as one interval's worth of tokens.
     this.lastProbeTime = 0;
     this._tensorfoldSeeded = false;
+    this._tensorfoldLiveDecode = null;
+    this._tensorfoldLiveDecodeAt = 0;
+    this._tensorfoldLivePrefill = null;
+    this._tensorfoldLivePrefillAt = 0;
     this._tensorfoldPrefillSeconds = null;
     this._tensorfoldPrevCached = null;
     this._tensorfoldLastPrefill = null;
@@ -2782,11 +2791,29 @@ export class LlmProbe {
     };
     const decode = rate(live.decode_tokens_per_second);
     const prefill = rate(live.prefill_tokens_per_second);
-    if (decode != null) this.generationTps = decode;
-    if (prefill != null) this.prefillTps = prefill;
     const waiting = live.waiting == null ? NaN : Number(live.waiting);
-    if (Number.isFinite(waiting) && waiting >= 0) this.requestsWaiting = Math.round(waiting);
     const conns = live.connections == null ? NaN : Number(live.connections);
+    const active = (Number.isFinite(conns) && conns > 0) || (Number.isFinite(waiting) && waiting > 0);
+    const CARRY_MS = 30_000;
+    if (decode != null && decode > 0) {
+      this.generationTps = decode;
+      this._tensorfoldLiveDecode = decode;
+      this._tensorfoldLiveDecodeAt = Date.now();
+    } else if (decode != null && active && this._tensorfoldLiveDecode != null && Date.now() - this._tensorfoldLiveDecodeAt < CARRY_MS) {
+      this.generationTps = this._tensorfoldLiveDecode;
+    } else if (decode != null) {
+      this.generationTps = decode;
+    }
+    if (prefill != null && prefill > 0) {
+      this.prefillTps = prefill;
+      this._tensorfoldLivePrefill = prefill;
+      this._tensorfoldLivePrefillAt = Date.now();
+    } else if (prefill != null && active && this._tensorfoldLivePrefill != null && Date.now() - this._tensorfoldLivePrefillAt < CARRY_MS) {
+      this.prefillTps = this._tensorfoldLivePrefill;
+    } else if (prefill != null) {
+      this.prefillTps = prefill;
+    }
+    if (Number.isFinite(waiting) && waiting >= 0) this.requestsWaiting = Math.round(waiting);
     if (Number.isFinite(conns) && conns >= 0 && this.requestsRunning == null) {
       this.requestsRunning = Math.round(conns);
       this.slotsActive = Math.round(conns);
