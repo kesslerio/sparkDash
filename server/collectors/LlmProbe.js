@@ -1548,7 +1548,7 @@ export class LlmProbe {
             // A decode rate the server reports itself wins over the /metrics counter diff.
             const liveDecode = health?.live?.decode_tokens_per_second;
             const hasLiveDecode = liveDecode != null && Number.isFinite(Number(liveDecode));
-            await this._applyTensorFoldMetrics(hasLiveDecode ? undefined : dtSec);
+            await this._applyTensorFoldMetrics(dtSec);
           } else if (this.requestsWaiting == null) {
             // A /health with token totals but no waiting count (TensorFold's Python engine) keeps
             // its queue gauge in /metrics alone: poll it queue-only, so /health stays the authority
@@ -2795,24 +2795,9 @@ export class LlmProbe {
     const conns = live.connections == null ? NaN : Number(live.connections);
     const active = (Number.isFinite(conns) && conns > 0) || (Number.isFinite(waiting) && waiting > 0);
     const CARRY_MS = 30_000;
-    if (decode != null && decode > 0) {
-      this.generationTps = decode;
-      this._tensorfoldLiveDecode = decode;
-      this._tensorfoldLiveDecodeAt = Date.now();
-    } else if (decode != null && active && this._tensorfoldLiveDecode != null && Date.now() - this._tensorfoldLiveDecodeAt < CARRY_MS) {
-      this.generationTps = this._tensorfoldLiveDecode;
-    } else if (decode != null) {
-      this.generationTps = decode;
-    }
-    if (prefill != null && prefill > 0) {
-      this.prefillTps = prefill;
-      this._tensorfoldLivePrefill = prefill;
-      this._tensorfoldLivePrefillAt = Date.now();
-    } else if (prefill != null && active && this._tensorfoldLivePrefill != null && Date.now() - this._tensorfoldLivePrefillAt < CARRY_MS) {
-      this.prefillTps = this._tensorfoldLivePrefill;
-    } else if (prefill != null) {
-      this.prefillTps = prefill;
-    }
+    // The /metrics production diff is authoritative; a gauge that reports 0 mid-stream must not erase it.
+    if (decode != null && decode > 0) this.generationTps = decode;
+    if (prefill != null && prefill > 0) this.prefillTps = prefill;
     if (Number.isFinite(waiting) && waiting >= 0) this.requestsWaiting = Math.round(waiting);
     if (Number.isFinite(conns) && conns >= 0 && this.requestsRunning == null) {
       this.requestsRunning = Math.round(conns);
