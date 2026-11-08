@@ -272,11 +272,6 @@ export class LlmProbe {
     this.lastTokenCounts = { input: 0, output: 0 };
     /** TensorFold: first /health sample with counters seeds the baseline (lifetime total is not a rate). */
     this._tensorfoldSeeded = false;
-    /** Last nonzero engine live rates, carried briefly when the gauge reports 0 mid-stream. */
-    this._tensorfoldLiveDecode = null;
-    this._tensorfoldLiveDecodeAt = 0;
-    this._tensorfoldLivePrefill = null;
-    this._tensorfoldLivePrefillAt = 0;
     this._tensorfoldMetricsPrompt = null;
     this._tensorfoldMetricsCached = null;
     this._tensorfoldMetricsPrefillSec = null;
@@ -700,10 +695,6 @@ export class LlmProbe {
     // reported as one interval's worth of tokens.
     this.lastProbeTime = 0;
     this._tensorfoldSeeded = false;
-    this._tensorfoldLiveDecode = null;
-    this._tensorfoldLiveDecodeAt = 0;
-    this._tensorfoldLivePrefill = null;
-    this._tensorfoldLivePrefillAt = 0;
     this._tensorfoldMetricsPrompt = null;
     this._tensorfoldMetricsCached = null;
     this._tensorfoldMetricsPrefillSec = null;
@@ -1551,12 +1542,16 @@ export class LlmProbe {
           this._applyTensorFoldHealth(health, dtSec);
           this._applyTensorFoldLive(health);
           // Newer builds report live rates in /health but cumulative totals only on Prometheus /metrics.
-          const totalRaw = health?.completion_tokens_total ?? health?.generation_tokens_total;
+          // Only the Python engine's completion_tokens_total makes /health the authority: the Zig
+          // engine's /health also carries generation_tokens_total, yet TTFT, KV usage, prefix hits and
+          // drafts exist only on /metrics, so that field must not skip the /metrics read.
+          const totalRaw = health?.completion_tokens_total;
           if (totalRaw == null || !Number.isFinite(Number(totalRaw))) {
-            // A decode rate the server reports itself wins over the /metrics counter diff.
-            const liveDecode = health?.live?.decode_tokens_per_second;
-            const hasLiveDecode = liveDecode != null && Number.isFinite(Number(liveDecode));
             await this._applyTensorFoldMetrics(dtSec);
+            // A nonzero decode rate the server reports itself wins over the /metrics counter diff;
+            // a gauge reading 0 mid-stream leaves the diff in place.
+            const liveDecode = Number(health?.live?.decode_tokens_per_second);
+            if (Number.isFinite(liveDecode) && liveDecode > 0) this.generationTps = Math.round(liveDecode * 100) / 100;
           } else if (this.requestsWaiting == null) {
             // A /health with token totals but no waiting count (TensorFold's Python engine) keeps
             // its queue gauge in /metrics alone: poll it queue-only, so /health stays the authority
@@ -2802,8 +2797,6 @@ export class LlmProbe {
     const prefill = rate(live.prefill_tokens_per_second);
     const waiting = live.waiting == null ? NaN : Number(live.waiting);
     const conns = live.connections == null ? NaN : Number(live.connections);
-    const active = (Number.isFinite(conns) && conns > 0) || (Number.isFinite(waiting) && waiting > 0);
-    const CARRY_MS = 30_000;
     // The /metrics production diff is authoritative; a gauge that reports 0 mid-stream must not erase it.
     if (decode != null && decode > 0) this.generationTps = decode;
     if (prefill != null && prefill > 0) this.prefillTps = prefill;
