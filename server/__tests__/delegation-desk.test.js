@@ -60,6 +60,8 @@ function fakeDesk() {
       if (desk.mode === "unauthorized") return send(401, { error: "unauthorized" });
       if (desk.mode === "locked") return send(400, { error: "the override is held by an open PR; the stepper is locked" });
       if (desk.mode === "gh-failed") return send(502, { error: "gh api failed: HTTP 403" });
+      if (desk.mode === "conflict") return send(409, { error: "a PR is already open for this override" });
+      if (desk.mode === "echo") return send(400, { error: `bad request with ${req.headers.authorization}` });
       const match = /^\/v1\/overrides\/([^/]+)(\/permanent)?$/.exec(req.url);
       if (!match) return send(404, { error: "unknown endpoint" });
       if (req.headers.authorization !== `Bearer ${ADMIN_TOKEN}`) return send(401, { error: "unauthorized" });
@@ -141,6 +143,18 @@ test("a desk that hangs is cut off at the read timeout", async (t) => {
   const started = Date.now();
   await assert.rejects(client.status(), (err) => err.status === 503 && /timed out/.test(err.message));
   assert.ok(Date.now() - started < 2000);
+});
+
+test("a write the desk never answers is a 504 that says the change may have applied", async (t) => {
+  const desk = fakeDesk();
+  desk.mode = "hang";
+  const port = await listening(desk.server);
+  t.after(() => { desk.server.closeAllConnections(); desk.server.close(); });
+  const client = new DelegationDesk({ url: `http://127.0.0.1:${port}`, token: ADMIN_TOKEN, writeTimeoutMs: 200 });
+  await assert.rejects(client.setOverride("deepseek-qualitycorp", 3), (err) => err.status === 504 && /may or may not have applied/.test(err.message));
+  const closed = await freePort();
+  const refused = new DelegationDesk({ url: `http://127.0.0.1:${closed}`, token: ADMIN_TOKEN });
+  await assert.rejects(refused.setOverride("deepseek-qualitycorp", 3), (err) => err.status === 503 && /connection refused/.test(err.message));
 });
 
 test("a read that started before an acknowledged write never answers a read made after it", async () => {
@@ -245,6 +259,19 @@ test("delegation desk routes: toggle, read pass-through, token-guarded writes", 
   assert.match((await refused.json()).error, /refused sparkDash's admin token/);
 
   // The desk's own refusals keep their status and reason.
+  desk.mode = "conflict";
+  const conflict = await call("/api/delegation-desk/overrides/deepseek-qualitycorp/permanent", { method: "POST", body: "{}" });
+  assert.equal(conflict.status, 409);
+  assert.match((await conflict.json()).error, /already open/);
+
+  // A desk that echoes the request's Authorization header still never hands the token on.
+  desk.mode = "echo";
+  const echoed = await call("/api/delegation-desk/overrides/deepseek-qualitycorp", { method: "PUT", body: JSON.stringify({ budget: 3 }) });
+  assert.equal(echoed.status, 400);
+  const echoedText = await echoed.text();
+  assert.doesNotMatch(echoedText, new RegExp(ADMIN_TOKEN));
+  assert.match(echoedText, /\[redacted\]/);
+
   desk.mode = "locked";
   const locked = await call("/api/delegation-desk/overrides/deepseek-qualitycorp", { method: "PUT", body: JSON.stringify({ budget: 4 }) });
   assert.equal(locked.status, 400);

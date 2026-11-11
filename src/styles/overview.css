@@ -1263,6 +1263,11 @@
 .ov .ov-dd .dd-link:hover {
   text-decoration-color: currentColor;
 }
+.ov .ov-dd .dd-link[aria-disabled="true"],
+.ov .ov-dd .dd-ovr .btn[aria-disabled="true"] {
+  opacity: 0.5;
+  cursor: progress;
+}
 
 /* Disclosures: holders, accounts, waiting requests */
 .ov .ov-dd .dd-disclosure > summary {

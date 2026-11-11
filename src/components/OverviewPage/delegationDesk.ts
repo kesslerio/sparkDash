@@ -165,8 +165,8 @@ export interface HostQuota {
   age: number | null;
   windows: DeskQuotaWindow[];
   hostCount: number;
-  /** Set when hosts report different quota: each host's lowest window, and the host shown. */
-  disagreement: { readings: { host: string; lowest: number }[]; shownHost: string } | null;
+  /** Set when hosts report different quota: each host's lowest window. */
+  disagreement: { host: string; lowest: number }[] | null;
 }
 
 export type QuotaView = HubQuota | HostQuota | { kind: "none"; state: string };
@@ -194,19 +194,23 @@ export function quotaView(route: DeskRoute, nowSec: number): QuotaView {
   const shape = (windows: DeskQuotaWindow[]) =>
     JSON.stringify([...windows].sort((a, b) => a.name.localeCompare(b.name)).map((w) => [w.name, Math.round(w.remaining)]));
   const agree = reporting.every((h) => shape(h.windows) === shape(reporting[0].windows));
-  const worst = reporting.reduce((m, h) => (lowest(h.windows) < lowest(m.windows) ? h : m));
+  // Each window shows the lowest any host reports for it, so no host's tighter reading is hidden.
+  const lowestByName = new Map<string, DeskQuotaWindow>();
+  for (const h of reporting) {
+    for (const w of h.windows) {
+      const seen = lowestByName.get(w.name);
+      if (!seen || w.remaining < seen.remaining) lowestByName.set(w.name, w);
+    }
+  }
   const ages = perHost.map((h) => finite(h.signal.age)).filter((a): a is number => a != null);
-  const state = perHost.some((h) => h.signal.state === "full") ? "full" : worst.signal.state;
   return {
     kind: "hosts",
-    state,
+    state: perHost.some((h) => h.signal.state === "full") ? "full"
+      : reporting.some((h) => h.signal.state === "room") ? "room" : reporting[0].signal.state,
     age: ages.length ? Math.min(...ages) : null,
-    windows: worst.windows,
+    windows: [...lowestByName.values()],
     hostCount: reporting.length,
-    disagreement: agree ? null : {
-      readings: reporting.map((h) => ({ host: h.host, lowest: Math.round(lowest(h.windows)) })),
-      shownHost: worst.host,
-    },
+    disagreement: agree ? null : reporting.map((h) => ({ host: h.host, lowest: Math.round(lowest(h.windows)) })),
   };
 }
 

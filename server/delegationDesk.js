@@ -5,6 +5,7 @@
  * server; the browser only learns whether edits are possible (`canEdit`).
  */
 import { DELEGATION_DESK_TOKEN, DELEGATION_DESK_URL } from "./config.js";
+import { readCappedBody } from "./util/readCappedBody.js";
 
 const STATUS_TIMEOUT_MS = 3_000;
 const WRITE_TIMEOUT_MS = 5_000;
@@ -50,13 +51,19 @@ function failureReason(err, timeoutMs) {
   return "connection failed";
 }
 
-/** A 503 naming why the desk could not be reached: never the URL or the request headers. */
+/** Why the desk could not be reached: never the URL or the request headers. */
 function unreachable(err, timeoutMs) {
   return new DeskError(503, `Can't reach the delegation desk: ${failureReason(err, timeoutMs)}`);
 }
 
-function deskReason(payload) {
-  return isObject(payload) && typeof payload.error === "string" ? payload.error.slice(0, MAX_REASON_CHARS) : "";
+/**
+ * A write sent but not answered may still have been applied by the desk, so it is a 504
+ * whose wording says so. Only a connection that never opened proves nothing changed.
+ */
+function unanswered(err, timeoutMs) {
+  const code = err?.cause?.code;
+  if (code === "ECONNREFUSED" || code === "ENOTFOUND" || code === "EAI_AGAIN") return unreachable(err, timeoutMs);
+  return new DeskError(504, `The delegation desk did not answer (${failureReason(err, timeoutMs)}), so the change may or may not have applied`);
 }
 
 async function readJson(response) {
@@ -64,30 +71,15 @@ async function readJson(response) {
     await response.body?.cancel();
     throw new Error("unreadable");
   }
-  const reader = response.body.getReader();
-  const chunks = [];
-  let size = 0;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      size += value.byteLength;
-      if (size > MAX_BODY_BYTES) {
-        await reader.cancel();
-        throw new Error("unreadable");
-      }
-      chunks.push(value);
-    }
-  } finally {
-    reader.releaseLock();
-  }
-  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  const bytes = await readCappedBody(response.body, MAX_BODY_BYTES);
+  if (!bytes) throw new Error("unreadable");
+  return JSON.parse(bytes.toString("utf8"));
 }
 
 export class DelegationDesk {
   constructor({
     url = DELEGATION_DESK_URL, token = DELEGATION_DESK_TOKEN, fetchImpl = globalThis.fetch,
-    now = () => Date.now(), statusTimeoutMs = STATUS_TIMEOUT_MS,
+    now = () => Date.now(), statusTimeoutMs = STATUS_TIMEOUT_MS, writeTimeoutMs = WRITE_TIMEOUT_MS,
   } = {}) {
     this.base = deskBaseUrl(url);
     this.configError = !String(url || "").trim()
@@ -97,6 +89,7 @@ export class DelegationDesk {
     this.fetch = fetchImpl;
     this.now = now;
     this.statusTimeoutMs = statusTimeoutMs;
+    this.writeTimeoutMs = writeTimeoutMs;
     this.cache = null;
     this.inflight = null;
     this.acknowledgedWrites = 0;
@@ -117,14 +110,22 @@ export class DelegationDesk {
         body: body === undefined ? undefined : JSON.stringify(body),
       });
     } catch (err) {
-      throw unreachable(err, timeoutMs);
+      throw admin ? unanswered(err, timeoutMs) : unreachable(err, timeoutMs);
     }
     try {
       return { status: response.status, payload: await readJson(response) };
     } catch (err) {
+      if (admin) throw unanswered(err, timeoutMs);
       if (timedOut(err)) throw unreachable(err, timeoutMs);
       throw new DeskError(502, `The delegation desk sent an unreadable answer (HTTP ${response.status})`);
     }
+  }
+
+  /** The desk's own error text, bounded, and with the admin token cut out should the desk ever echo it. */
+  deskReason(payload) {
+    if (!isObject(payload) || typeof payload.error !== "string") return "";
+    const text = this.token ? payload.error.split(this.token).join("[redacted]") : payload.error;
+    return text.slice(0, MAX_REASON_CHARS);
   }
 
   /** The desk's status JSON plus `canEdit`, cached briefly and shared by concurrent readers. */
@@ -169,7 +170,7 @@ export class DelegationDesk {
       this.acknowledgedWrites += 1;
       return payload;
     }
-    const reason = deskReason(payload);
+    const reason = this.deskReason(payload);
     // Never pass a desk 401 through: the browser reads a 401 as its own dashboard token failing.
     if (status === 401 || status === 403) throw new DeskError(502, "The delegation desk refused sparkDash's admin token");
     if (status === 404) throw new DeskError(502, "This delegation desk does not accept budget overrides");
@@ -179,11 +180,11 @@ export class DelegationDesk {
   }
 
   setOverride(route, budget) {
-    return this.write("PUT", route, "", { budget }, WRITE_TIMEOUT_MS);
+    return this.write("PUT", route, "", { budget }, this.writeTimeoutMs);
   }
 
   removeOverride(route) {
-    return this.write("DELETE", route, "", undefined, WRITE_TIMEOUT_MS);
+    return this.write("DELETE", route, "", undefined, this.writeTimeoutMs);
   }
 
   makePermanent(route) {
@@ -215,8 +216,8 @@ export function registerDelegationDeskRoutes(app, { desk, isEnabled, allowChange
 
   const write = (handler) => async (req, res) => {
     res.set("Cache-Control", "no-store");
-    if (!allowChange(req)) return rejectLimited(res, "Too many budget changes; try again shortly");
     if (!isEnabled()) return off(res);
+    if (!allowChange(req)) return rejectLimited(res, "Too many budget changes; try again shortly");
     try {
       res.json(await handler(req));
     } catch (err) {

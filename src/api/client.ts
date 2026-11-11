@@ -56,6 +56,14 @@ import { authHeaders, reportAuthRequired } from "./authToken";
 const BASE = "";
 
 // ─── Generic fetch wrapper ────────────────────────────────
+/** A non-2xx API answer: the server's error text plus the HTTP status it came with. */
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
 async function apiFetch<T>(path: string, opts?: RequestInit): Promise<T> {
   // Only set Content-Type for requests that actually carry a body. Setting it
   // on GET/DELETE was a no-op but could trigger an unnecessary CORS preflight
@@ -70,7 +78,7 @@ async function apiFetch<T>(path: string, opts?: RequestInit): Promise<T> {
     // The server wants a token we do not have (or ours is stale): ask for one.
     if (res.status === 401) reportAuthRequired();
     const body = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(body.error || `HTTP ${res.status}`);
+    throw new ApiError(body.error || `HTTP ${res.status}`, res.status);
   }
   return res.json();
 }

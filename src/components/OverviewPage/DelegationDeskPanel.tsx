@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
+  ApiError,
   fetchDelegationDesk,
   makeDeskOverridePermanent,
   removeDeskOverride,
@@ -116,7 +117,10 @@ function Stepper({ name, value, max, busy, locked, onStep }: {
     const other = lastStep.current === -1 ? plus.current : minus.current;
     lastStep.current = null;
     const focusLost = document.activeElement === pressed || document.activeElement === document.body;
-    if (pressed?.disabled && other && !other.disabled && focusLost) other.focus();
+    if (!focusLost) return;
+    // A refused write re-enables the pressed button; a successful one may have disabled it.
+    if (pressed && !pressed.disabled) pressed.focus();
+    else if (other && !other.disabled) other.focus();
   }, [busy, value]);
 
   const step = (delta: -1 | 1) => {
@@ -158,15 +162,18 @@ interface EditActions {
   openPr: (route: DeskRoute) => void;
 }
 
-function OverridePanel({ route, name, override, io, confirming, actions, nowSec }: {
+function OverridePanel({ route, name, override, io, busy, confirming, actions, nowSec }: {
   route: DeskRoute;
   name: string;
   override: DeskOverride;
   io: WriteState;
+  /** A write for this route is waiting on the desk: every action waits with it. */
+  busy: boolean;
   confirming: boolean;
   actions: EditActions;
   nowSec: number;
 }) {
+  const waiting = busy || undefined;
   if (confirming) {
     return (
       <div className="dd-ovr">
@@ -175,7 +182,7 @@ function OverridePanel({ route, name, override, io, confirming, actions, nowSec 
           Opens a PR on ai-dotfiles using the desk&apos;s GitHub login. Until it merges, the override keeps running and no longer expires.
         </span>
         <div className="dd-btns">
-          <button className="btn btn--sm btn--primary" type="button" onClick={() => actions.openPr(route)}>Open PR</button>
+          <button className="btn btn--sm btn--primary" type="button" aria-disabled={waiting} onClick={() => actions.openPr(route)}>Open PR</button>
           <button className="btn btn--sm btn--ghost" type="button" onClick={() => actions.confirm(null)}>Cancel</button>
         </div>
       </div>
@@ -196,7 +203,7 @@ function OverridePanel({ route, name, override, io, confirming, actions, nowSec 
               View PR #{override.pr.number} <ExternalLinkIcon />
             </a>
           ) : null}
-          <button className="dd-link" type="button" onClick={() => actions.remove(route)}>Remove override (PR stays open)</button>
+          <button className="dd-link" type="button" aria-disabled={waiting} onClick={() => actions.remove(route)}>Remove override (PR stays open)</button>
         </div>
       </div>
     );
@@ -205,12 +212,10 @@ function OverridePanel({ route, name, override, io, confirming, actions, nowSec 
   return (
     <div className="dd-ovr">
       <span className="dd-what">Override {override.roster} → {override.budget} · {left}</span>
-      {io.prError ? (
-        <span className="dd-err" role="alert">Couldn&apos;t open the PR: {trimStop(io.prError)}. The override still expires on time.</span>
-      ) : null}
+      {io.prError ? <span className="dd-err" role="alert">{io.prError}</span> : null}
       <div className="dd-acts">
-        <button className="dd-link" type="button" onClick={() => actions.remove(route)}>Remove override</button>
-        <button className="dd-link" type="button" onClick={() => actions.confirm(route.key)}>Make permanent…</button>
+        <button className="dd-link" type="button" aria-disabled={waiting} onClick={() => actions.remove(route)}>Remove override</button>
+        <button className="dd-link" type="button" aria-disabled={waiting} onClick={() => actions.confirm(route.key)}>Make permanent…</button>
       </div>
     </div>
   );
@@ -256,7 +261,7 @@ function EditBlock({ route, name, override, io, confirming, actions, nowSec }: {
       </div>
       {status}
       {override ? (
-        <OverridePanel route={route} name={name} override={override} io={io} confirming={confirming} actions={actions} nowSec={nowSec} />
+        <OverridePanel route={route} name={name} override={override} io={io} busy={busy} confirming={confirming} actions={actions} nowSec={nowSec} />
       ) : null}
     </div>
   );
@@ -406,14 +411,13 @@ function CloudColumn({ route, data, unitNames, editing, io, confirming, actions,
         {quota.windows.map((w) => <QuotaBar key={w.name} label={windowName(w.name)} window={w} nowSec={nowSec} />)}
         {quota.disagreement ? (
           <span className="dd-verdict dd-verdict--warn">
-            Hosts disagree: {quota.disagreement.readings.map((r) => `${r.host} ${r.lowest}%`).join(" · ")}. Showing the lowest.
+            Hosts disagree: {quota.disagreement.map((r) => `${r.host} ${r.lowest}%`).join(" · ")}. Showing the lowest.
           </span>
         ) : null}
       </>
     );
-    const from = quota.disagreement
-      ? `from ${quota.disagreement.shownHost}`
-      : quota.hostCount === 1 ? "1 host" : `${quota.hostCount} hosts agree`;
+    const from = quota.hostCount === 1 ? "1 host"
+      : quota.disagreement ? `lowest of ${quota.hostCount} hosts` : `${quota.hostCount} hosts agree`;
     source = `${from} · ${ago(quota.age)}`;
   } else {
     bars = <div className="dd-row"><span className="dd-k">Quota</span><span className="dd-v dd-unknown">not reported</span></div>;
@@ -476,6 +480,9 @@ export function DelegationDeskPanel({ unitNames = {} }: { unitNames?: Record<str
   // A status read that started before the latest acknowledged write is dropped,
   // so a slow poll can't put the pre-write budget back on screen.
   const acknowledgedWrites = useRef(0);
+  // Routes with a write waiting on the desk. One write per route at a time, so two answers
+  // can never land out of order and leave the screen showing the older one.
+  const writing = useRef(new Set<string>());
 
   useEffect(() => {
     let cancelled = false;
@@ -503,26 +510,41 @@ export function DelegationDeskPanel({ unitNames = {} }: { unitNames?: Record<str
       else delete next[key];
       return next;
     });
+  const begin = (key: string, state: WriteState) => {
+    if (writing.current.has(key)) return false;
+    writing.current.add(key);
+    setConfirming(null);
+    track(key, state);
+    return true;
+  };
+  const settle = (key: string, state: WriteState | null) => {
+    writing.current.delete(key);
+    track(key, state);
+  };
+  /** True when the write may have reached the desk before its answer was lost. */
+  const outcomeUnknown = (err: unknown) => err instanceof ApiError && err.status === 504;
 
   /** Shows the desk's acknowledged answer, then re-reads status so every other field catches up. */
   const acknowledge = (route: DeskRoute, override: DeskOverride | null, text: string) => {
     acknowledgedWrites.current += 1;
     setData((d) => (d ? withOverride(d, route.key, override) : d));
-    track(route.key, null);
+    settle(route.key, null);
     setAnnouncement(text);
     reload.current();
   };
   const refuse = (route: DeskRoute, err: unknown) => {
-    const text = `${trimStop(message(err))}. ${routeName(route, unitNames)} stays at ${route.budget}.`;
-    track(route.key, { error: text });
+    const text = outcomeUnknown(err)
+      ? `${trimStop(message(err))}. Showing the desk's current value.`
+      : `${trimStop(message(err))}. ${routeName(route, unitNames)} stays at ${route.budget}.`;
+    settle(route.key, { error: text });
     setAnnouncement(text);
+    if (outcomeUnknown(err)) reload.current();
   };
 
   const actions: EditActions = {
     step: (route, next) => {
       const name = routeName(route, unitNames);
-      setConfirming(null);
-      track(route.key, { pending: next });
+      if (!begin(route.key, { pending: next })) return;
       setDeskOverride(route.key, next)
         .then((result) => acknowledge(
           route,
@@ -536,7 +558,7 @@ export function DelegationDeskPanel({ unitNames = {} }: { unitNames?: Record<str
     remove: (route) => {
       const name = routeName(route, unitNames);
       const held = prIsOpen(data?.overrides?.[route.key]);
-      track(route.key, { pending: rosterBudget(route) ?? 0 });
+      if (!begin(route.key, { pending: rosterBudget(route) ?? 0 })) return;
       removeDeskOverride(route.key)
         .then(() => acknowledge(
           route,
@@ -545,51 +567,64 @@ export function DelegationDeskPanel({ unitNames = {} }: { unitNames?: Record<str
         ))
         .catch((err) => refuse(route, err));
     },
-    confirm: setConfirming,
+    confirm: (key) => {
+      if (key && writing.current.has(key)) return;
+      setConfirming(key);
+    },
     openPr: (route) => {
       const name = routeName(route, unitNames);
-      setConfirming(null);
-      track(route.key, { opening: true });
+      if (!begin(route.key, { opening: true })) return;
       makeDeskOverridePermanent(route.key)
         .then((result) => {
           const override = { ...result.override, pr: result.override.pr ?? { ...result.pr, state: "open" } };
           acknowledge(route, override, `PR #${override.pr.number} opened for ${name}; the override holds until it merges`);
         })
         .catch((err) => {
-          track(route.key, { prError: message(err) });
+          const unknown = outcomeUnknown(err);
+          settle(route.key, {
+            prError: unknown
+              ? `Couldn't confirm the PR: ${trimStop(message(err))}. Showing the desk's current state.`
+              : `Couldn't open the PR: ${trimStop(message(err))}. The override still expires on time.`,
+          });
           setAnnouncement(`Couldn't open the PR for ${name}`);
+          if (unknown) reload.current();
         });
     },
   };
 
   const live = <div className="sr-only" aria-live="polite">{announcement}</div>;
 
-  if (error || !data) {
+  const unreachable = error ? (
+    <>
+      <p className="dd-note dd-note--bad" role="status">
+        {error}
+        <span className="dd-note__sub">
+          {data ? "The columns below are the last good reading. " : ""}
+          Agents fail open and dispatch without it. Budgets can&apos;t be changed until it&apos;s back.
+        </span>
+      </p>
+      <span className="dd-sub">
+        {lastGoodMs ? `Last good reading ${ago((Date.now() - lastGoodMs) / 1000)}` : "No reading yet"} · retrying every {POLL_MS / 1000} s
+      </span>
+    </>
+  ) : null;
+
+  if (!data) {
     return (
       <section className="panel ov-card ov-dd" aria-labelledby="dd-title">
         <div className="ov-card__head">
           <h2 id="dd-title" className="ov-card__title">Delegation desk</h2>
           {error ? <div className="ov-card__tools"><span className="tag tag--bad">Unreachable</span></div> : null}
         </div>
-        {error ? (
-          <>
-            <p className="dd-note dd-note--bad" role="status">
-              {error}
-              <span className="dd-note__sub">Agents fail open and dispatch without it. Budgets can&apos;t be changed until it&apos;s back.</span>
-            </p>
-            <span className="dd-sub">
-              {lastGoodMs ? `Last good reading ${ago((Date.now() - lastGoodMs) / 1000)}` : "No reading yet"} · retrying every {POLL_MS / 1000} s
-            </span>
-          </>
-        ) : (
-          <p className="dd-sub" role="status">Loading the delegation desk…</p>
-        )}
+        {unreachable ?? <p className="dd-sub" role="status">Loading the delegation desk…</p>}
         {live}
       </section>
     );
   }
 
-  const editing = editingOn && data.canEdit;
+  // A desk that stopped answering keeps its last reading on screen, but takes no budget changes.
+  const canEdit = data.canEdit && !error;
+  const editing = editingOn && canEdit;
   const nowSec = Date.now() / 1000;
   const local = data.routes.filter(isLocal);
   const cloud = data.routes.filter((route) => !isLocal(route));
@@ -607,8 +642,8 @@ export function DelegationDeskPanel({ unitNames = {} }: { unitNames?: Record<str
         <h2 id="dd-title" className="ov-card__title">Delegation desk</h2>
         <div className="ov-card__tools">
           {overrideCount ? <span className="tag tag--acc">{overrideCount} {plural(overrideCount, "override")} active</span> : null}
-          <HostsTag hosts={data.hosts} />
-          {data.canEdit ? (
+          {error ? <span className="tag tag--bad">Unreachable</span> : <HostsTag hosts={data.hosts} />}
+          {canEdit ? (
             <button
               className="btn btn--sm btn--ghost dd-edit-toggle"
               type="button"
@@ -624,6 +659,7 @@ export function DelegationDeskPanel({ unitNames = {} }: { unitNames?: Record<str
           ) : null}
         </div>
       </div>
+      {unreachable}
       <Waiting data={data} />
       {editing ? (
         <p className="dd-note dd-note--acc">

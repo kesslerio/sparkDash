@@ -14,7 +14,7 @@ vi.mock(import("../../api/client"), async (importOriginal) => ({
   makeDeskOverridePermanent: vi.fn(),
 }));
 
-import { fetchDelegationDesk, makeDeskOverridePermanent, removeDeskOverride, setDeskOverride } from "../../api/client";
+import { ApiError, fetchDelegationDesk, makeDeskOverridePermanent, removeDeskOverride, setDeskOverride } from "../../api/client";
 
 const fetchDesk = vi.mocked(fetchDelegationDesk);
 const putOverride = vi.mocked(setDeskOverride);
@@ -185,6 +185,40 @@ describe("DelegationDeskPanel reading", () => {
     expect(col.textContent).toContain("Under 10% left · treated as full");
   });
 
+  it("shows each window's lowest reading when hosts disagree on different windows", async () => {
+    const data = snapshot();
+    const reading = (weekly: number, fiveHour: number) => ({
+      ...quotaSignal(weekly),
+      windows: [{ name: "weekly", remaining: weekly, resets_at: NOW() + 86_400 }, { name: "5h", remaining: fiveHour, resets_at: NOW() + 3_600 }],
+    });
+    data.routes[3].signals = { zeppola: reading(8, 90), theshop: reading(20, 12) };
+    const { container } = await renderPanel(data);
+    const col = column(container, "gemini-3.8-flash");
+    expect(col.textContent).toContain("Weekly8% left");
+    expect(col.textContent).toContain("5-hour12% left");
+    expect(col.textContent).not.toContain("90% left");
+    expect(col.textContent).toContain("lowest of 2 hosts");
+  });
+
+  it("keeps the last reading on screen, without budget controls, when a later poll fails", async () => {
+    vi.useFakeTimers();
+    try {
+      const { container } = await renderPanel();
+      expect(button(container, "Adjust budgets")).toBeTruthy();
+      fetchDesk.mockRejectedValue(new Error("Can't reach the delegation desk: timed out after 3 s"));
+      await act(async () => { vi.advanceTimersByTime(10_000); });
+      await flush();
+      expect(container.querySelector(".dd-cols")).not.toBeNull();
+      expect(column(container, "QualityCorp").textContent).toContain("Delegates2 / 2");
+      expect(container.querySelector(".ov-card__tools .tag--bad")?.textContent).toBe("Unreachable");
+      expect(container.querySelector(".dd-note--bad")?.textContent).toContain("timed out after 3 s");
+      expect(container.querySelector(".dd-note--bad")?.textContent).toContain("last good reading");
+      expect(container.textContent).not.toContain("Adjust budgets");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("agreeing hosts show one reading; Opus shows its tightest account window with the rest disclosed", async () => {
     const { container } = await renderPanel();
     expect(column(container, "gemini-3.8-flash").textContent).toContain("3 hosts agree");
@@ -296,6 +330,59 @@ describe("DelegationDeskPanel edit mode", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("allows one write per route at a time", async () => {
+    const data = snapshot({ overrides: { "deepseek-qualitycorp": override() } });
+    data.routes[0].budget = 3;
+    const { container } = await renderPanel(data);
+    await editMode(container);
+    putOverride.mockReturnValue(deferred<{ override: DeskOverride | null }>().promise);
+    click(button(column(container, "QualityCorp"), "Raise QualityCorp budget to 4"));
+    const qc = column(container, "QualityCorp");
+    expect(button(qc, "Remove override").getAttribute("aria-disabled")).toBe("true");
+    click(button(qc, "Remove override"));
+    click(button(qc, "Make permanent…"));
+    click(button(qc, /^Lower QualityCorp/));
+    await flush();
+    expect(deleteOverride).not.toHaveBeenCalled();
+    expect(putOverride).toHaveBeenCalledTimes(1);
+    expect(column(container, "QualityCorp").textContent).not.toContain("in delegation.md?");
+  });
+
+  it("does not claim a write the desk may have applied left the budget unchanged", async () => {
+    const { container } = await renderPanel();
+    await editMode(container);
+    putOverride.mockRejectedValue(new ApiError("The delegation desk did not answer (timed out after 5 s), so the change may or may not have applied", 504));
+    const reads = fetchDesk.mock.calls.length;
+    click(button(column(container, "QualityCorp"), "Raise QualityCorp budget to 3"));
+    await flush();
+    const alert = column(container, "QualityCorp").querySelector("[role=alert]")?.textContent ?? "";
+    expect(alert).toContain("may or may not have applied. Showing the desk's current value.");
+    expect(alert).not.toContain("stays at");
+    expect(fetchDesk.mock.calls.length).toBe(reads + 1);
+  });
+
+  it("returns focus to the pressed button when the desk refuses a change at the limit", async () => {
+    const data = snapshot();
+    data.routes[2] = local("qwen-mama", "mama", { budget: 1, roster_budget: 1, load: 0 });
+    const { container } = await renderPanel(data);
+    await editMode(container);
+    const ack = deferred<{ override: DeskOverride | null }>();
+    putOverride.mockReturnValue(ack.promise);
+    click(button(column(container, "mama"), "Raise mama budget to 2"));
+    // A browser drops focus to the body when a focused button becomes disabled; jsdom keeps it,
+    // so move focus to the body the way the browser would.
+    act(() => {
+      const elsewhere = document.createElement("input");
+      document.body.append(elsewhere);
+      elsewhere.focus();
+      elsewhere.remove();
+    });
+    expect(document.activeElement).toBe(document.body);
+    await act(async () => ack.reject(new Error("The delegation desk refused the change (HTTP 400)")));
+    await flush();
+    expect(document.activeElement).toBe(button(column(container, "mama"), /^Raise mama/));
   });
 
   it("shows a refused write's error and keeps the old value", async () => {
