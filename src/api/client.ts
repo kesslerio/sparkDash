@@ -13,6 +13,9 @@ import type {
   DecodeBenchJob,
   DecodeBenchListResponse,
   FleetEnergy,
+  DelegationDeskStatus,
+  DeskOverride,
+  DeskPullRequest,
   HealthResponse,
   InferenceActivity,
   HermesBatchUpdateResponse,
@@ -84,6 +87,27 @@ export function fetchFleetEnergy(): Promise<FleetEnergy> {
 /** Optional, sanitized inference request activity from a configured private source. */
 export function fetchInferenceActivity(): Promise<InferenceActivity> {
   return apiFetch("/api/inference/activity");
+}
+
+// ─── Delegation desk ─────────────────────────────────────
+export function fetchDelegationDesk(): Promise<DelegationDeskStatus> {
+  return apiFetch("/api/delegation-desk");
+}
+
+const deskOverridePath = (route: string) => `/api/delegation-desk/overrides/${encodeURIComponent(route)}`;
+
+/** Resolves only once the desk has acknowledged; `override` is null when the value equals the roster. */
+export function setDeskOverride(route: string, budget: number): Promise<{ override: DeskOverride | null }> {
+  return apiFetch(deskOverridePath(route), { method: "PUT", body: JSON.stringify({ budget }) });
+}
+
+export function removeDeskOverride(route: string): Promise<{ removed: boolean }> {
+  return apiFetch(deskOverridePath(route), { method: "DELETE" });
+}
+
+/** The desk opens a delegation.md PR and holds the override until it merges or closes. */
+export function makeDeskOverridePermanent(route: string): Promise<{ override: DeskOverride; pr: DeskPullRequest }> {
+  return apiFetch(`${deskOverridePath(route)}/permanent`, { method: "POST", body: "{}" });
 }
 
 /** Fleet activity log, newest first. */
