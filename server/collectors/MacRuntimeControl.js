@@ -5,7 +5,7 @@
  * start and stop run only when the dashboard asks, and only for a Mac node.
  */
 
-import { macAgentBaseUrl } from "./MacAgentCollector.js";
+import { macAgentBaseUrl, assertMacAgentTarget } from "./MacAgentCollector.js";
 
 export const CONTROL_SCHEMA = "sparkdash.mac-control/1";
 const STATUS_TIMEOUT_MS = 8000;
@@ -99,9 +99,11 @@ async function readBody(response) {
 }
 
 async function callAgent(spark, path, { fetchImpl, method = "GET", body, token, timeoutMs }) {
-  const baseUrl = macAgentBaseUrl(spark);
+  let baseUrl;
   let response;
   try {
+    baseUrl = macAgentBaseUrl(spark);
+    await assertMacAgentTarget(baseUrl);
     response = await fetchImpl(`${baseUrl}${path}`, {
       method,
       headers: {
@@ -110,6 +112,7 @@ async function callAgent(spark, path, { fetchImpl, method = "GET", body, token, 
       },
       body: body ? JSON.stringify(body) : undefined,
       signal: AbortSignal.timeout(timeoutMs),
+      redirect: "error",
     });
   } catch (err) {
     return unavailable(`mac agent unreachable at ${baseUrl} (${err.message})`);

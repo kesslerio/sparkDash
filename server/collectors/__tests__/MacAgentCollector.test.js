@@ -27,9 +27,9 @@ const spark = {
   id: "macbook-m5",
   kind: "mac",
   isLocal: false,
-  lanIp: "192.168.4.125",
+  lanIp: "10.0.0.9",
   agent: { port: 8790 },
-  ssh: { user: "kesslerio", host: "192.168.4.125", auth: "key" },
+  ssh: { user: "macuser", host: "10.0.0.9", auth: "key" },
 };
 
 /** Collector over a stub agent; `mode` decides how /metrics answers. */
@@ -130,7 +130,7 @@ test("network: interface, ip, reachability probes, and counter-delta speeds", as
   const { collector } = collectorWith("ok");
   const first = await collector.collectNetwork();
   assert.equal(first.primaryInterface, "en0");
-  assert.equal(first.interfaces[0].ip, "192.168.4.125");
+  assert.equal(first.interfaces[0].ip, "10.0.0.9");
   assert.equal(first.interfaces[0].rxSpeed, 0, "no previous sample to difference against");
   assert.deepEqual(
     first.reachability.map((row) => row.ok),
@@ -462,4 +462,37 @@ test("a healthy runtimes read does not retry or poll", async () => {
   assert.equal(result.agentOnline, true);
   assert.equal(result.agentVersion, snapshot.agentVersion);
   assert.equal(result.collectedAt, snapshot.collectedAt);
+});
+
+test("valid agent CPU and memory readings participate in history/export collection", async () => {
+  const { collectionWasSuccessful } = await import("../SystemCollector.js");
+  const { collector } = collectorWith("ok");
+  assert.equal(collectionWasSuccessful(await collector.collectCpu()), true);
+  assert.equal(collectionWasSuccessful(await collector.collectGpu()), true);
+});
+
+test("a missing agent CPU reading is unavailable rather than a measured idle zero", async () => {
+  const { collectionWasSuccessful } = await import("../SystemCollector.js");
+  const data = structuredClone(snapshot);
+  data.cpu.usagePercent = null;
+  const { collector } = collectorWith("ok", { fetchImpl: async () => ({ ok: true, json: async () => data }) });
+  const cpu = await collector.collectCpu();
+  assert.equal(cpu.usageAvailable, false);
+  assert.equal(collectionWasSuccessful(cpu), false);
+});
+
+test("stale agent payloads cannot refresh vitals or runtime inventory", async () => {
+  const data = { ...structuredClone(snapshot), sampleStale: true, sampleAgeSeconds: 60 };
+  const { collector } = collectorWith("ok", { fetchImpl: async () => ({ ok: true, json: async () => data }) });
+  assert.equal(await collector._agentSnapshot(), null);
+  const probe = await collector._probeAgentOnce(100);
+  assert.deepEqual(probe, { ok: false, retryable: true, reason: "stale" });
+});
+
+test("agent targets reject unsafe URLs and forbidden DNS answers", async () => {
+  for (const url of ["http://169.254.169.254", "http://2852039166", "http://user:pass@10.0.0.9", "file:///etc/passwd", "http://10.0.0.9/redirect"]) {
+    assert.throws(() => macAgentBaseUrl({ agent: { url } }));
+  }
+  const { assertMacAgentTarget } = await import("../MacAgentCollector.js");
+  await assert.rejects(() => assertMacAgentTarget("http://fixture.example", { lookup: async () => [{ address: "169.254.169.254" }] }), /forbidden/);
 });

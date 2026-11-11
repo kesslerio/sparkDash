@@ -9,7 +9,7 @@ import {
 const spark = {
   id: "macbook",
   kind: "mac",
-  lanIp: "192.168.4.125",
+  lanIp: "10.0.0.9",
   agent: { port: 8790 },
 };
 
@@ -61,9 +61,9 @@ test("list, start, and stop talk only to the control endpoint", async () => {
   assert.deepEqual(stopped.serving, []);
 
   assert.deepEqual(requested.map((row) => `${row.method} ${row.url}`), [
-    "GET http://192.168.4.125:8790/control",
-    "POST http://192.168.4.125:8790/control/start",
-    "POST http://192.168.4.125:8790/control/stop",
+    "GET http://10.0.0.9:8790/control",
+    "POST http://10.0.0.9:8790/control/start",
+    "POST http://10.0.0.9:8790/control/stop",
   ]);
   assert.equal(requested.some((row) => row.url.includes("/metrics")), false);
   assert.equal(requested[1].auth, "Bearer secret");
@@ -126,4 +126,17 @@ test("an old agent without /control is unavailable rather than an empty success"
   });
   assert.equal(result.state, "unavailable");
   assert.match(result.reason, /no runtime control endpoint/);
+});
+
+test("invalid agent targets never receive the control credential and redirects are refused", async () => {
+  let calls = 0;
+  const result = await readRuntimeControl({ ...spark, agent: { url: "http://169.254.169.254" } }, {
+    token: "synthetic-secret", fetchImpl: async () => { calls += 1; throw new Error("must not be called"); },
+  });
+  assert.equal(calls, 0);
+  assert.equal(result.state, "unavailable");
+  await readRuntimeControl(spark, { token: "synthetic-secret", fetchImpl: async (_url, options) => {
+    assert.equal(options.redirect, "error");
+    return jsonResponse(404, {});
+  } });
 });
