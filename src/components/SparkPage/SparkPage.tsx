@@ -14,6 +14,7 @@ import { TailscalePanel } from "./TailscalePanel";
 import { LlmPanel } from "./LlmPanel";
 import { ComfyPanel } from "./ComfyPanel";
 import { RuntimesPanel } from "../ui/RuntimeChips";
+import { RuntimeLauncher } from "./RuntimeLauncher";
 import { LlmModelsPanel } from "./LlmModelsPanel";
 import { RocePanel } from "./RocePanel";
 import { UnifiedMemoryPanel } from "./UnifiedMemoryPanel";
@@ -147,9 +148,9 @@ export function SparkPage({
   // Everything on one page: hardware and services together (no sub-tabs).
   const view: SparkView = showServices ? "all" : "resources";
   const showSvc = showServices && view !== "resources";
-  // Agent Macs use verified runtime profiles; other units retain script launchers.
+  // Models you start/stop with your own start.sh / stop.sh. Shown on every Spark and in every tab,
+  // so it is always easy to find (a worker may have its own scripts too).
   const modelsPanel = <LlmModelsPanel spark={spark} />;
-  const profileModels = spark.kind === "mac" && spark.macTransport === "agent";
   const primaryPort = llmPorts[0];
   const extraPorts = llmPorts.slice(1);
   const unified = metrics.unifiedMemory;
@@ -288,7 +289,16 @@ export function SparkPage({
                 hideMemory={showUnified}
               />
             </Item>
-            {profileModels && <Item order={5}>{modelsPanel}</Item>}
+            {/* Mac agent: start/stop launcher tile for its detected runtimes. */}
+            {spark.kind === "mac" && (
+              <Item order={5}>
+                <RuntimeLauncher
+                  sparkId={spark.id}
+                  metricsRuntimes={metrics.runtimes}
+                  agentOnline={metrics.agentOnline}
+                />
+              </Item>
+            )}
             {/* Mac agent transport only: what is actually serving, from the
                 node's own process/port inventory. */}
             {Array.isArray(metrics.runtimes) && (
@@ -319,7 +329,7 @@ export function SparkPage({
                   <RamPanel ram={metrics.ram} sparkId={spark.id} />
                 )}
                 {/* Models is the third column of the row (Windows PCs have no launchers). */}
-                {!profileModels && spark.platform !== "windows" && modelsPanel}
+                {spark.platform !== "windows" && modelsPanel}
               </div>
             </Item>
             {/* History closes the hardware column: the right column (LLM, storage, network) is

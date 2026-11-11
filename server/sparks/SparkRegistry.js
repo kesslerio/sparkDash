@@ -28,9 +28,7 @@ export function normalizeMacAgent(value) {
   const port = Number.parseInt(String(row.port ?? ""), 10);
   const usablePort = Number.isInteger(port) && port > 0 && port <= 65535 ? port : null;
   if (!url && !host && !usablePort) return null;
-  const controlPort = Number(row.controlPort);
-  return { url: url || null, host: host || null, port: usablePort,
-    ...(Number.isInteger(controlPort) && controlPort > 0 && controlPort <= 65535 ? { controlPort } : {}) };
+  return { url: url || null, host: host || null, port: usablePort };
 }
 
 export class SparkRegistry {

@@ -587,16 +587,9 @@ async function runtimeControlFetch(path: string, opts?: RequestInit): Promise<Ru
     });
   } catch (err) {
     const reason = err instanceof Error ? err.message : "runtime control request failed";
-    return { state: "unavailable", reason, serving: null, targets: [], error: reason, transportError: true };
+    return { state: "unavailable", reason, serving: null, targets: [], error: reason };
   }
-  let body: Partial<RuntimeControlView>;
-  try {
-    body = await res.json();
-    if (!body || typeof body !== "object") throw new Error("invalid runtime control response");
-  } catch {
-    const reason = "Runtime control response was unreadable; checking operation status";
-    return { state: "unavailable", reason, serving: null, targets: [], error: reason, transportError: true };
-  }
+  const body = await res.json().catch(() => ({} as Partial<RuntimeControlView> & { error?: string }));
   if (body.state === "ready" || body.state === "unavailable" || body.state === "denied") {
     return {
       state: body.state,
@@ -606,16 +599,13 @@ async function runtimeControlFetch(path: string, opts?: RequestInit): Promise<Ru
       error: body.error ?? null,
       output: body.output ?? null,
       ok: body.ok,
-      authorized: body.authorized,
-      busy: body.busy,
-      operation: body.operation,
     };
   }
   const reason = body.error || body.reason || `HTTP ${res.status}`;
   if (res.status === 403) {
     return { state: "denied", reason, serving: body.serving ?? null, targets: body.targets ?? [], error: reason };
   }
-  return { state: "unavailable", reason, serving: null, targets: [], error: reason, ...(res.ok ? { transportError: true } : {}) };
+  return { state: "unavailable", reason, serving: null, targets: [], error: reason };
 }
 
 export function fetchRuntimeControl(id: string): Promise<RuntimeControlView> {
