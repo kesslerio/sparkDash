@@ -78,6 +78,11 @@ const MODEL_DISCOVERY_ROOTS = Object.freeze([
 ]);
 /** Per-command cap for the fixed discovery templates on the local host. */
 const MODEL_DISCOVERY_TIMEOUT_MS = parseInt(process.env.MODEL_DISCOVERY_TIMEOUT_MS || "8000", 10);
+// ─── Delegation desk ─────────────────────────────────────
+/** The desk the Overview delegation panel reads. Unset: its routes answer 503 "not configured". */
+const DELEGATION_DESK_URL = (process.env.DELEGATION_DESK_URL || "").trim();
+/** The desk's admin token for budget writes. Stays on the server; never sent to the browser. */
+const DELEGATION_DESK_TOKEN = (process.env.DELEGATION_DESK_TOKEN || "").trim();
 
 // ─── LLM / Comfy probe timeouts ──────────────────────────
 const LLM_PROBE_TIMEOUT_MS = 3000;
@@ -262,6 +267,8 @@ export {
   MODEL_DISCOVERY_DEFAULT_ROOTS,
   MODEL_DISCOVERY_ROOTS,
   MODEL_DISCOVERY_TIMEOUT_MS,
+  DELEGATION_DESK_URL,
+  DELEGATION_DESK_TOKEN,
   LLM_PROBE_TIMEOUT_MS,
   COMFY_PROBE_TIMEOUT_MS,
   TAILSCALE_PROBE_TIMEOUT_MS,

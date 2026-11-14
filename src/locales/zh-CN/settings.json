@@ -19,6 +19,7 @@
     "metricsHistory": { "title": "指标历史", "help": "在服务器中为每个节点保留 48 小时的 1 分钟历史和 30 天的 15 分钟历史（GPU、内存余量、CPU、网络、LLM tok/s 和 KV；每节点磁盘至多约 1 MB），并在每个节点页面的 History 面板中绘制图表。默认关闭。" },
     "llmStreamSample": { "title": "对流采样无指标引擎", "help": "对于不发布任何实时计数器的 LLM 引擎（Pico），每 15 秒发送一次微型流式补全并对 token 计时，从而测量解码 tok/s；面板会将该数值标注为采样值。默认关闭。当基准测试、展示或模型启动占用该节点时采样会暂停；预填充不做采样——能测出预填充速度的提示词就是真实负载，而非探测。" },
     "fleetEnergy": { "title": "显示集群能耗", "help": "Overview 卡片显示滚动的集群功耗估算。完整 Fleet energy 页面始终可从侧边栏进入。" },
+    "delegationDesk": { "title": "显示委派台", "help": "Overview 卡片按机器显示委派容量和云端配额，数据来自服务器上 DELEGATION_DESK_URL 指定的委派台。只有服务器同时配置 DELEGATION_DESK_TOKEN 时才能修改预算。默认关闭；关闭时不发出任何请求。" },
     "llmTokenTotals": { "title": "显示 LLM Token 总数", "help": "Overview 卡片显示每个模型的累计提示 / 生成 Token。完整 Token totals 页面始终可从侧边栏进入。" },
     "recentActivity": { "title": "显示最近活动", "help": "Overview 卡片显示最新健康和内核事件。完整 Activity 页面始终可从侧边栏进入。" },
     "fleetDecode": { "title": "显示集群解码磁贴", "help": "Overview 磁贴显示集群总生成 tok/s。" },

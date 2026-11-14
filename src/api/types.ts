@@ -1210,6 +1210,121 @@ export interface HealthResponse {
   version?: string | null;
 }
 
+// ─── Delegation desk (GET /api/delegation-desk) ──────────
+// The desk's own status JSON, relayed as-is plus `canEdit`. Fields the desk may
+// leave out are optional; a missing measurement stays missing, never 0.
+
+/** One quota window: percent left and when it resets (epoch seconds). */
+export interface DeskQuotaWindow {
+  name: string;
+  remaining: number;
+  resets_at: number | null;
+}
+
+export interface DeskHubAccount {
+  account: string;
+  usable: boolean;
+  reason: string | null;
+  windows: DeskQuotaWindow[];
+}
+
+/** A route's live signal: sparkDash saturation for a local route, quota for a cloud one. */
+export interface DeskSignal {
+  kind: "saturation" | "quota" | null;
+  /** room, saturated, unavailable, full or no-signal. */
+  state: string;
+  detail?: string;
+  /** Seconds since the reading. */
+  age: number | null;
+  /** sparkDash unit id (saturation signals). */
+  unit?: string | null;
+  running?: number | null;
+  /** Requests waiting on the unit. null when unreported. */
+  waiting?: number | null;
+  /** KV cache use as a 0–1 fraction. null when unreported. */
+  kv_cache?: number | null;
+  source?: string;
+  windows?: DeskQuotaWindow[];
+  accounts?: DeskHubAccount[];
+}
+
+export interface DeskDelegate {
+  id: string;
+  title?: string;
+  host: string;
+  source?: string;
+  model?: string;
+  provider?: string;
+  /** A delegate's parent thread, or an interactive fork's parent; null for a top-level thread. */
+  parent?: string | null;
+  warning?: string;
+  /** delegate: a dispatched subagent; interactive: the owner's top-level or fork thread. */
+  kind?: "delegate" | "interactive";
+}
+
+export interface DeskRoute {
+  key: string;
+  /** The roster's human route name, e.g. "DeepSeek V4.1, QualityCorp". An older desk omits it. */
+  name?: string;
+  provider: string;
+  model: string;
+  /** Effective budget: an override's value while one is active; null for quota-only routes. */
+  budget: number | null;
+  /** The budget in delegation.md. */
+  roster_budget?: number | null;
+  /** Live delegates plus outstanding claims. */
+  load: number;
+  live: DeskDelegate[];
+  signal?: DeskSignal | null;
+  /** Per dispatching host, for quota read on each host. */
+  signals?: Record<string, DeskSignal> | null;
+}
+
+export interface DeskHost {
+  age: number | null;
+  /** fresh, stale or warming. */
+  state: string;
+}
+
+export interface DeskPullRequest {
+  number: number;
+  url: string;
+  state?: string;
+}
+
+export interface DeskOverride {
+  budget: number;
+  roster: number;
+  /** Epoch seconds; null while an open PR holds the override. */
+  expires_at: number | null;
+  pr: DeskPullRequest | null;
+  set_at: number;
+}
+
+export interface DeskClaim {
+  id: string;
+  host: string;
+  route: string;
+  title?: string;
+}
+
+export interface DeskWaiting {
+  host: string;
+  title?: string;
+  skipped?: string[];
+}
+
+export interface DelegationDeskStatus {
+  version: string | null;
+  routes: DeskRoute[];
+  hosts: Record<string, DeskHost>;
+  claims?: DeskClaim[];
+  waiting?: DeskWaiting[];
+  overrides?: Record<string, DeskOverride>;
+  /** The server holds the desk's admin token, so budgets can be changed. */
+  canEdit: boolean;
+}
+
 export interface InferenceActivity {
   enabled: boolean;
   available: boolean;
@@ -1249,6 +1364,8 @@ export interface Settings {
   density: "comfortable" | "compact";
   /** Overview Fleet Energy card. Off by default. */
   showFleetEnergy: boolean;
+  /** Overview delegation desk panel. Off by default; while off it makes no requests. */
+  showDelegationDesk?: boolean;
   /** Overview active fleet exceptions strip. Off by default. */
   showFleetExceptions: boolean;
   /** Overview search field + status filter. Off by default. */

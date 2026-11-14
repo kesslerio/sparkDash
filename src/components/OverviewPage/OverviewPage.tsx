@@ -5,6 +5,7 @@ import { isWorkerSpark, resolveSparkRole } from "../../api/sparkRole";
 import { updateAllHermes, wakeAllSparks } from "../../api/client";
 import { ShutdownAll } from "../ShutdownAll";
 import { FleetEnergyCard } from "./FleetEnergyCard";
+import { DelegationDeskPanel } from "./DelegationDeskPanel";
 import { FleetAlertStrip } from "./FleetAlertStrip";
 import { FleetTokenTotals } from "./FleetTokenTotals";
 import { InferenceTrafficCard } from "./InferenceTrafficCard";
@@ -23,6 +24,8 @@ interface OverviewPageProps {
   hideOffline?: boolean;
   hideWorkers?: boolean;
   showFleetEnergy?: boolean;
+  /** Delegation desk panel; off by default and makes no requests while off. */
+  showDelegationDesk?: boolean;
   /** Opt-in server capability; absent sources add no card or polling. */
   showInferenceActivity?: boolean;
   showFleetExceptions?: boolean;
@@ -49,6 +52,7 @@ export function OverviewPage({
   hideOffline = false,
   hideWorkers = false,
   showFleetEnergy = true,
+  showDelegationDesk = false,
   showInferenceActivity = false,
   showFleetExceptions = false,
   alertsEnabled = false,
@@ -65,6 +69,8 @@ export function OverviewPage({
   const { t } = useTranslation("overview");
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | "online" | "offline" | "issues">("all");
+  /** Display names by unit id, for side cards that name units (energy coverage, delegation desk). */
+  const unitNames = useMemo(() => Object.fromEntries(sparks.map((s) => [s.id, s.name])), [sparks]);
   const withoutWorkers = useMemo(
     () => (hideWorkers ? sparks.filter((s) => !isWorkerSpark(s)) : sparks),
     [sparks, hideWorkers]
@@ -365,10 +371,11 @@ export function OverviewPage({
           })}
         </div>
         <FleetKpis sparks={sparks} snapshotKey={sparks} show={kpis} />
-        {showFleetEnergy || showLlmTokenTotals || showActivityFeed || showInferenceActivity ? (
+        {showDelegationDesk || showFleetEnergy || showLlmTokenTotals || showActivityFeed || showInferenceActivity ? (
         <div className="ov-side">
+          {showDelegationDesk ? <DelegationDeskPanel unitNames={unitNames} /> : null}
           {showInferenceActivity ? <InferenceTrafficCard /> : null}
-          {showFleetEnergy ? <FleetEnergyCard nodeCount={sparks.length} nodeNames={Object.fromEntries(sparks.map((s) => [s.id, s.name]))} onOpenDetails={onNavigate ? () => onNavigate(ENERGY_ID) : undefined} /> : null}
+          {showFleetEnergy ? <FleetEnergyCard nodeCount={sparks.length} nodeNames={unitNames} onOpenDetails={onNavigate ? () => onNavigate(ENERGY_ID) : undefined} /> : null}
           {showLlmTokenTotals ? <FleetTokenTotals onOpenDetails={onNavigate ? () => onNavigate(TOKENS_ID) : undefined} /> : null}
           {showActivityFeed ? (
             <section className="panel ov-card" aria-label={t("activity.title")}>

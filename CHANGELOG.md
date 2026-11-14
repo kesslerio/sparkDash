@@ -7,9 +7,13 @@ Format: version sections are listed newest first.
 
 ---
 
-## [2.90.0] — 2026-11-12
+## [Unreleased]
 
-### Added
+- **Delegation desk panel:** an optional Overview card (Settings → Show delegation desk, off by default) shows delegate capacity by machine and cloud quota from a delegation desk set by `DELEGATION_DESK_URL`. With `DELEGATION_DESK_TOKEN` on the server, **Adjust budgets** sets expiring budget overrides, and can make one permanent through a `delegation.md` PR. Changes show only after the desk acknowledges them, and unreported readings stay *not reported*. See [Delegation desk panel](./README.md#delegation-desk-panel).
+
+- **Delegation desk interactive threads:** the panel now separates delegates from the owner's own running top-level and fork threads, marks interactive rows, and counts both against the route's budget. The holders disclosure no longer calls every entry a delegate.
+
+## [2.90.0] — 2026-11-12
 - Localize the opt-in, read-only API Keys page and its Settings entry in English and Simplified Chinese while preserving raw identifiers, diagnostics and unknown-versus-zero values. Thanks to @oscarlius (#372).
 
 ### Fixed
