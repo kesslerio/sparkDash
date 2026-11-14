@@ -67,12 +67,16 @@ function unanswered(err, timeoutMs) {
 }
 
 async function readJson(response) {
-  if (Number(response.headers.get("content-length")) > MAX_BODY_BYTES || !response.body) {
+  if (Number(response.headers.get("content-length")) > MAX_BODY_BYTES) {
     await response.body?.cancel();
     throw new Error("unreadable");
   }
+  if (!response.body) return null;
   const bytes = await readCappedBody(response.body, MAX_BODY_BYTES);
+  // A 204 (or any bodyless answer) is a complete answer, not a failed one: the caller
+  // decides whether that status was meaningful, so an empty body is `null`, never a throw.
   if (!bytes) throw new Error("unreadable");
+  if (bytes.length === 0) return null;
   return JSON.parse(bytes.toString("utf8"));
 }
 
@@ -151,6 +155,11 @@ export class DelegationDesk {
     if (status !== 200 || !isObject(payload) || !Array.isArray(payload.routes)) {
       throw new DeskError(502, `The delegation desk answered HTTP ${status} without a status`);
     }
+    // Every route the panel renders needs a key: relaying one without it would take the
+    // dashboard down rather than this card, so a malformed roster is a 502 here.
+    if (!payload.routes.every((route) => isObject(route) && typeof route.key === "string")) {
+      throw new DeskError(502, "The delegation desk sent a route without a key");
+    }
     const body = { ...payload, canEdit: this.canEdit };
     if (writesBefore === this.acknowledgedWrites) this.cache = { at: this.now(), body };
     return body;
@@ -160,15 +169,31 @@ export class DelegationDesk {
     if (!this.base) throw new DeskError(503, this.configError);
     if (!this.token) throw new DeskError(503, "Budget changes not configured on this server (DELEGATION_DESK_TOKEN is unset)");
     if (typeof route !== "string" || !ROUTE_KEY.test(route)) throw new DeskError(400, "Unknown route");
-    const { status, payload } = await this.request(
-      method, `/v1/overrides/${encodeURIComponent(route)}${suffix}`, { body, admin: true, timeoutMs }
-    );
-    if (status >= 200 && status < 300 && isObject(payload)) {
-      // The next read must start after this write: drop the cache and any read already in flight.
-      this.cache = null;
-      this.inflight = null;
+    // Any write may change what a status read would say, so no read after it may be answered
+    // from the cache — including one whose answer never arrives.
+    this.cache = null;
+    this.inflight = null;
+    let status;
+    let payload;
+    try {
+      ({ status, payload } = await this.request(
+        method, `/v1/overrides/${encodeURIComponent(route)}${suffix}`, { body, admin: true, timeoutMs }
+      ));
+    } catch (err) {
+      // A 504 means the desk may have applied the write before its answer was lost, so a read
+      // already in flight must not cache its pre-write reading either.
+      if (err instanceof DeskError && err.status === 504) {
+        this.cache = null;
+        this.inflight = null;
+        this.acknowledgedWrites += 1;
+      }
+      throw err;
+    }
+    // The desk acknowledging the write is what counts, not whether it sent a body back:
+    // a 204 is a complete acknowledgement.
+    if (status >= 200 && status < 300) {
       this.acknowledgedWrites += 1;
-      return payload;
+      return isObject(payload) ? payload : {};
     }
     const reason = this.deskReason(payload);
     // Never pass a desk 401 through: the browser reads a 401 as its own dashboard token failing.

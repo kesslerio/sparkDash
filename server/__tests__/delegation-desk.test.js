@@ -56,6 +56,7 @@ function fakeDesk() {
         res.writeHead(code, { "Content-Type": "application/json" });
         res.end(JSON.stringify(payload));
       };
+      if (desk.mode === "hang-writes" && req.method !== "GET") return; // reads answer, writes do not
       if (req.method === "GET" && req.url === "/v1/status") return send(200, desk.statusBody);
       if (desk.mode === "unauthorized") return send(401, { error: "unauthorized" });
       if (desk.mode === "locked") return send(400, { error: "the override is held by an open PR; the stepper is locked" });
@@ -65,6 +66,12 @@ function fakeDesk() {
       const match = /^\/v1\/overrides\/([^/]+)(\/permanent)?$/.exec(req.url);
       if (!match) return send(404, { error: "unknown endpoint" });
       if (req.headers.authorization !== `Bearer ${ADMIN_TOKEN}`) return send(401, { error: "unauthorized" });
+      if (desk.mode === "no-content") {
+        // A 204 acknowledgement: the write applied, and the desk sends nothing back.
+        res.writeHead(204);
+        res.end();
+        return;
+      }
       if (req.method === "PUT") {
         const { budget } = JSON.parse(body);
         return send(200, { override: { budget, roster: 2, expires_at: 1_900_000_000, pr: null, set_at: 1_899_985_600 } });
@@ -155,6 +162,45 @@ test("a write the desk never answers is a 504 that says the change may have appl
   const closed = await freePort();
   const refused = new DelegationDesk({ url: `http://127.0.0.1:${closed}`, token: ADMIN_TOKEN });
   await assert.rejects(refused.setOverride("deepseek-qualitycorp", 3), (err) => err.status === 503 && /connection refused/.test(err.message));
+});
+
+test("a bodyless 2xx acknowledgement is a success, and it drops the cached status", async (t) => {
+  const desk = fakeDesk();
+  desk.mode = "no-content";
+  const port = await listening(desk.server);
+  t.after(() => { desk.server.closeAllConnections(); desk.server.close(); });
+  const client = new DelegationDesk({ url: `http://127.0.0.1:${port}`, token: ADMIN_TOKEN, writeTimeoutMs: 200 });
+  await client.status();
+  const reads = desk.requests.filter((r) => r.method === "GET").length;
+  assert.deepEqual(await client.setOverride("deepseek-qualitycorp", 3), {}, "a 204 resolves without inventing a body");
+  await client.status();
+  assert.equal(desk.requests.filter((r) => r.method === "GET").length, reads + 1, "the write dropped the cache");
+});
+
+test("a write that never answers drops the cached status, so the next read reaches the desk", async (t) => {
+  const desk = fakeDesk();
+  desk.mode = "hang-writes";
+  const port = await listening(desk.server);
+  t.after(() => { desk.server.closeAllConnections(); desk.server.close(); });
+  const client = new DelegationDesk({ url: `http://127.0.0.1:${port}`, token: ADMIN_TOKEN, writeTimeoutMs: 200 });
+  await client.status();
+  const reads = desk.requests.filter((r) => r.method === "GET").length;
+  await assert.rejects(client.setOverride("deepseek-qualitycorp", 3), (err) => err.status === 504);
+  await client.status();
+  assert.equal(
+    desk.requests.filter((r) => r.method === "GET").length,
+    reads + 1,
+    "a write whose outcome is unknown still drops the cache"
+  );
+});
+
+test("a roster route without a key is a 502, not a crash in the panel", async (t) => {
+  const desk = fakeDesk();
+  desk.statusBody = status({ routes: [{ ...status().routes[0], key: undefined }] });
+  const port = await listening(desk.server);
+  t.after(() => { desk.server.closeAllConnections(); desk.server.close(); });
+  const client = new DelegationDesk({ url: `http://127.0.0.1:${port}`, token: ADMIN_TOKEN, statusTimeoutMs: 500 });
+  await assert.rejects(client.status(), (err) => err.status === 502 && /without a key/.test(err.message));
 });
 
 test("a read that started before an acknowledged write never answers a read made after it", async () => {

@@ -347,8 +347,11 @@
   color: var(--color-faint, var(--color-muted));
 }
 /* A clipped address ("10…") says nothing: on a header too narrow for the whole
-   IP, drop it (the name's tooltip carries it) instead of squeezing the name. */
-@container ov-sc-head (max-width: 400px) {
+   IP, drop it (the name's tooltip carries it) instead of squeezing the name.
+   280px is where the row stops fitting the name and the address together — the
+   card grid's own minimum is 330px, so a higher threshold would hide the IP on
+   every card of a three- or four-unit fleet. */
+@container ov-sc-head (max-width: 280px) {
   .ov .ov-sc__ip {
     display: none;
   }

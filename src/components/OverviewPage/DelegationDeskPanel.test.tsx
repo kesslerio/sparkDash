@@ -526,6 +526,29 @@ describe("DelegationDeskPanel edit mode", () => {
     expect(column(container, "QualityCorp").textContent).toContain("held for PR #732");
   });
 
+  it("renders a desk status that omits hosts and a route's live list", async () => {
+    const data = snapshot();
+    delete (data as Partial<DelegationDeskStatus>).hosts;
+    delete (data.routes[0] as Partial<DeskRoute>).live;
+    const { container } = await renderPanel(data);
+    expect(container.textContent).toContain("Delegation desk");
+    expect(container.textContent).toContain("No hosts reporting");
+    expect(column(container, "QualityCorp").textContent).toContain("Delegates");
+  });
+
+  it("closes the inline Make permanent confirmation with Escape", async () => {
+    const data = snapshot({ overrides: { "deepseek-qualitycorp": override() } });
+    data.routes[0].budget = 3;
+    const { container } = await renderPanel(data);
+    await editMode(container);
+    click(button(column(container, "QualityCorp"), "Make permanent…"));
+    expect(column(container, "QualityCorp").textContent).toContain("Change QualityCorp from 2 to 3");
+    await act(async () => { window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })); });
+    await flush();
+    expect(column(container, "QualityCorp").textContent).not.toContain("Change QualityCorp from 2 to 3");
+    expect(openPr).not.toHaveBeenCalled();
+  });
+
   it("disables the stepper at 0 and at twice the roster, moving focus to the other button", async () => {
     const data = snapshot();
     data.routes[2] = local("qwen-mama", "mama", { budget: 1, roster_budget: 1, load: 0 });

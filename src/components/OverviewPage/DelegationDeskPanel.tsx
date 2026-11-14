@@ -77,8 +77,10 @@ function SlotBar({ load, budget }: { load: number; budget: number }) {
 }
 
 function Delegates({ route, override }: { route: DeskRoute; override?: DeskOverride }) {
-  const interactive = route.live.filter((d) => d.kind === "interactive").length;
-  const delegates = route.live.length - interactive;
+  // The desk is a separate service: a field it stops sending is unknown, not a crash.
+  const live = route.live ?? [];
+  const interactive = live.filter((d) => d.kind === "interactive").length;
+  const delegates = live.length - interactive;
   const mixed = interactive > 0;
   if (route.budget == null) {
     return (
@@ -275,9 +277,9 @@ function EditBlock({ route, name, override, io, confirming, actions, nowSec }: {
   );
 }
 
-function Holders({ route, claims, hosts }: { route: DeskRoute; claims: DeskClaim[]; hosts: Record<string, DeskHost> }) {
+function Holders({ route, claims, hosts = {} }: { route: DeskRoute; claims: DeskClaim[]; hosts?: Record<string, DeskHost> }) {
   const rows = [
-    ...route.live.map((d) => ({
+    ...(route.live ?? []).map((d) => ({
       id: d.id,
       title: d.title || d.id,
       host: d.host,
@@ -449,7 +451,7 @@ function CloudColumn({ route, data, unitNames, editing, io, confirming, actions,
   );
 }
 
-function HostsTag({ hosts }: { hosts: Record<string, DeskHost> }) {
+function HostsTag({ hosts = {} }: { hosts?: Record<string, DeskHost> }) {
   const entries = Object.entries(hosts);
   const missing = entries.filter(([, h]) => h.state !== "fresh").map(([name]) => name);
   if (!entries.length) return <span className="tag tag--warn">No hosts reporting</span>;
@@ -513,6 +515,19 @@ export function DelegationDeskPanel({ unitNames = {} }: { unitNames?: Record<str
     const timer = window.setInterval(load, POLL_MS);
     return () => { cancelled = true; window.clearInterval(timer); };
   }, []);
+
+  // The inline confirmation answers Escape, like every other confirm in the app.
+  useEffect(() => {
+    if (!confirming) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setConfirming(null);
+        setAnnouncement("Change cancelled");
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [confirming]);
 
   const track = (key: string, state: WriteState | null) =>
     setIo((all) => {
@@ -637,8 +652,9 @@ export function DelegationDeskPanel({ unitNames = {} }: { unitNames?: Record<str
   const canEdit = data.canEdit && !error;
   const editing = editingOn && canEdit;
   const nowSec = Date.now() / 1000;
-  const local = data.routes.filter(isLocal);
-  const cloud = data.routes.filter((route) => !isLocal(route));
+  const routes = data.routes ?? [];
+  const local = routes.filter(isLocal);
+  const cloud = routes.filter((route) => !isLocal(route));
   const capacity = localCapacity(local, unitNames);
   const overrideCount = Object.keys(data.overrides ?? {}).length;
   const column = (route: DeskRoute) => ({
@@ -677,7 +693,7 @@ export function DelegationDeskPanel({ unitNames = {} }: { unitNames?: Record<str
           Budget changes apply as soon as the desk confirms them and last {OVERRIDE_HOURS} hours. Running delegates are never stopped.
         </p>
       ) : null}
-      {!data.routes.length ? (
+      {!routes.length ? (
         <p className="dd-sub" role="status">The desk lists no routes.</p>
       ) : null}
       {local.length ? (
