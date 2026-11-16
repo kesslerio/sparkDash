@@ -1104,23 +1104,41 @@
   color: var(--color-text);
   font-weight: 600;
 }
-/* Below about 600px three columns of about 180px clip names and steppers: stack them. */
+/* Three columns clip names and steppers below about 600px; two still fit to about 400. */
 @container ov-dd (max-width: 600px) {
+  .ov .ov-dd .dd-cols {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .ov .ov-dd .dd-col:nth-child(n) {
+    padding: 4px 16px 2px;
+    border-left: 0;
+    border-top: 0;
+  }
+  .ov .ov-dd .dd-col:nth-child(2n) {
+    padding-right: 0;
+    border-left: 1px solid var(--color-border);
+  }
+  .ov .ov-dd .dd-col:nth-child(2n + 1) {
+    padding-left: 0;
+  }
+  .ov .ov-dd .dd-col:nth-child(n + 3) {
+    padding-top: 14px;
+    border-top: 1px solid var(--color-border);
+  }
+}
+@container ov-dd (max-width: 400px) {
   .ov .ov-dd .dd-cols {
     grid-template-columns: minmax(0, 1fr);
     row-gap: 0;
   }
-  .ov .ov-dd .dd-col,
   .ov .ov-dd .dd-col:nth-child(n) {
     padding: 12px 0;
     border-left: 0;
+    border-top: 1px solid var(--color-border);
   }
   .ov .ov-dd .dd-col:first-child {
     padding-top: 2px;
     border-top: 0;
-  }
-  .ov .ov-dd .dd-col + .dd-col {
-    border-top: 1px solid var(--color-border);
   }
 }
 .ov .ov-dd .dd-name {
