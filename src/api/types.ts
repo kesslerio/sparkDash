@@ -1323,30 +1323,38 @@ export interface DelegationDeskStatus {
   claims?: DeskClaim[];
   waiting?: DeskWaiting[];
   overrides?: Record<string, DeskOverride>;
-  /** Claude requests the hub served, per model. Display only; an older desk omits it. */
-  claude_activity?: DeskClaudeActivity | null;
+  /** Per-model use across the hub and every host. Display only; an older desk omits it. */
+  model_activity?: DeskModelActivity | null;
   /** The server holds the desk's admin token, so budgets can be changed. */
   canEdit: boolean;
 }
 
-export interface DeskClaudeModelActivity {
-  /** Requests open on the hub now. */
-  in_flight: number;
-  /** Most requests open at once in the last 5 minutes. */
-  peak_5m: number;
+export interface DeskModelUse {
+  /** Claude, Codex or Antigravity. */
+  provider: string;
+  /** Hub: requests in flight. Host sessions: turns or sessions in progress. */
+  running: number;
+  /** Most requests open at once in the last 5 minutes; null where the source can't tell. */
+  peak_5m: number | null;
   requests_24h: number;
-  /** Unix seconds of the model's latest request. */
+  /** Unix seconds of the model's latest call. */
   last_seen: number | null;
+  /** The sources that counted it: "hub" or "host:<name>". */
+  sources: string[];
 }
 
-/** Read from the hub's own log, so it covers native subagents and sessions outside T3. */
-export interface DeskClaudeActivity {
-  source: string;
-  /** ok or no-signal. A no-signal reading carries no models: unknown is never zero. */
+export interface DeskActivitySource {
+  /** ok or no-signal. A no-signal source adds no models: unknown is never zero. */
   state: string;
   detail: string;
   age: number | null;
-  models: Record<string, DeskClaudeModelActivity>;
+}
+
+/** Every model in use: Claude from the hub's log, Codex and Antigravity from each host's sessions. */
+export interface DeskModelActivity {
+  state: string;
+  models: Record<string, DeskModelUse>;
+  sources: Record<string, DeskActivitySource>;
 }
 
 export interface InferenceActivity {

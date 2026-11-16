@@ -993,15 +993,15 @@
   font-size: 12px;
   color: var(--color-muted);
 }
-.ov .ov-dd .dd-claude,
-.ov .ov-dd .dd-claude__others {
+.ov .ov-dd .dd-activity {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
 }
-.ov .ov-dd .dd-claude {
-  padding-top: 8px;
-  border-top: 1px solid var(--color-border);
+.ov .ov-dd .dd-others {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 4px 24px;
 }
 .ov .ov-dd .dd-note {
   display: flex;

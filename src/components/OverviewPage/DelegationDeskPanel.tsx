@@ -9,7 +9,6 @@ import {
 import type {
   DelegationDeskStatus,
   DeskClaim,
-  DeskClaudeModelActivity,
   DeskHost,
   DeskOverride,
   DeskQuotaWindow,
@@ -20,24 +19,27 @@ import {
   OVERRIDE_HOURS,
   QUOTA_CUTOFF,
   ago,
-  claudeActivity,
   cloudHeading,
   cloudVerdict,
   isLocal,
   localCapacity,
   localHeading,
   localReading,
+  otherModels,
   plural,
   prIsOpen,
+  quietSources,
   quotaView,
   rosterBudget,
+  routeActivity,
   routeName,
   safePrUrl,
   slotVerdict,
   timeLeft,
   windowName,
   withOverride,
-  type ClaudeActivityView,
+  type OtherModel,
+  type RouteActivity,
   type Verdict,
 } from "./delegationDesk";
 
@@ -337,51 +339,75 @@ function since(seconds: number): string {
   return `${Math.floor(seconds / 86_400)}d ago`;
 }
 
-function lastUse(entry: DeskClaudeModelActivity, nowSec: number): string {
-  if (entry.in_flight) return `${entry.in_flight} in flight`;
+function lastUse(entry: { running: number; last_seen: number | null }, nowSec: number): string {
+  if (entry.running) return `${entry.running} running`;
   return entry.last_seen != null ? since(nowSec - entry.last_seen) : "not used";
 }
 
 /**
- * What the hub served, from its own log: every Claude session on every host, native
- * subagents included. Display only; the desk never counts it against a slot.
+ * What the route's models are doing, read from the hub log (Claude) or each host's
+ * sessions (Codex, Antigravity): native subagents and sessions outside T3 included.
+ * Display only; the desk never counts it against a slot.
  */
-function ClaudeActivity({ view, nowSec }: { view: ClaudeActivityView; nowSec: number }) {
-  if (view.state !== "ok") {
+function ActivityRow({ activity, nowSec }: { activity: RouteActivity; nowSec: number }) {
+  if (activity.state !== "ok") {
     return (
-      <div className="dd-claude" title={view.detail}>
+      <div className="dd-activity" title={activity.detail}>
         <div className="dd-row">
-          <span className="dd-k">Hub requests</span>
+          <span className="dd-k">Activity</span>
           <span className="dd-v dd-unknown">not reported</span>
         </div>
       </div>
     );
   }
-  const own = view.route;
+  const use = activity.use;
+  const peak = use.peak_5m != null ? `peak ${use.peak_5m} in 5 min · ` : "";
   return (
-    <div className="dd-claude">
+    <div className="dd-activity">
       <div className="dd-row">
-        <span className="dd-k">Hub requests</span>
-        <span className="dd-v dd-num">{own.in_flight} in flight</span>
+        <span className="dd-k">Activity</span>
+        <span className="dd-v dd-num">{use.running} running</span>
       </div>
       <span className="dd-sub">
-        peak {own.peak_5m} in 5 min · {own.requests_24h} in 24 h · all sessions and subagents
+        {peak}{use.requests_24h} {plural(use.requests_24h, "call")} in 24 h
+        {!use.running && use.last_seen != null ? ` · last ${since(nowSec - use.last_seen)}` : ""}
       </span>
-      <div className="dd-claude__others" aria-label="Other Claude models">
-        <span className="dd-sub">Other Claude models, 24 h</span>
-        {view.others.length ? view.others.map((other) => (
-          <div
-            key={other.model}
-            className="dd-row"
-            title={`${other.model}: ${other.requests_24h} ${plural(other.requests_24h, "request")} in 24 h`}
-          >
-            <span className="dd-k">{other.name}</span>
-            <span className="dd-v dd-num">{other.requests_24h} req · {lastUse(other, nowSec)}</span>
-          </div>
-        )) : <span className="dd-sub">none used</span>}
-      </div>
-      <span className="dd-sub">hub log · {ago(view.age)}</span>
     </div>
+  );
+}
+
+function OtherModels({ data, nowSec }: { data: DelegationDeskStatus; nowSec: number }) {
+  const activity = data.model_activity;
+  if (!activity) return null;
+  const others: OtherModel[] = otherModels(data.routes ?? [], activity);
+  const quiet = quietSources(activity);
+  return (
+    <section className="dd-sec" aria-label="Other models">
+      <div className="dd-sec__head">
+        <h3>Other models</h3>
+        <span className="dd-sec__meta">
+          Not on a route · 24 h{quiet.length ? ` · ${quiet.join(", ")} not reporting` : ""}
+        </span>
+      </div>
+      {activity.state !== "ok" ? (
+        <p className="dd-sub dd-unknown" role="status">Not reported</p>
+      ) : others.length ? (
+        <div className="dd-others">
+          {others.map((other) => (
+            <div
+              key={other.model}
+              className="dd-row"
+              title={`${other.model} · ${other.provider} · ${other.requests_24h} ${plural(other.requests_24h, "call")} in 24 h`}
+            >
+              <span className="dd-k dd-trunc">{other.name} <span className="dd-of">{other.provider}</span></span>
+              <span className="dd-v dd-num">{other.requests_24h} · {lastUse(other, nowSec)}</span>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="dd-sub">None used</p>
+      )}
+    </section>
   );
 }
 
@@ -495,7 +521,7 @@ function CloudColumn({ route, data, unitNames, editing, io, confirming, actions,
     bars = <div className="dd-row"><span className="dd-k">Quota</span><span className="dd-v dd-unknown">not reported</span></div>;
   }
   const verdict = cloudVerdict(route, quota.state);
-  const activity = quota.kind === "hub" ? claudeActivity(route, data.routes ?? [], data.claude_activity) : null;
+  const activity = routeActivity(route, data.model_activity);
   return (
     <div className="dd-col">
       <ColumnHead name={heading.title} sub={heading.sub} title={`${route.provider} · ${route.model}`} state={quota.state} />
@@ -503,7 +529,7 @@ function CloudColumn({ route, data, unitNames, editing, io, confirming, actions,
       {bars}
       {verdict ? <VerdictLine verdict={verdict} /> : null}
       {source ? <span className="dd-sub">{source}</span> : null}
-      {activity ? <ClaudeActivity view={activity} nowSec={nowSec} /> : null}
+      {activity ? <ActivityRow activity={activity} nowSec={nowSec} /> : null}
       {editing && route.budget != null ? (
         <EditBlock route={route} name={name} override={override} io={io} confirming={confirming} actions={actions} nowSec={nowSec} />
       ) : null}
@@ -775,6 +801,7 @@ export function DelegationDeskPanel({ unitNames = {} }: { unitNames?: Record<str
           <div className="dd-cols">{cloud.map((route) => <CloudColumn key={route.key} {...column(route)} />)}</div>
         </section>
       ) : null}
+      <OtherModels data={data} nowSec={nowSec} />
       <div className="dd-legend" aria-hidden="true">
         <span><i />Held delegate slot</span>
         <span><i className="is-paused" />Paused</span>
