@@ -42,8 +42,58 @@ export function shortModel(model: string): string {
 }
 
 /** Local routes report sparkDash saturation; everything else is judged on quota. */
+/**
+ * Local means a machine sparkDash measures. A route the desk reads saturation for but
+ * maps to no unit (a hosted subscription such as OpenCode Go, or Terra) is cloud.
+ * An older desk sends no `unit` field at all, and its saturation routes stay local.
+ */
 export function isLocal(route: DeskRoute): boolean {
-  return route.signal?.kind === "saturation";
+  return route.signal?.kind === "saturation" && route.signal.unit !== null;
+}
+
+/** Providers whose routes draw on one shared allowance and share a column. */
+const SHARED_ALLOWANCE = new Set(["Codex", "Claude", "Antigravity"]);
+
+export interface Allowance {
+  key: string;
+  /** The column title: the provider for a shared allowance, else the route's own name. */
+  title: string;
+  sub: string;
+  routes: DeskRoute[];
+  /** The route whose quota reading speaks for the whole allowance. */
+  quotaRoute: DeskRoute;
+}
+
+const hasQuota = (route: DeskRoute) =>
+  route.signal?.kind === "quota" || Object.values(route.signals ?? {}).some((s) => s?.kind === "quota");
+
+/** Cloud routes grouped by what runs out together, in the desk's route order. */
+export function allowances(routes: DeskRoute[]): Allowance[] {
+  const groups: Allowance[] = [];
+  for (const route of routes) {
+    const shared = SHARED_ALLOWANCE.has(route.provider);
+    const key = shared ? `provider:${route.provider}` : `route:${route.key}`;
+    const group = groups.find((g) => g.key === key);
+    if (group) {
+      group.routes.push(route);
+      if (!hasQuota(group.quotaRoute) && hasQuota(route)) group.quotaRoute = route;
+      continue;
+    }
+    groups.push({ key, title: "", sub: "", routes: [route], quotaRoute: route });
+  }
+  for (const group of groups) {
+    if (group.key.startsWith("provider:")) {
+      // Named for the allowance, so a status tag never squeezes a long model name.
+      group.title = group.routes[0].provider;
+      group.sub = group.routes.map((r) => cloudHeading(r).title).join(" + ");
+    } else {
+      const heading = cloudHeading(group.routes[0]);
+      group.title = heading.title;
+      group.sub = heading.sub;
+    }
+  }
+  // Shared allowances first; a lone route without one fills the last row.
+  return [...groups.filter((g) => g.key.startsWith("provider:")), ...groups.filter((g) => !g.key.startsWith("provider:"))];
 }
 
 /** Display name: a local route is named after its sparkDash unit, a cloud route after its model. */
@@ -78,7 +128,8 @@ export function localHeading(route: DeskRoute, unitNames: Record<string, string>
  */
 export function cloudHeading(route: DeskRoute): { title: string; sub: string } {
   const name = typeof route.name === "string" ? route.name.trim() : "";
-  return { title: name || route.model, sub: route.provider };
+  // "DeepSeek V4.1, OpenCode Go" is a model on a named service, like a local machine.
+  return splitLocalName(name) ?? { title: name || route.model, sub: route.provider };
 }
 
 export function rosterBudget(route: DeskRoute): number | null {
@@ -343,4 +394,9 @@ export function quietSources(activity: DeskModelActivity | null | undefined): st
   return Object.entries(activity?.sources ?? {})
     .filter(([, s]) => s.state !== "ok")
     .map(([name]) => name.replace(/^host:/, ""));
+}
+
+/** Off-route models drawing on one provider's allowance; the rest go to Other models. */
+export function allowanceModels(provider: string, others: OtherModel[]): OtherModel[] {
+  return SHARED_ALLOWANCE.has(provider) ? others.filter((o) => o.provider === provider) : [];
 }
