@@ -90,14 +90,16 @@ function Delegates({ route, override }: { route: DeskRoute; override?: DeskOverr
   const interactive = live.filter((d) => d.kind === "interactive").length;
   const delegates = live.length - interactive;
   const mixed = interactive > 0;
+  // The count stays on one line; the delegate/interactive split goes beneath it.
+  const split = mixed ? <span className="dd-sub">{delegates} {plural(delegates, "delegate")} + {interactive} interactive</span> : null;
   if (route.budget == null) {
     return (
-      <div className="dd-row">
-        <span className="dd-k">Delegates</span>
-        <span className="dd-v dd-num">
-          {mixed ? `${delegates} ${plural(delegates, "delegate")} + ${interactive} interactive` : route.load}
-          <span className="dd-of"> · quota only</span>
-        </span>
+      <div>
+        <div className="dd-row">
+          <span className="dd-k">Delegates</span>
+          <span className="dd-v dd-num dd-nowrap">{route.load}<span className="dd-of"> · quota only</span></span>
+        </div>
+        {split}
       </div>
     );
   }
@@ -105,13 +107,13 @@ function Delegates({ route, override }: { route: DeskRoute; override?: DeskOverr
     <div>
       <div className="dd-row">
         <span className="dd-k">Delegates</span>
-        <span className="dd-v dd-num">
-          {mixed ? `${delegates} ${plural(delegates, "delegate")} + ${interactive} interactive` : route.load}
-          <span className="dd-of">{mixed ? ` · ${route.load} / ${route.budget}` : ` / ${route.budget}`}</span>
+        <span className="dd-v dd-num dd-nowrap">
+          {route.load}<span className="dd-of"> / {route.budget}</span>
           {override ? <span className="dd-ovr-badge"> · override</span> : null}
         </span>
       </div>
       <SlotBar load={route.load} budget={route.budget} />
+      {split}
     </div>
   );
 }
@@ -571,10 +573,17 @@ function AllowanceColumn({ group, data, unitNames, editing, io, confirming, acti
           </div>
         );
       })}
-      <QuotaBlock route={group.quotaRoute} nowSec={nowSec} />
+      {multi ? (
+        <div className="dd-shared">
+          <span className="dd-sub">Shared by {group.routes.map((r) => cloudHeading(r).title).join(" and ")}</span>
+          <QuotaBlock route={group.quotaRoute} nowSec={nowSec} />
+        </div>
+      ) : (
+        <QuotaBlock route={group.quotaRoute} nowSec={nowSec} />
+      )}
       {also.length ? (
         <span className="dd-sub dd-also" title="Models no route covers that draw on this allowance, last 24 h">
-          Also on this allowance: {also.map((o) => `${o.name} ${o.requests_24h} · ${lastUse(o, nowSec)}`).join(" · ")}
+          Also on this allowance: {also.map((o) => `${o.name} · ${o.requests_24h} ${plural(o.requests_24h, "call")} · ${lastUse(o, nowSec)}`).join("; ")}
         </span>
       ) : null}
     </div>

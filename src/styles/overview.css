@@ -1090,11 +1090,22 @@
   padding-top: 10px;
   border-top: 1px dashed var(--color-border);
 }
+.ov .ov-dd .dd-shared {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--color-border-strong);
+}
+.ov .ov-dd .dd-nowrap {
+  white-space: nowrap;
+}
 .ov .ov-dd .dd-route__name {
   color: var(--color-text);
   font-weight: 600;
 }
-@container ov-dd (max-width: 520px) {
+/* Below about 600px three columns of about 180px clip names and steppers: stack them. */
+@container ov-dd (max-width: 600px) {
   .ov .ov-dd .dd-cols {
     grid-template-columns: minmax(0, 1fr);
     row-gap: 0;

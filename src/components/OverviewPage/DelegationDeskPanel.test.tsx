@@ -362,9 +362,9 @@ describe("DelegationDeskPanel reading", () => {
     const { container } = render(<DelegationDeskPanel unitNames={UNITS} />);
     await flush();
     expect(column(container, "Claude").querySelector(".dd-also")?.textContent)
-      .toBe("Also on this allowance: Fable 5.2 64 · 1 running · Haiku 5.5 8 · 20m ago · Sonnet 5.5 25 · 8h ago");
+      .toBe("Also on this allowance: Fable 5.2 · 64 calls · 1 running; Haiku 5.5 · 8 calls · 20m ago; Sonnet 5.5 · 25 calls · 8h ago");
     expect(column(container, "Codex").querySelector(".dd-also")?.textContent)
-      .toBe("Also on this allowance: GPT-5.6 Luna 197 · 2d ago");
+      .toBe("Also on this allowance: GPT-5.6 Luna · 197 calls · 2d ago");
     expect(column(container, "Antigravity").querySelector(".dd-also")).toBeNull();
     expect(container.querySelector("[aria-label='Other models']")).toBeNull();
   });
@@ -410,8 +410,10 @@ describe("DelegationDeskPanel reading", () => {
     expect(routes.map((r) => r.getAttribute("aria-label"))).toEqual(["GPT-6.1 Sol", "GPT-6.1 Terra"]);
     expect(routes[1].textContent).toContain("1 / 2");
     expect(routes[1].querySelectorAll(".dd-slots i.is-held")).toHaveLength(1);
-    // Terra is judged on the Codex quota Sol carries, shown once for the column.
+    // Terra is judged on the Codex quota Sol carries, shown once and labelled as shared.
     expect(codex.querySelectorAll(".dd-q")).toHaveLength(1);
+    expect(codex.querySelector(".dd-shared .dd-sub")?.textContent).toBe("Shared by GPT-6.1 Sol and GPT-6.1 Terra");
+    expect(codex.querySelector(".dd-route .dd-q")).toBeNull();
     expect(codex.textContent).toContain("Weekly87% left");
     // A service route splits like a machine: service as the title, model beneath. It comes last.
     expect(column(container, "OpenCode Go").querySelector(".dd-model")?.textContent).toBe("DeepSeek V4.1");
@@ -512,7 +514,9 @@ describe("DelegationDeskPanel reading", () => {
     ];
     const { container } = await renderPanel(data);
     const solColumn = column(container, "Codex");
-    expect(solColumn.textContent).toContain("Delegates1 delegate + 2 interactive · 3 / 5");
+    // The count stays on one line; the split sits beneath it.
+    expect(solColumn.querySelector(".dd-row")?.textContent).toBe("Delegates3 / 5");
+    expect(solColumn.textContent).toContain("1 delegate + 2 interactive");
     expect(solColumn.querySelectorAll(".dd-slots i.is-held")).toHaveLength(3);
     const rows = [...solColumn.querySelectorAll(".dd-list li")];
     expect(rows.some((row) => row.textContent?.includes("Android v1") && row.textContent?.includes("interactive"))).toBe(true);
@@ -530,7 +534,8 @@ describe("DelegationDeskPanel reading", () => {
       { id: "fork", title: "Owner fork", host: "MK-MacBook-Pro-5", source: "t3:~/.t3", kind: "interactive", parent: "root" },
     ];
     const { container } = await renderPanel(data);
-    expect(column(container, "Codex").textContent).toContain("0 delegates + 2 interactive · 2 / 5");
+    expect(column(container, "Codex").textContent).toContain("Delegates2 / 5");
+    expect(column(container, "Codex").textContent).toContain("0 delegates + 2 interactive");
   });
 
   it("flags a stale host in the header and on its delegates", async () => {
