@@ -177,14 +177,18 @@ describe("DelegationDeskPanel reading", () => {
     expect(container.querySelector(".dd-sec__meta")?.textContent).toBe("3 free slots");
   });
 
-  it("names local columns by machine and model parts and cloud columns by their route name", async () => {
+  it("names local columns by machine and model parts and cloud columns by their allowance", async () => {
     const { container } = await renderPanel();
     expect(column(container, "QualityCorp").querySelector(".dd-model")?.textContent).toBe("DeepSeek V4.1");
     expect(column(container, "John").querySelector(".dd-model")?.textContent).toBe("DeepSeek V4.1");
     expect(column(container, "mama").querySelector(".dd-model")?.textContent).toBe("Qwen 3.8 27B");
-    expect(column(container, "Gemini 3.8 Flash").querySelector(".dd-model")?.textContent).toBe("Antigravity");
-    expect(column(container, "GPT-6.1 Sol").querySelector(".dd-model")?.textContent).toBe("Codex");
-    expect(column(container, "Opus 5.5").querySelector(".dd-model")?.textContent).toBe("Claude");
+    // The allowance titles the column; its route names sit beneath, so a status tag never cuts them.
+    expect(column(container, "Antigravity").querySelector(".dd-model")?.textContent).toBe("Gemini 3.8 Flash");
+    expect(column(container, "Codex").querySelector(".dd-model")?.textContent).toBe("GPT-6.1 Sol");
+    expect(column(container, "Claude").querySelector(".dd-model")?.textContent).toBe("Opus 5.5");
+    // Shared allowances come first, in the desk's order.
+    const cloud = [...container.querySelectorAll("[aria-label='Cloud routes'] .dd-name b")].map((b) => b.textContent);
+    expect(cloud).toEqual(["Antigravity", "Codex", "Claude"]);
   });
 
   it("reads waiting and KV cache from the structured gauges, not the detail text", async () => {
@@ -221,8 +225,9 @@ describe("DelegationDeskPanel reading", () => {
     const { container } = await renderPanel(data);
     expect(column(container, "QualityCorp").querySelector(".dd-model")?.textContent).toBe("DeepSeek-V4.1-Flash");
     expect(column(container, "John").querySelector(".dd-model")?.textContent).toBe("DeepSeek-V4.1-Flash");
-    expect(column(container, "gemini-3.8-flash")).toBeTruthy();
-    expect(column(container, "claude-opus-5-5")).toBeTruthy();
+    // Without roster names, the allowance still titles the column and the model id sits beneath.
+    expect(column(container, "Antigravity").querySelector(".dd-model")?.textContent).toBe("gemini-3.8-flash");
+    expect(column(container, "Claude").querySelector(".dd-model")?.textContent).toBe("claude-opus-5-5");
     expect(column(container, "John").textContent).toContain("36%");
   });
 
@@ -249,7 +254,7 @@ describe("DelegationDeskPanel reading", () => {
     const gemini = data.routes[3];
     gemini.signals = { "MK-MacBook-Pro-5": quotaSignal(8, "full"), zeppola: quotaSignal(12), theshop: quotaSignal(8, "full") };
     const { container } = await renderPanel(data);
-    const col = column(container, "Gemini 3.8 Flash");
+    const col = column(container, "Antigravity");
     expect(col.textContent).toContain("Hosts disagree: MK-MacBook-Pro-5 8% · zeppola 12% · theshop 8%. Showing the lowest.");
     expect(col.textContent).toContain("Weekly8% left");
     expect(col.textContent).toContain("Quota low");
@@ -264,7 +269,7 @@ describe("DelegationDeskPanel reading", () => {
     });
     data.routes[3].signals = { zeppola: reading(8, 90), theshop: reading(20, 12) };
     const { container } = await renderPanel(data);
-    const col = column(container, "Gemini 3.8 Flash");
+    const col = column(container, "Antigravity");
     expect(col.textContent).toContain("Weekly8% left");
     expect(col.textContent).toContain("5-hour12% left");
     expect(col.textContent).not.toContain("90% left");
@@ -292,8 +297,8 @@ describe("DelegationDeskPanel reading", () => {
 
   it("agreeing hosts show one reading; Opus shows its tightest account window with the rest disclosed", async () => {
     const { container } = await renderPanel();
-    expect(column(container, "Gemini 3.8 Flash").textContent).toContain("3 hosts agree");
-    const opus = column(container, "Opus 5.5");
+    expect(column(container, "Antigravity").textContent).toContain("3 hosts agree");
+    const opus = column(container, "Claude");
     const visible = opus.querySelector(":scope > .dd-q");
     expect(visible?.textContent).toContain("account 2 weekly25% left");
     expect(opus.querySelector("details summary")?.textContent).toBe("All 2 accounts");
@@ -316,11 +321,11 @@ describe("DelegationDeskPanel reading", () => {
     });
     const { container } = render(<DelegationDeskPanel unitNames={UNITS} />);
     await flush();
-    const opus = column(container, "Opus 5.5");
+    const opus = column(container, "Claude");
     expect(opus.querySelector(".dd-activity")?.textContent).toBe("Activity3 runningpeak 4 in 5 min · 3698 calls in 24 h");
     // Display only: three Opus requests on the hub never take a delegate slot.
     expect(opus.textContent).toContain("Delegates0 · quota only");
-    expect(column(container, "GPT-6.1 Sol").querySelector(".dd-activity")?.textContent)
+    expect(column(container, "Codex").querySelector(".dd-activity")?.textContent)
       .toBe("Activity0 running2204 calls in 24 h · last 20m ago");
     // A route no activity source reads (local Pi) gets no row at all.
     expect(column(container, "QualityCorp").querySelector(".dd-activity")).toBeNull();
@@ -338,7 +343,7 @@ describe("DelegationDeskPanel reading", () => {
     });
     const { container } = render(<DelegationDeskPanel unitNames={UNITS} />);
     await flush();
-    expect(column(container, "Opus 5.5").querySelector(".dd-activity")?.textContent)
+    expect(column(container, "Claude").querySelector(".dd-activity")?.textContent)
       .toBe("Activity3 runningpeak 3 in 5 min · 15 calls in 24 h");
     // Nothing off-route: no Other models section at all.
     expect(container.querySelector("[aria-label='Other models']")).toBeNull();
@@ -356,11 +361,11 @@ describe("DelegationDeskPanel reading", () => {
     }));
     const { container } = render(<DelegationDeskPanel unitNames={UNITS} />);
     await flush();
-    expect(column(container, "Opus 5.5").querySelector(".dd-also")?.textContent)
+    expect(column(container, "Claude").querySelector(".dd-also")?.textContent)
       .toBe("Also on this allowance: Fable 5.2 64 · 1 running · Haiku 5.5 8 · 20m ago · Sonnet 5.5 25 · 8h ago");
-    expect(column(container, "GPT-6.1 Sol").querySelector(".dd-also")?.textContent)
+    expect(column(container, "Codex").querySelector(".dd-also")?.textContent)
       .toBe("Also on this allowance: GPT-5.6 Luna 197 · 2d ago");
-    expect(column(container, "Gemini 3.8 Flash").querySelector(".dd-also")).toBeNull();
+    expect(column(container, "Antigravity").querySelector(".dd-also")).toBeNull();
     expect(container.querySelector("[aria-label='Other models']")).toBeNull();
   });
 
@@ -408,7 +413,10 @@ describe("DelegationDeskPanel reading", () => {
     // Terra is judged on the Codex quota Sol carries, shown once for the column.
     expect(codex.querySelectorAll(".dd-q")).toHaveLength(1);
     expect(codex.textContent).toContain("Weekly87% left");
-    expect(column(container, "DeepSeek V4.1, OpenCode Go")).toBeTruthy();
+    // A service route splits like a machine: service as the title, model beneath. It comes last.
+    expect(column(container, "OpenCode Go").querySelector(".dd-model")?.textContent).toBe("DeepSeek V4.1");
+    const cloud = [...container.querySelectorAll("[aria-label='Cloud routes'] .dd-name b")].map((b) => b.textContent);
+    expect(cloud[cloud.length - 1]).toBe("OpenCode Go");
   });
 
   it("gives each route on a shared allowance its own budget stepper", async () => {
@@ -462,10 +470,10 @@ describe("DelegationDeskPanel reading", () => {
     }));
     const { container } = render(<DelegationDeskPanel unitNames={UNITS} />);
     await flush();
-    const opus = column(container, "Opus 5.5").querySelector(".dd-activity");
+    const opus = column(container, "Claude").querySelector(".dd-activity");
     expect(opus?.textContent).toBe("Activitynot reported");
     expect(opus?.getAttribute("title")).toBe("hub: hub log reading is stale");
-    expect(column(container, "GPT-6.1 Sol").querySelector(".dd-activity")?.textContent).toContain("1 running");
+    expect(column(container, "Codex").querySelector(".dd-activity")?.textContent).toContain("1 running");
     // Nothing off-route, so the quiet sources are named on the Cloud header.
     expect(container.querySelector("[aria-label='Cloud routes'] .dd-sec__meta")?.textContent)
       .toBe("Activity: hub, theshop not reporting");
@@ -503,7 +511,7 @@ describe("DelegationDeskPanel reading", () => {
       { id: "worker", title: "Desk worker", host: "MK-MacBook-Pro-5", source: "t3:~/.t3", kind: "delegate", parent: "root" },
     ];
     const { container } = await renderPanel(data);
-    const solColumn = column(container, "GPT-6.1 Sol");
+    const solColumn = column(container, "Codex");
     expect(solColumn.textContent).toContain("Delegates1 delegate + 2 interactive · 3 / 5");
     expect(solColumn.querySelectorAll(".dd-slots i.is-held")).toHaveLength(3);
     const rows = [...solColumn.querySelectorAll(".dd-list li")];
@@ -522,7 +530,7 @@ describe("DelegationDeskPanel reading", () => {
       { id: "fork", title: "Owner fork", host: "MK-MacBook-Pro-5", source: "t3:~/.t3", kind: "interactive", parent: "root" },
     ];
     const { container } = await renderPanel(data);
-    expect(column(container, "GPT-6.1 Sol").textContent).toContain("0 delegates + 2 interactive · 2 / 5");
+    expect(column(container, "Codex").textContent).toContain("0 delegates + 2 interactive · 2 / 5");
   });
 
   it("flags a stale host in the header and on its delegates", async () => {
@@ -563,8 +571,8 @@ describe("DelegationDeskPanel edit mode", () => {
     const qc = column(container, "QualityCorp");
     expect(qc.textContent).toContain("Roster 2. A change applies now for 4 h, up to 4. 0 pauses new delegations.");
     // Quota-only routes have no budget to change.
-    expect(column(container, "Opus 5.5").querySelector(".dd-stepper")).toBeNull();
-    expect(column(container, "GPT-6.1 Sol").querySelector(".dd-stepper")).not.toBeNull();
+    expect(column(container, "Claude").querySelector(".dd-stepper")).toBeNull();
+    expect(column(container, "Codex").querySelector(".dd-stepper")).not.toBeNull();
   });
 
   it("shows Saving… and the new value only after the desk acknowledges", async () => {

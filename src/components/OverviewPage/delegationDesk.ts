@@ -82,7 +82,8 @@ export function allowances(routes: DeskRoute[]): Allowance[] {
     groups.push({ key, title: "", sub: "", routes: [route], quotaRoute: route });
   }
   for (const group of groups) {
-    if (group.routes.length > 1) {
+    if (group.key.startsWith("provider:")) {
+      // Named for the allowance, so a status tag never squeezes a long model name.
       group.title = group.routes[0].provider;
       group.sub = group.routes.map((r) => cloudHeading(r).title).join(" + ");
     } else {
@@ -91,7 +92,8 @@ export function allowances(routes: DeskRoute[]): Allowance[] {
       group.sub = heading.sub;
     }
   }
-  return groups;
+  // Shared allowances first; a lone route without one fills the last row.
+  return [...groups.filter((g) => g.key.startsWith("provider:")), ...groups.filter((g) => !g.key.startsWith("provider:"))];
 }
 
 /** Display name: a local route is named after its sparkDash unit, a cloud route after its model. */
@@ -126,7 +128,8 @@ export function localHeading(route: DeskRoute, unitNames: Record<string, string>
  */
 export function cloudHeading(route: DeskRoute): { title: string; sub: string } {
   const name = typeof route.name === "string" ? route.name.trim() : "";
-  return { title: name || route.model, sub: route.provider };
+  // "DeepSeek V4.1, OpenCode Go" is a model on a named service, like a local machine.
+  return splitLocalName(name) ?? { title: name || route.model, sub: route.provider };
 }
 
 export function rosterBudget(route: DeskRoute): number | null {
