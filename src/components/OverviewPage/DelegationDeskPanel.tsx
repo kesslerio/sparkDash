@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ApiError,
   fetchDelegationDesk,
@@ -19,6 +19,8 @@ import {
   OVERRIDE_HOURS,
   QUOTA_CUTOFF,
   ago,
+  allowanceModels,
+  allowances,
   cloudHeading,
   cloudVerdict,
   isLocal,
@@ -38,6 +40,7 @@ import {
   timeLeft,
   windowName,
   withOverride,
+  type Allowance,
   type OtherModel,
   type RouteActivity,
   type Verdict,
@@ -376,10 +379,10 @@ function ActivityRow({ activity, nowSec }: { activity: RouteActivity; nowSec: nu
   );
 }
 
-function OtherModels({ data, nowSec }: { data: DelegationDeskStatus; nowSec: number }) {
+/** Off-route models whose provider has no column of its own. Hidden when there are none. */
+function OtherModels({ data, others, nowSec }: { data: DelegationDeskStatus; others: OtherModel[]; nowSec: number }) {
   const activity = data.model_activity;
-  if (!activity) return null;
-  const others: OtherModel[] = otherModels(data.routes ?? [], activity);
+  if (!activity || (activity.state === "ok" && !others.length)) return null;
   const quiet = quietSources(activity);
   return (
     <section className="dd-sec" aria-label="Other models">
@@ -391,7 +394,7 @@ function OtherModels({ data, nowSec }: { data: DelegationDeskStatus; nowSec: num
       </div>
       {activity.state !== "ok" ? (
         <p className="dd-sub dd-unknown" role="status">Not reported</p>
-      ) : others.length ? (
+      ) : (
         <div className="dd-others">
           {others.map((other) => (
             <div
@@ -404,8 +407,6 @@ function OtherModels({ data, nowSec }: { data: DelegationDeskStatus; nowSec: num
             </div>
           ))}
         </div>
-      ) : (
-        <p className="dd-sub">None used</p>
       )}
     </section>
   );
@@ -470,15 +471,11 @@ function LocalColumn({ route, data, unitNames, editing, io, confirming, actions,
   );
 }
 
-function CloudColumn({ route, data, unitNames, editing, io, confirming, actions, nowSec }: ColumnProps) {
-  const name = routeName(route, unitNames);
-  const heading = cloudHeading(route);
+/** The quota readout an allowance shows once, whichever of its routes carries the reading. */
+function QuotaBlock({ route, nowSec }: { route: DeskRoute; nowSec: number }) {
   const quota = quotaView(route, nowSec);
-  const override = data.overrides?.[route.key];
-  let bars: ReactNode;
-  let source = "";
   if (quota.kind === "hub") {
-    bars = (
+    return (
       <>
         {quota.tightest ? (
           <QuotaBar label={`${quota.tightest.account} ${windowName(quota.tightest.window.name).toLowerCase()}`} window={quota.tightest.window} nowSec={nowSec} />
@@ -500,11 +497,14 @@ function CloudColumn({ route, data, unitNames, editing, io, confirming, actions,
             ))}
           </div>
         </details>
+        <span className="dd-sub">{route.provider} hub · {ago(quota.age)}</span>
       </>
     );
-    source = `${route.provider} hub · ${ago(quota.age)}`;
-  } else if (quota.kind === "hosts") {
-    bars = (
+  }
+  if (quota.kind === "hosts") {
+    const from = quota.hostCount === 1 ? "1 host"
+      : quota.disagreement ? `lowest of ${quota.hostCount} hosts` : `${quota.hostCount} hosts agree`;
+    return (
       <>
         {quota.windows.map((w) => <QuotaBar key={w.name} label={windowName(w.name)} window={w} nowSec={nowSec} />)}
         {quota.disagreement ? (
@@ -512,28 +512,71 @@ function CloudColumn({ route, data, unitNames, editing, io, confirming, actions,
             Hosts disagree: {quota.disagreement.map((r) => `${r.host} ${r.lowest}%`).join(" · ")}. Showing the lowest.
           </span>
         ) : null}
+        <span className="dd-sub">{from} · {ago(quota.age)}</span>
       </>
     );
-    const from = quota.hostCount === 1 ? "1 host"
-      : quota.disagreement ? `lowest of ${quota.hostCount} hosts` : `${quota.hostCount} hosts agree`;
-    source = `${from} · ${ago(quota.age)}`;
-  } else {
-    bars = <div className="dd-row"><span className="dd-k">Quota</span><span className="dd-v dd-unknown">not reported</span></div>;
   }
-  const verdict = cloudVerdict(route, quota.state);
-  const activity = routeActivity(route, data.model_activity);
+  return <div className="dd-row"><span className="dd-k">Quota</span><span className="dd-v dd-unknown">not reported</span></div>;
+}
+
+interface AllowanceProps {
+  group: Allowance;
+  data: DelegationDeskStatus;
+  unitNames: Record<string, string>;
+  editing: boolean;
+  io: Record<string, WriteState>;
+  confirming: string | null;
+  actions: EditActions;
+  nowSec: number;
+  also: OtherModel[];
+}
+
+/**
+ * One cloud column per allowance: routes that run out together (Sol and Terra on
+ * Codex) share a column, each with its own slots, and the quota shows once.
+ */
+function AllowanceColumn({ group, data, unitNames, editing, io, confirming, actions, nowSec, also }: AllowanceProps) {
+  const quotaState = quotaView(group.quotaRoute, nowSec).state;
+  const multi = group.routes.length > 1;
   return (
     <div className="dd-col">
-      <ColumnHead name={heading.title} sub={heading.sub} title={`${route.provider} · ${route.model}`} state={quota.state} />
-      <Delegates route={route} override={override} />
-      {bars}
-      {verdict ? <VerdictLine verdict={verdict} /> : null}
-      {source ? <span className="dd-sub">{source}</span> : null}
-      {activity ? <ActivityRow activity={activity} nowSec={nowSec} /> : null}
-      {editing && route.budget != null ? (
-        <EditBlock route={route} name={name} override={override} io={io} confirming={confirming} actions={actions} nowSec={nowSec} />
+      <ColumnHead
+        name={group.title}
+        sub={group.sub}
+        title={group.routes.map((r) => `${r.provider} · ${r.model}`).join(", ")}
+        state={quotaState}
+      />
+      {group.routes.map((route) => {
+        const override = data.overrides?.[route.key];
+        const verdict = cloudVerdict(route, quotaState);
+        const activity = routeActivity(route, data.model_activity);
+        return (
+          <div key={route.key} className="dd-route" aria-label={cloudHeading(route).title}>
+            {multi ? <span className="dd-route__name dd-trunc" title={route.model}>{cloudHeading(route).title}</span> : null}
+            <Delegates route={route} override={override} />
+            {activity ? <ActivityRow activity={activity} nowSec={nowSec} /> : null}
+            {verdict ? <VerdictLine verdict={verdict} /> : null}
+            {editing && route.budget != null ? (
+              <EditBlock
+                route={route}
+                name={routeName(route, unitNames)}
+                override={override}
+                io={io[route.key] ?? {}}
+                confirming={confirming === route.key}
+                actions={actions}
+                nowSec={nowSec}
+              />
+            ) : null}
+            <Holders route={route} claims={data.claims ?? []} hosts={data.hosts} />
+          </div>
+        );
+      })}
+      <QuotaBlock route={group.quotaRoute} nowSec={nowSec} />
+      {also.length ? (
+        <span className="dd-sub dd-also" title="Models no route covers that draw on this allowance, last 24 h">
+          Also on this allowance: {also.map((o) => `${o.name} ${o.requests_24h} · ${lastUse(o, nowSec)}`).join(" · ")}
+        </span>
       ) : null}
-      <Holders route={route} claims={data.claims ?? []} hosts={data.hosts} />
     </div>
   );
 }
@@ -742,6 +785,11 @@ export function DelegationDeskPanel({ unitNames = {} }: { unitNames?: Record<str
   const routes = data.routes ?? [];
   const local = routes.filter(isLocal);
   const cloud = routes.filter((route) => !isLocal(route));
+  const cloudGroups = allowances(cloud);
+  const others = otherModels(routes, data.model_activity);
+  const columned = new Set(cloudGroups.filter((g) => g.key.startsWith("provider:")).map((g) => g.routes[0].provider));
+  const leftover = others.filter((o) => !columned.has(o.provider));
+  const quiet = quietSources(data.model_activity);
   const capacity = localCapacity(local, unitNames);
   const overrideCount = Object.keys(data.overrides ?? {}).length;
   const column = (route: DeskRoute) => ({
@@ -797,11 +845,29 @@ export function DelegationDeskPanel({ unitNames = {} }: { unitNames?: Record<str
       ) : null}
       {cloud.length ? (
         <section className="dd-sec" aria-label="Cloud routes">
-          <div className="dd-sec__head"><h3>Cloud</h3></div>
-          <div className="dd-cols">{cloud.map((route) => <CloudColumn key={route.key} {...column(route)} />)}</div>
+          <div className="dd-sec__head">
+            <h3>Cloud</h3>
+            {quiet.length ? <span className="dd-sec__meta">Activity: {quiet.join(", ")} not reporting</span> : null}
+          </div>
+          <div className="dd-cols">
+            {cloudGroups.map((group) => (
+              <AllowanceColumn
+                key={group.key}
+                group={group}
+                data={data}
+                unitNames={unitNames}
+                editing={editing}
+                io={io}
+                confirming={confirming}
+                actions={actions}
+                nowSec={nowSec}
+                also={allowanceModels(group.routes[0].provider, others).filter(() => group.key.startsWith("provider:"))}
+              />
+            ))}
+          </div>
         </section>
       ) : null}
-      <OtherModels data={data} nowSec={nowSec} />
+      <OtherModels data={data} others={leftover} nowSec={nowSec} />
       <div className="dd-legend" aria-hidden="true">
         <span><i />Held delegate slot</span>
         <span><i className="is-paused" />Paused</span>

@@ -1054,10 +1054,11 @@
   font-variant-numeric: tabular-nums;
   color: var(--color-success);
 }
+/* At most three columns a row: more wrap instead of shrinking past readable. */
 .ov .ov-dd .dd-cols {
   display: grid;
-  grid-auto-flow: column;
-  grid-auto-columns: minmax(0, 1fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  row-gap: 14px;
 }
 .ov .ov-dd .dd-col {
   display: flex;
@@ -1066,27 +1067,48 @@
   min-width: 0;
   padding: 4px 16px 2px;
 }
-.ov .ov-dd .dd-col + .dd-col {
+.ov .ov-dd .dd-col:not(:nth-child(3n + 1)) {
   border-left: 1px solid var(--color-border);
 }
-.ov .ov-dd .dd-col:first-child {
+.ov .ov-dd .dd-col:nth-child(3n + 1) {
   padding-left: 0;
 }
+.ov .ov-dd .dd-col:nth-child(3n),
 .ov .ov-dd .dd-col:last-child {
   padding-right: 0;
 }
+.ov .ov-dd .dd-col:nth-child(n + 4) {
+  border-top: 1px solid var(--color-border);
+  padding-top: 14px;
+}
+.ov .ov-dd .dd-route {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ov .ov-dd .dd-route + .dd-route {
+  padding-top: 10px;
+  border-top: 1px dashed var(--color-border);
+}
+.ov .ov-dd .dd-route__name {
+  color: var(--color-text);
+  font-weight: 600;
+}
 @container ov-dd (max-width: 520px) {
   .ov .ov-dd .dd-cols {
-    grid-auto-flow: row;
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: 0;
   }
-  .ov .ov-dd .dd-col {
+  .ov .ov-dd .dd-col,
+  .ov .ov-dd .dd-col:nth-child(n) {
     padding: 12px 0;
+    border-left: 0;
   }
   .ov .ov-dd .dd-col:first-child {
     padding-top: 2px;
+    border-top: 0;
   }
   .ov .ov-dd .dd-col + .dd-col {
-    border-left: 0;
     border-top: 1px solid var(--color-border);
   }
 }
