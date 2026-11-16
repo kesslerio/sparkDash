@@ -9,6 +9,7 @@ import {
 import type {
   DelegationDeskStatus,
   DeskClaim,
+  DeskClaudeModelActivity,
   DeskHost,
   DeskOverride,
   DeskQuotaWindow,
@@ -19,6 +20,7 @@ import {
   OVERRIDE_HOURS,
   QUOTA_CUTOFF,
   ago,
+  claudeActivity,
   cloudHeading,
   cloudVerdict,
   isLocal,
@@ -35,6 +37,7 @@ import {
   timeLeft,
   windowName,
   withOverride,
+  type ClaudeActivityView,
   type Verdict,
 } from "./delegationDesk";
 
@@ -326,6 +329,62 @@ function QuotaBar({ label, window: w, nowSec }: { label: string; window: DeskQuo
   );
 }
 
+/** "now", "14m ago", "3h ago", "2d ago": short enough for a narrow column. */
+function since(seconds: number): string {
+  if (seconds < 60) return "now";
+  if (seconds < 3_600) return `${Math.floor(seconds / 60)}m ago`;
+  if (seconds < 86_400) return `${Math.floor(seconds / 3_600)}h ago`;
+  return `${Math.floor(seconds / 86_400)}d ago`;
+}
+
+function lastUse(entry: DeskClaudeModelActivity, nowSec: number): string {
+  if (entry.in_flight) return `${entry.in_flight} in flight`;
+  return entry.last_seen != null ? since(nowSec - entry.last_seen) : "not used";
+}
+
+/**
+ * What the hub served, from its own log: every Claude session on every host, native
+ * subagents included. Display only; the desk never counts it against a slot.
+ */
+function ClaudeActivity({ view, nowSec }: { view: ClaudeActivityView; nowSec: number }) {
+  if (view.state !== "ok") {
+    return (
+      <div className="dd-claude" title={view.detail}>
+        <div className="dd-row">
+          <span className="dd-k">Hub requests</span>
+          <span className="dd-v dd-unknown">not reported</span>
+        </div>
+      </div>
+    );
+  }
+  const own = view.route;
+  return (
+    <div className="dd-claude">
+      <div className="dd-row">
+        <span className="dd-k">Hub requests</span>
+        <span className="dd-v dd-num">{own.in_flight} in flight</span>
+      </div>
+      <span className="dd-sub">
+        peak {own.peak_5m} in 5 min · {own.requests_24h} in 24 h · all sessions and subagents
+      </span>
+      <div className="dd-claude__others" aria-label="Other Claude models">
+        <span className="dd-sub">Other Claude models, 24 h</span>
+        {view.others.length ? view.others.map((other) => (
+          <div
+            key={other.model}
+            className="dd-row"
+            title={`${other.model}: ${other.requests_24h} ${plural(other.requests_24h, "request")} in 24 h`}
+          >
+            <span className="dd-k">{other.name}</span>
+            <span className="dd-v dd-num">{other.requests_24h} req · {lastUse(other, nowSec)}</span>
+          </div>
+        )) : <span className="dd-sub">none used</span>}
+      </div>
+      <span className="dd-sub">hub log · {ago(view.age)}</span>
+    </div>
+  );
+}
+
 interface ColumnProps {
   route: DeskRoute;
   data: DelegationDeskStatus;
@@ -436,6 +495,7 @@ function CloudColumn({ route, data, unitNames, editing, io, confirming, actions,
     bars = <div className="dd-row"><span className="dd-k">Quota</span><span className="dd-v dd-unknown">not reported</span></div>;
   }
   const verdict = cloudVerdict(route, quota.state);
+  const activity = quota.kind === "hub" ? claudeActivity(route, data.routes ?? [], data.claude_activity) : null;
   return (
     <div className="dd-col">
       <ColumnHead name={heading.title} sub={heading.sub} title={`${route.provider} · ${route.model}`} state={quota.state} />
@@ -443,6 +503,7 @@ function CloudColumn({ route, data, unitNames, editing, io, confirming, actions,
       {bars}
       {verdict ? <VerdictLine verdict={verdict} /> : null}
       {source ? <span className="dd-sub">{source}</span> : null}
+      {activity ? <ClaudeActivity view={activity} nowSec={nowSec} /> : null}
       {editing && route.budget != null ? (
         <EditBlock route={route} name={name} override={override} io={io} confirming={confirming} actions={actions} nowSec={nowSec} />
       ) : null}

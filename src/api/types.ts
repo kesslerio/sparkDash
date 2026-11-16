@@ -1268,6 +1268,8 @@ export interface DeskRoute {
   name?: string;
   provider: string;
   model: string;
+  /** Every model id the route answers to; the first is `model`. An older desk omits it. */
+  models?: string[];
   /** Effective budget: an override's value while one is active; null for quota-only routes. */
   budget: number | null;
   /** The budget in delegation.md. */
@@ -1321,8 +1323,30 @@ export interface DelegationDeskStatus {
   claims?: DeskClaim[];
   waiting?: DeskWaiting[];
   overrides?: Record<string, DeskOverride>;
+  /** Claude requests the hub served, per model. Display only; an older desk omits it. */
+  claude_activity?: DeskClaudeActivity | null;
   /** The server holds the desk's admin token, so budgets can be changed. */
   canEdit: boolean;
+}
+
+export interface DeskClaudeModelActivity {
+  /** Requests open on the hub now. */
+  in_flight: number;
+  /** Most requests open at once in the last 5 minutes. */
+  peak_5m: number;
+  requests_24h: number;
+  /** Unix seconds of the model's latest request. */
+  last_seen: number | null;
+}
+
+/** Read from the hub's own log, so it covers native subagents and sessions outside T3. */
+export interface DeskClaudeActivity {
+  source: string;
+  /** ok or no-signal. A no-signal reading carries no models: unknown is never zero. */
+  state: string;
+  detail: string;
+  age: number | null;
+  models: Record<string, DeskClaudeModelActivity>;
 }
 
 export interface InferenceActivity {

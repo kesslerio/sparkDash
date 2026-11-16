@@ -993,6 +993,16 @@
   font-size: 12px;
   color: var(--color-muted);
 }
+.ov .ov-dd .dd-claude,
+.ov .ov-dd .dd-claude__others {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ov .ov-dd .dd-claude {
+  padding-top: 8px;
+  border-top: 1px solid var(--color-border);
+}
 .ov .ov-dd .dd-note {
   display: flex;
   flex-direction: column;

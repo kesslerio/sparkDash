@@ -1,4 +1,6 @@
 import type {
+  DeskClaudeActivity,
+  DeskClaudeModelActivity,
   DelegationDeskStatus,
   DeskOverride,
   DeskQuotaWindow,
@@ -274,4 +276,53 @@ export function withOverride(
       route.key === key ? { ...route, budget: override ? override.budget : rosterBudget(route) } : route
     ),
   };
+}
+
+const CLAUDE_MODEL = /^claude-([a-z]+)-(\d+)-(\d+)$/;
+
+/** "claude-fable-5-2" → "Fable 5.2"; any other id is shown as it is. */
+export function claudeName(model: string): string {
+  const match = CLAUDE_MODEL.exec(model);
+  if (!match) return model;
+  return `${match[1][0].toUpperCase()}${match[1].slice(1)} ${match[2]}.${match[3]}`;
+}
+
+export interface ClaudeModelRow extends DeskClaudeModelActivity {
+  model: string;
+  name: string;
+}
+
+export type ClaudeActivityView =
+  | { state: "ok"; route: DeskClaudeModelActivity; others: ClaudeModelRow[]; age: number | null }
+  | { state: "no-signal"; detail: string };
+
+/**
+ * Hub activity for the route that holds the hub quota: its own models summed, and every
+ * Claude model no route claims listed beside it. A model that later gets its own route
+ * moves to that route's column.
+ */
+export function claudeActivity(
+  route: DeskRoute,
+  routes: DeskRoute[],
+  activity: DeskClaudeActivity | null | undefined,
+): ClaudeActivityView | null {
+  if (!activity) return null;
+  if (activity.state !== "ok") return { state: "no-signal", detail: activity.detail };
+  const own = new Set(route.models ?? [route.model]);
+  const claimed = new Set(routes.flatMap((r) => r.models ?? [r.model]));
+  const sum: DeskClaudeModelActivity = { in_flight: 0, peak_5m: 0, requests_24h: 0, last_seen: null };
+  const others: ClaudeModelRow[] = [];
+  for (const [model, entry] of Object.entries(activity.models ?? {})) {
+    if (own.has(model)) {
+      sum.in_flight += entry.in_flight;
+      // Peaks of several ids are not additive in time; the larger is the honest floor.
+      sum.peak_5m = Math.max(sum.peak_5m, entry.peak_5m);
+      sum.requests_24h += entry.requests_24h;
+      sum.last_seen = Math.max(sum.last_seen ?? 0, entry.last_seen ?? 0) || null;
+    } else if (!claimed.has(model) && model.startsWith("claude-")) {
+      others.push({ ...entry, model, name: claudeName(model) });
+    }
+  }
+  others.sort((a, b) => (b.last_seen ?? 0) - (a.last_seen ?? 0));
+  return { state: "ok", route: sum, others, age: activity.age };
 }

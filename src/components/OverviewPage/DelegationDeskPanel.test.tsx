@@ -284,6 +284,68 @@ describe("DelegationDeskPanel reading", () => {
     expect(opus.textContent).toContain("Delegates0 · quota only");
   });
 
+  it("shows the hub's Claude requests on the Opus column and lists the other Claude models", async () => {
+    fetchDesk.mockResolvedValue(snapshot({
+      claude_activity: {
+        source: "hub-log", state: "ok", detail: "Claude requests the hub served", age: 12,
+        models: {
+          "claude-opus-5-5": { in_flight: 3, peak_5m: 4, requests_24h: 3698, last_seen: NOW() },
+          "claude-sonnet-5-5": { in_flight: 0, peak_5m: 0, requests_24h: 25, last_seen: NOW() - 8 * 3_600 },
+          "claude-fable-5-2": { in_flight: 1, peak_5m: 1, requests_24h: 64, last_seen: NOW() },
+          "claude-haiku-5-5": { in_flight: 0, peak_5m: 0, requests_24h: 8, last_seen: NOW() - 20 * 60 },
+        },
+      },
+    }));
+    const { container } = render(<DelegationDeskPanel unitNames={UNITS} />);
+    await flush();
+    const opus = column(container, "Opus 5.5");
+    const block = opus.querySelector(".dd-claude");
+    expect(block?.textContent).toContain("Hub requests3 in flight");
+    expect(block?.textContent).toContain("peak 4 in 5 min · 3698 in 24 h");
+    // Display only: three Opus requests on the hub never take a delegate slot.
+    expect(opus.textContent).toContain("Delegates0 · quota only");
+    const others = [...opus.querySelectorAll(".dd-claude__others .dd-row")].map((row) => row.textContent);
+    expect(others).toEqual(["Fable 5.264 req · 1 in flight", "Haiku 5.58 req · 20m ago", "Sonnet 5.525 req · 8h ago"]);
+    // Only the hub's own column carries it.
+    expect(column(container, "GPT-6.1 Sol").querySelector(".dd-claude")).toBeNull();
+  });
+
+  it("moves a Claude model with its own route out of the other-models list", async () => {
+    const base = snapshot();
+    fetchDesk.mockResolvedValue({
+      ...base,
+      routes: [...base.routes, {
+        key: "fable", name: "Fable 5.2", provider: "Claude", model: "claude-fable-5-2", models: ["claude-fable-5-2"],
+        budget: 1, roster_budget: 1, load: 0, live: [], signal: null, signals: null,
+      }],
+      claude_activity: {
+        source: "hub-log", state: "ok", detail: "", age: 3,
+        models: { "claude-fable-5-2": { in_flight: 0, peak_5m: 0, requests_24h: 64, last_seen: NOW() } },
+      },
+    });
+    const { container } = render(<DelegationDeskPanel unitNames={UNITS} />);
+    await flush();
+    const opus = column(container, "Opus 5.5");
+    expect(opus.querySelector(".dd-claude__others")?.textContent).toContain("none used");
+    expect(opus.querySelector(".dd-claude")?.textContent).toContain("0 in flight");
+  });
+
+  it("shows a hub activity reading it does not have as not reported, never 0", async () => {
+    fetchDesk.mockResolvedValue(snapshot({
+      claude_activity: { source: "hub-log", state: "no-signal", detail: "hub log reading is stale", age: 400, models: {} },
+    }));
+    const { container } = render(<DelegationDeskPanel unitNames={UNITS} />);
+    await flush();
+    const block = column(container, "Opus 5.5").querySelector(".dd-claude");
+    expect(block?.textContent).toBe("Hub requestsnot reported");
+    expect(block?.getAttribute("title")).toBe("hub log reading is stale");
+  });
+
+  it("an older desk without hub activity shows no activity block", async () => {
+    const { container } = await renderPanel();
+    expect(column(container, "Opus 5.5").querySelector(".dd-claude")).toBeNull();
+  });
+
   it("looks different when the desk is unreachable than when it is empty", async () => {
     fetchDesk.mockRejectedValue(new Error("Can't reach the delegation desk: timed out after 3 s"));
     const down = render(<DelegationDeskPanel />);
