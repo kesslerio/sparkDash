@@ -1,4 +1,6 @@
 import type {
+  DeskModelActivity,
+  DeskModelUse,
   DelegationDeskStatus,
   DeskOverride,
   DeskQuotaWindow,
@@ -274,4 +276,71 @@ export function withOverride(
       route.key === key ? { ...route, budget: override ? override.budget : rosterBudget(route) } : route
     ),
   };
+}
+
+/** "claude-fable-5-2" → "Fable 5.2", "gpt-6.1-sol" → "GPT-6.1 Sol", "gemini-4-hydrogen" → "Gemini 4 Hydrogen". */
+export function modelName(model: string): string {
+  const title = (word: string) => `${word[0].toUpperCase()}${word.slice(1)}`;
+  const claude = /^claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?$/.exec(model);
+  if (claude) return `${title(claude[1])} ${claude[2]}${claude[3] ? `.${claude[3]}` : ""}`;
+  const gpt = /^gpt-(\d[\d.]*)-([a-z]+)$/.exec(model);
+  if (gpt) return `GPT-${gpt[1]} ${title(gpt[2])}`;
+  const gemini = /^gemini-(\d[\d.]*)-([a-z-]+)$/.exec(model);
+  if (gemini) return `Gemini ${gemini[1]} ${gemini[2].split("-").map(title).join(" ")}`;
+  return model;
+}
+
+/** Which activity source counts a provider's models; none for a provider no source reads. */
+const ACTIVITY_SOURCE: Record<string, "hub" | "hosts"> = { Claude: "hub", Codex: "hosts", Antigravity: "hosts" };
+
+function sourceReady(activity: DeskModelActivity, provider: string): { ok: boolean; detail: string } {
+  const kind = ACTIVITY_SOURCE[provider];
+  const sources = Object.entries(activity.sources ?? {}).filter(([name]) =>
+    kind === "hub" ? name === "hub" : name.startsWith("host:"));
+  const ok = sources.some(([, s]) => s.state === "ok");
+  return { ok, detail: sources.map(([name, s]) => `${name}: ${s.detail}`).join("; ") || "no source reported" };
+}
+
+export type RouteActivity =
+  | { state: "ok"; use: Omit<DeskModelUse, "provider" | "sources"> }
+  | { state: "no-signal"; detail: string };
+
+/** A route's own models summed; null for a provider no activity source reads (local Pi routes). */
+export function routeActivity(route: DeskRoute, activity: DeskModelActivity | null | undefined): RouteActivity | null {
+  if (!activity || !ACTIVITY_SOURCE[route.provider]) return null;
+  const ready = sourceReady(activity, route.provider);
+  if (!ready.ok) return { state: "no-signal", detail: ready.detail };
+  const use = { running: 0, peak_5m: null as number | null, requests_24h: 0, last_seen: null as number | null };
+  for (const model of route.models ?? [route.model]) {
+    const entry = activity.models?.[model];
+    if (!entry) continue;
+    use.running += entry.running ?? 0;
+    use.requests_24h += entry.requests_24h ?? 0;
+    // Peaks of several ids are not additive in time; the larger is the honest floor.
+    if (entry.peak_5m != null) use.peak_5m = Math.max(use.peak_5m ?? 0, entry.peak_5m);
+    if (entry.last_seen != null) use.last_seen = Math.max(use.last_seen ?? 0, entry.last_seen);
+  }
+  return { state: "ok", use };
+}
+
+export interface OtherModel extends DeskModelUse {
+  model: string;
+  name: string;
+}
+
+/** Models in use that no route lists, most recently used first. */
+export function otherModels(routes: DeskRoute[], activity: DeskModelActivity | null | undefined): OtherModel[] {
+  if (!activity) return [];
+  const claimed = new Set(routes.flatMap((r) => r.models ?? [r.model]));
+  return Object.entries(activity.models ?? {})
+    .filter(([model]) => !claimed.has(model))
+    .map(([model, entry]) => ({ ...entry, model, name: modelName(model) }))
+    .sort((a, b) => (b.running - a.running) || ((b.last_seen ?? 0) - (a.last_seen ?? 0)));
+}
+
+/** Sources that are not reading, by name, for the section header. */
+export function quietSources(activity: DeskModelActivity | null | undefined): string[] {
+  return Object.entries(activity?.sources ?? {})
+    .filter(([, s]) => s.state !== "ok")
+    .map(([name]) => name.replace(/^host:/, ""));
 }

@@ -1,10 +1,11 @@
 import { act } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DelegationDeskPanel } from "./DelegationDeskPanel";
+import { modelName } from "./delegationDesk";
 import { OverviewPage } from "./OverviewPage";
 import { flush, render } from "../../testing/render";
 import { makeSpark } from "../../testing/fixtures";
-import type { DelegationDeskStatus, DeskOverride, DeskRoute } from "../../api/types";
+import type { DelegationDeskStatus, DeskModelActivity, DeskModelUse, DeskOverride, DeskRoute } from "../../api/types";
 
 vi.mock(import("../../api/client"), async (importOriginal) => ({
   ...(await importOriginal()),
@@ -90,6 +91,22 @@ function snapshot(overrides: Partial<DelegationDeskStatus> = {}): DelegationDesk
     waiting: [],
     overrides: {},
     ...overrides,
+  };
+}
+
+function use(provider: string, running: number, requests: number, lastSeen: number | null, peak: number | null, sources: string[]): DeskModelUse {
+  return { provider, running, peak_5m: peak, requests_24h: requests, last_seen: lastSeen, sources };
+}
+
+function activity(models: Record<string, DeskModelUse>): DeskModelActivity {
+  return {
+    state: "ok",
+    models,
+    sources: {
+      hub: { state: "ok", detail: "Claude requests the hub served", age: 12 },
+      "host:MK-MacBook-Pro-5": { state: "ok", detail: "Codex and Antigravity sessions", age: 8 },
+      "host:zeppola": { state: "ok", detail: "Codex and Antigravity sessions", age: 9 },
+    },
   };
 }
 
@@ -282,6 +299,118 @@ describe("DelegationDeskPanel reading", () => {
     expect(opus.querySelector("details summary")?.textContent).toBe("All 2 accounts");
     expect(opus.querySelectorAll("details .dd-q")).toHaveLength(4);
     expect(opus.textContent).toContain("Delegates0 · quota only");
+  });
+
+  it("shows each cloud route's activity, from the hub for Claude and the hosts for Codex", async () => {
+    const base = snapshot();
+    fetchDesk.mockResolvedValue({
+      ...base,
+      // The hub quota read failed: activity comes from another source and still shows.
+      routes: base.routes.map((r) => (r.key === "opus"
+        ? { ...r, signal: { kind: "quota" as const, source: "hub", age: null, state: "no-signal", detail: "no hub reading" } }
+        : r)),
+      model_activity: activity({
+        "claude-opus-5-5": use("Claude", 3, 3698, NOW(), 4, ["hub"]),
+        "gpt-6.1-sol": use("Codex", 0, 2204, NOW() - 20 * 60, null, ["host:MK-MacBook-Pro-5", "host:zeppola"]),
+      }),
+    });
+    const { container } = render(<DelegationDeskPanel unitNames={UNITS} />);
+    await flush();
+    const opus = column(container, "Opus 5.5");
+    expect(opus.querySelector(".dd-activity")?.textContent).toBe("Activity3 runningpeak 4 in 5 min · 3698 calls in 24 h");
+    // Display only: three Opus requests on the hub never take a delegate slot.
+    expect(opus.textContent).toContain("Delegates0 · quota only");
+    expect(column(container, "GPT-6.1 Sol").querySelector(".dd-activity")?.textContent)
+      .toBe("Activity0 running2204 calls in 24 h · last 20m ago");
+    // A route no activity source reads (local Pi) gets no row at all.
+    expect(column(container, "QualityCorp").querySelector(".dd-activity")).toBeNull();
+  });
+
+  it("sums a route's model ids, keeping the larger peak", async () => {
+    const base = snapshot();
+    fetchDesk.mockResolvedValue({
+      ...base,
+      routes: base.routes.map((r) => (r.key === "opus" ? { ...r, models: ["claude-opus-5-5", "claude-opus-5-5-20261101"] } : r)),
+      model_activity: activity({
+        "claude-opus-5-5": use("Claude", 1, 10, NOW(), 2, ["hub"]),
+        "claude-opus-5-5-20261101": use("Claude", 2, 5, NOW(), 3, ["hub"]),
+      }),
+    });
+    const { container } = render(<DelegationDeskPanel unitNames={UNITS} />);
+    await flush();
+    expect(column(container, "Opus 5.5").querySelector(".dd-activity")?.textContent)
+      .toBe("Activity3 runningpeak 3 in 5 min · 15 calls in 24 h");
+    expect(container.querySelector("[aria-label='Other models']")?.textContent).toContain("None used");
+  });
+
+  it("lists models no route covers, running first, then most recent", async () => {
+    fetchDesk.mockResolvedValue(snapshot({
+      model_activity: activity({
+        "claude-opus-5-5": use("Claude", 0, 1, NOW(), 0, ["hub"]),
+        "claude-sonnet-5-5": use("Claude", 0, 25, NOW() - 8 * 3_600, 0, ["hub"]),
+        "claude-fable-5-2": use("Claude", 1, 64, NOW() - 3_600, 1, ["hub"]),
+        "claude-haiku-5-5": use("Claude", 0, 8, NOW() - 20 * 60, 0, ["hub"]),
+        "gpt-5.6-luna": use("Codex", 0, 197, NOW() - 2 * 86_400, null, ["host:zeppola"]),
+      }),
+    }));
+    const { container } = render(<DelegationDeskPanel unitNames={UNITS} />);
+    await flush();
+    const section = container.querySelector("[aria-label='Other models']");
+    const rows = [...(section?.querySelectorAll(".dd-others .dd-row") ?? [])].map((row) => row.textContent);
+    expect(rows).toEqual([
+      "Fable 5.2 Claude64 · 1 running",
+      "Haiku 5.5 Claude8 · 20m ago",
+      "Sonnet 5.5 Claude25 · 8h ago",
+      "GPT-5.6 Luna Codex197 · 2d ago",
+    ]);
+    expect(section?.textContent).not.toContain("Opus");
+  });
+
+  it("moves a model with its own route into that route's column", async () => {
+    const base = snapshot();
+    fetchDesk.mockResolvedValue({
+      ...base,
+      routes: [...base.routes, {
+        key: "fable", name: "Fable 5.2", provider: "Claude", model: "claude-fable-5-2", models: ["claude-fable-5-2"],
+        budget: 1, roster_budget: 1, load: 0, live: [], signal: null, signals: null,
+      }],
+      model_activity: activity({ "claude-fable-5-2": use("Claude", 2, 64, NOW(), 2, ["hub"]) }),
+    });
+    const { container } = render(<DelegationDeskPanel unitNames={UNITS} />);
+    await flush();
+    expect(column(container, "Fable 5.2").querySelector(".dd-activity")?.textContent)
+      .toBe("Activity2 runningpeak 2 in 5 min · 64 calls in 24 h");
+    expect(column(container, "Opus 5.5").querySelector(".dd-activity")?.textContent)
+      .toBe("Activity0 running0 calls in 24 h");
+    expect(container.querySelector("[aria-label='Other models']")?.textContent).toContain("None used");
+  });
+
+  it("shows a source it has no reading from as not reported, never 0, and names it", async () => {
+    fetchDesk.mockResolvedValue(snapshot({
+      model_activity: {
+        state: "ok",
+        models: { "gpt-6.1-sol": use("Codex", 1, 9, NOW(), null, ["host:zeppola"]) },
+        sources: {
+          hub: { state: "no-signal", detail: "hub log reading is stale", age: 400 },
+          "host:zeppola": { state: "ok", detail: "Codex and Antigravity sessions", age: 10 },
+          "host:theshop": { state: "no-signal", detail: "host not reporting", age: 200 },
+        },
+      },
+    }));
+    const { container } = render(<DelegationDeskPanel unitNames={UNITS} />);
+    await flush();
+    const opus = column(container, "Opus 5.5").querySelector(".dd-activity");
+    expect(opus?.textContent).toBe("Activitynot reported");
+    expect(opus?.getAttribute("title")).toBe("hub: hub log reading is stale");
+    expect(column(container, "GPT-6.1 Sol").querySelector(".dd-activity")?.textContent).toContain("1 running");
+    expect(container.querySelector("[aria-label='Other models'] .dd-sec__meta")?.textContent)
+      .toBe("Not on a route · 24 h · hub, theshop not reporting");
+  });
+
+  it("an older desk without model activity shows no activity at all", async () => {
+    const { container } = await renderPanel();
+    expect(container.querySelector(".dd-activity")).toBeNull();
+    expect(container.querySelector("[aria-label='Other models']")).toBeNull();
   });
 
   it("looks different when the desk is unreachable than when it is empty", async () => {
@@ -597,5 +726,20 @@ describe("Delegation desk toggle", () => {
     await flush();
     expect(container.querySelector(".ov-dd")).not.toBeNull();
     expect(fetchDesk).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("modelName", () => {
+  it.each([
+    ["claude-fable-5-2", "Fable 5.2"],
+    ["claude-sonnet-5", "Sonnet 5"],
+    ["claude-haiku-5-5-20261001", "Haiku 5.5"],
+    ["gpt-6.1-sol", "GPT-6.1 Sol"],
+    ["gpt-5.6-luna", "GPT-5.6 Luna"],
+    ["gemini-4-hydrogen", "Gemini 4 Hydrogen"],
+    ["gemini-3.8-flash-lite", "Gemini 3.8 Flash Lite"],
+    ["qualitycorp-oq/DeepSeek-V4.1-Flash", "qualitycorp-oq/DeepSeek-V4.1-Flash"],
+  ])("%s → %s", (model, name) => {
+    expect(modelName(model)).toBe(name);
   });
 });

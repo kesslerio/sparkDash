@@ -25,16 +25,21 @@ import {
   localCapacity,
   localHeading,
   localReading,
+  otherModels,
   plural,
   prIsOpen,
+  quietSources,
   quotaView,
   rosterBudget,
+  routeActivity,
   routeName,
   safePrUrl,
   slotVerdict,
   timeLeft,
   windowName,
   withOverride,
+  type OtherModel,
+  type RouteActivity,
   type Verdict,
 } from "./delegationDesk";
 
@@ -326,6 +331,86 @@ function QuotaBar({ label, window: w, nowSec }: { label: string; window: DeskQuo
   );
 }
 
+/** "now", "14m ago", "3h ago", "2d ago": short enough for a narrow column. */
+function since(seconds: number): string {
+  if (seconds < 60) return "now";
+  if (seconds < 3_600) return `${Math.floor(seconds / 60)}m ago`;
+  if (seconds < 86_400) return `${Math.floor(seconds / 3_600)}h ago`;
+  return `${Math.floor(seconds / 86_400)}d ago`;
+}
+
+function lastUse(entry: { running: number; last_seen: number | null }, nowSec: number): string {
+  if (entry.running) return `${entry.running} running`;
+  return entry.last_seen != null ? since(nowSec - entry.last_seen) : "not used";
+}
+
+/**
+ * What the route's models are doing, read from the hub log (Claude) or each host's
+ * sessions (Codex, Antigravity): native subagents and sessions outside T3 included.
+ * Display only; the desk never counts it against a slot.
+ */
+function ActivityRow({ activity, nowSec }: { activity: RouteActivity; nowSec: number }) {
+  if (activity.state !== "ok") {
+    return (
+      <div className="dd-activity" title={activity.detail}>
+        <div className="dd-row">
+          <span className="dd-k">Activity</span>
+          <span className="dd-v dd-unknown">not reported</span>
+        </div>
+      </div>
+    );
+  }
+  const use = activity.use;
+  const peak = use.peak_5m != null ? `peak ${use.peak_5m} in 5 min · ` : "";
+  return (
+    <div className="dd-activity">
+      <div className="dd-row">
+        <span className="dd-k">Activity</span>
+        <span className="dd-v dd-num">{use.running} running</span>
+      </div>
+      <span className="dd-sub">
+        {peak}{use.requests_24h} {plural(use.requests_24h, "call")} in 24 h
+        {!use.running && use.last_seen != null ? ` · last ${since(nowSec - use.last_seen)}` : ""}
+      </span>
+    </div>
+  );
+}
+
+function OtherModels({ data, nowSec }: { data: DelegationDeskStatus; nowSec: number }) {
+  const activity = data.model_activity;
+  if (!activity) return null;
+  const others: OtherModel[] = otherModels(data.routes ?? [], activity);
+  const quiet = quietSources(activity);
+  return (
+    <section className="dd-sec" aria-label="Other models">
+      <div className="dd-sec__head">
+        <h3>Other models</h3>
+        <span className="dd-sec__meta">
+          Not on a route · 24 h{quiet.length ? ` · ${quiet.join(", ")} not reporting` : ""}
+        </span>
+      </div>
+      {activity.state !== "ok" ? (
+        <p className="dd-sub dd-unknown" role="status">Not reported</p>
+      ) : others.length ? (
+        <div className="dd-others">
+          {others.map((other) => (
+            <div
+              key={other.model}
+              className="dd-row"
+              title={`${other.model} · ${other.provider} · ${other.requests_24h} ${plural(other.requests_24h, "call")} in 24 h`}
+            >
+              <span className="dd-k dd-trunc">{other.name} <span className="dd-of">{other.provider}</span></span>
+              <span className="dd-v dd-num">{other.requests_24h} · {lastUse(other, nowSec)}</span>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="dd-sub">None used</p>
+      )}
+    </section>
+  );
+}
+
 interface ColumnProps {
   route: DeskRoute;
   data: DelegationDeskStatus;
@@ -436,6 +521,7 @@ function CloudColumn({ route, data, unitNames, editing, io, confirming, actions,
     bars = <div className="dd-row"><span className="dd-k">Quota</span><span className="dd-v dd-unknown">not reported</span></div>;
   }
   const verdict = cloudVerdict(route, quota.state);
+  const activity = routeActivity(route, data.model_activity);
   return (
     <div className="dd-col">
       <ColumnHead name={heading.title} sub={heading.sub} title={`${route.provider} · ${route.model}`} state={quota.state} />
@@ -443,6 +529,7 @@ function CloudColumn({ route, data, unitNames, editing, io, confirming, actions,
       {bars}
       {verdict ? <VerdictLine verdict={verdict} /> : null}
       {source ? <span className="dd-sub">{source}</span> : null}
+      {activity ? <ActivityRow activity={activity} nowSec={nowSec} /> : null}
       {editing && route.budget != null ? (
         <EditBlock route={route} name={name} override={override} io={io} confirming={confirming} actions={actions} nowSec={nowSec} />
       ) : null}
@@ -714,6 +801,7 @@ export function DelegationDeskPanel({ unitNames = {} }: { unitNames?: Record<str
           <div className="dd-cols">{cloud.map((route) => <CloudColumn key={route.key} {...column(route)} />)}</div>
         </section>
       ) : null}
+      <OtherModels data={data} nowSec={nowSec} />
       <div className="dd-legend" aria-hidden="true">
         <span><i />Held delegate slot</span>
         <span><i className="is-paused" />Paused</span>

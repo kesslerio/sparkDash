@@ -1268,6 +1268,8 @@ export interface DeskRoute {
   name?: string;
   provider: string;
   model: string;
+  /** Every model id the route answers to; the first is `model`. An older desk omits it. */
+  models?: string[];
   /** Effective budget: an override's value while one is active; null for quota-only routes. */
   budget: number | null;
   /** The budget in delegation.md. */
@@ -1321,8 +1323,38 @@ export interface DelegationDeskStatus {
   claims?: DeskClaim[];
   waiting?: DeskWaiting[];
   overrides?: Record<string, DeskOverride>;
+  /** Per-model use across the hub and every host. Display only; an older desk omits it. */
+  model_activity?: DeskModelActivity | null;
   /** The server holds the desk's admin token, so budgets can be changed. */
   canEdit: boolean;
+}
+
+export interface DeskModelUse {
+  /** Claude, Codex or Antigravity. */
+  provider: string;
+  /** Hub: requests in flight. Host sessions: turns or sessions in progress. */
+  running: number;
+  /** Most requests open at once in the last 5 minutes; null where the source can't tell. */
+  peak_5m: number | null;
+  requests_24h: number;
+  /** Unix seconds of the model's latest call. */
+  last_seen: number | null;
+  /** The sources that counted it: "hub" or "host:<name>". */
+  sources: string[];
+}
+
+export interface DeskActivitySource {
+  /** ok or no-signal. A no-signal source adds no models: unknown is never zero. */
+  state: string;
+  detail: string;
+  age: number | null;
+}
+
+/** Every model in use: Claude from the hub's log, Codex and Antigravity from each host's sessions. */
+export interface DeskModelActivity {
+  state: string;
+  models: Record<string, DeskModelUse>;
+  sources: Record<string, DeskActivitySource>;
 }
 
 export interface InferenceActivity {
